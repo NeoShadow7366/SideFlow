@@ -561,6 +561,16 @@ export const App: React.FC = () => {
         type="button"
         id="edge-peek-handle"
         data-testid="edge-peek-handle"
+        onMouseEnter={() => {
+          if (!isPanelOpen) {
+            window.sideflow?.setIgnoreMouseEvents?.(false);
+          }
+        }}
+        onMouseLeave={() => {
+          if (!isPanelOpen) {
+            window.sideflow?.setIgnoreMouseEvents?.(true);
+          }
+        }}
         onClick={() => togglePanel(true)}
         tabIndex={!isPanelOpen && showEdgeHandle ? 0 : -1}
         aria-hidden={isPanelOpen || !showEdgeHandle}

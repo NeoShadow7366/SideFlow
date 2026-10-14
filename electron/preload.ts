@@ -5,6 +5,7 @@ export interface SideFlowElectronAPI {
   launchNativeApp: (command: string) => Promise<{ success: boolean; error?: string }>;
   updateGlobalShortcut: (accelerator: string) => Promise<boolean>;
   setPanelVisibility: (visible: boolean) => void;
+  setIgnoreMouseEvents: (ignore: boolean) => void;
   openFileDialog: () => Promise<string[]>;
   getPathForFile: (file: File) => string;
   onSetPanelVisibility: (callback: (visible: boolean) => void) => () => void;
@@ -20,6 +21,7 @@ const sideflowAPI: SideFlowElectronAPI = {
   updateGlobalShortcut: (accelerator: string) =>
     ipcRenderer.invoke('update-global-shortcut', accelerator),
   setPanelVisibility: (visible: boolean) => ipcRenderer.send('set-panel-visibility', visible),
+  setIgnoreMouseEvents: (ignore: boolean) => ipcRenderer.send('set-ignore-mouse-events', ignore),
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
   getPathForFile: (file: File) => {
     try {

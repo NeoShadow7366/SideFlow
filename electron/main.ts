@@ -142,6 +142,8 @@ function togglePanelFromMain(forceState?: boolean): void {
     mainWindow.setIgnoreMouseEvents(false);
     mainWindow.show();
     mainWindow.focus();
+  } else {
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
   }
   mainWindow.webContents.send('set-panel-visibility', isPanelVisible);
 }
@@ -367,6 +369,15 @@ app.whenReady().then(() => {
     } else {
       // Forward mouse events so desktop underneath remains clickable while edge handle can still be hovered
       mainWindow.setIgnoreMouseEvents(true, { forward: true });
+    }
+  });
+
+  ipcMain.on('set-ignore-mouse-events', (_event, ignore: boolean) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (ignore) {
+      mainWindow.setIgnoreMouseEvents(true, { forward: true });
+    } else {
+      mainWindow.setIgnoreMouseEvents(false);
     }
   });
 

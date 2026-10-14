@@ -66,6 +66,7 @@ export interface SideFlowElectronBridge {
   launchNativeApp: (command: string) => Promise<{ success: boolean; error?: string }>;
   updateGlobalShortcut: (accelerator: string) => Promise<boolean>;
   setPanelVisibility: (visible: boolean) => void;
+  setIgnoreMouseEvents?: (ignore: boolean) => void;
   openFileDialog: () => Promise<string[]>;
   getPathForFile: (file: File) => string;
   onSetPanelVisibility: (callback: (visible: boolean) => void) => () => void;
