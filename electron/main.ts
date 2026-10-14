@@ -10,7 +10,7 @@ import {
   dialog,
   nativeImage,
 } from 'electron';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -18,32 +18,60 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isPanelVisible = true;
 let currentAccelerator = 'Alt+Space';
+let cachedStore: Record<string, unknown> | null = null;
+
+const ALLOWED_PROTOCOLS = new Set([
+  'https:',
+  'http:',
+  'vscode:',
+  'x-github-client:',
+  'spotify:',
+  'slack:',
+  'figma:',
+  'notion:',
+  'obsidian:',
+  'ms-calculator:',
+  'mailto:',
+]);
+
+const FORBIDDEN_STORE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function getStorePath(): string {
   return path.join(app.getPath('userData'), 'sideflow-config.json');
 }
 
 function readLocalStore(): Record<string, unknown> {
+  if (cachedStore) return cachedStore;
   try {
     const storePath = getStorePath();
     if (fs.existsSync(storePath)) {
       const raw = fs.readFileSync(storePath, 'utf-8');
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        cachedStore = parsed as Record<string, unknown>;
+        return cachedStore;
+      }
     }
   } catch (err) {
     console.error('[SideFlow] Failed to read local store:', err);
   }
-  return {};
+  cachedStore = {};
+  return cachedStore;
 }
 
 function writeLocalStore(key: string, value: unknown): void {
+  if (!key || FORBIDDEN_STORE_KEYS.has(key)) return;
   try {
     const storePath = getStorePath();
     const current = readLocalStore();
     current[key] = value;
-    fs.writeFileSync(storePath, JSON.stringify(current, null, 2), 'utf-8');
+    fs.promises
+      .writeFile(storePath, JSON.stringify(current, null, 2), 'utf-8')
+      .catch((err) => {
+        console.error('[SideFlow] Failed to write local store:', err);
+      });
   } catch (err) {
-    console.error('[SideFlow] Failed to write local store:', err);
+    console.error('[SideFlow] Failed to update local store:', err);
   }
 }
 
@@ -106,11 +134,12 @@ function updateTrayMenu(): void {
 }
 
 function togglePanelFromMain(forceState?: boolean): void {
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   const nextState = typeof forceState === 'boolean' ? forceState : !isPanelVisible;
   isPanelVisible = nextState;
 
   if (isPanelVisible) {
+    mainWindow.setIgnoreMouseEvents(false);
     mainWindow.show();
     mainWindow.focus();
   }
@@ -118,8 +147,9 @@ function togglePanelFromMain(forceState?: boolean): void {
 }
 
 function navigateToTabFromMain(tab: 'drawers' | 'flowchart' | 'notes' | 'settings'): void {
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   isPanelVisible = true;
+  mainWindow.setIgnoreMouseEvents(false);
   mainWindow.show();
   mainWindow.focus();
   mainWindow.webContents.send('set-panel-visibility', true);
@@ -127,9 +157,15 @@ function navigateToTabFromMain(tab: 'drawers' | 'flowchart' | 'notes' | 'setting
 }
 
 function registerGlobalHotkey(accelerator: string): boolean {
+  if (typeof accelerator !== 'string') return false;
+  const normalized = accelerator.replace(/\s+/g, '');
+  if (!/^(?:(?:CommandOrControl|Ctrl|Alt|Shift|Super)\+)+[A-Za-z0-9]+$/i.test(normalized)) {
+    return false;
+  }
+
+  const previousAccelerator = currentAccelerator;
   try {
     globalShortcut.unregisterAll();
-    const normalized = accelerator.replace(/\s+/g, '');
     const registered = globalShortcut.register(normalized, () => {
       togglePanelFromMain();
     });
@@ -138,8 +174,23 @@ function registerGlobalHotkey(accelerator: string): boolean {
       updateTrayMenu();
       return true;
     }
+    // Restore previous accelerator if registration failed
+    if (previousAccelerator) {
+      globalShortcut.register(previousAccelerator, () => {
+        togglePanelFromMain();
+      });
+    }
   } catch (err) {
     console.error('[SideFlow] Failed to register global shortcut:', accelerator, err);
+    if (previousAccelerator) {
+      try {
+        globalShortcut.register(previousAccelerator, () => {
+          togglePanelFromMain();
+        });
+      } catch {
+        // ignore
+      }
+    }
   }
   return false;
 }
@@ -155,6 +206,20 @@ function launchNativeCommand(command: string): Promise<{ success: boolean; error
     // Check if URL or custom URI protocol (e.g. vscode://, spotify://, slack://, figma://, ms-calculator://)
     const isUriOrUrl = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed);
     if (isUriOrUrl) {
+      try {
+        const parsed = new URL(trimmed);
+        if (!ALLOWED_PROTOCOLS.has(parsed.protocol.toLowerCase())) {
+          resolve({
+            success: false,
+            error: `Blocked disallowed URI protocol: ${parsed.protocol}`,
+          });
+          return;
+        }
+      } catch {
+        resolve({ success: false, error: 'Invalid URI format' });
+        return;
+      }
+
       shell
         .openExternal(trimmed)
         .then(() => resolve({ success: true }))
@@ -162,31 +227,42 @@ function launchNativeCommand(command: string): Promise<{ success: boolean; error
       return;
     }
 
-    // Local file path, executable, shortcut, script, or folder
+    // Local file path, executable, shortcut, script, or folder (no shell execution to prevent command injection)
+    const resolvedPath = path.resolve(trimmed);
     shell
-      .openPath(trimmed)
+      .openPath(resolvedPath)
       .then((errMessage) => {
         if (!errMessage) {
           resolve({ success: true });
         } else {
-          // Fallback to child_process.exec
-          exec(`"${trimmed}"`, (execErr) => {
+          // Safe fallback using execFile with shell: false
+          execFile(
+            resolvedPath,
+            [],
+            { shell: false, windowsVerbatimArguments: false },
+            (execErr) => {
+              if (execErr) {
+                resolve({ success: false, error: execErr.message });
+              } else {
+                resolve({ success: true });
+              }
+            }
+          );
+        }
+      })
+      .catch(() => {
+        execFile(
+          resolvedPath,
+          [],
+          { shell: false, windowsVerbatimArguments: false },
+          (execErr) => {
             if (execErr) {
               resolve({ success: false, error: execErr.message });
             } else {
               resolve({ success: true });
             }
-          });
-        }
-      })
-      .catch((err: Error) => {
-        exec(`"${trimmed}"`, (execErr) => {
-          if (execErr) {
-            resolve({ success: false, error: err.message });
-          } else {
-            resolve({ success: true });
           }
-        });
+        );
       });
   });
 }
@@ -222,6 +298,24 @@ function createWindow(): void {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
+  // Prevent untrusted navigation inside the Electron shell
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    if (devServerUrl && navigationUrl.startsWith(devServerUrl)) return;
+    event.preventDefault();
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        shell.openExternal(url);
+      }
+    } catch {
+      // ignore invalid URLs
+    }
+    return { action: 'deny' };
+  });
+
   mainWindow.on('blur', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('window-blur');
@@ -244,20 +338,19 @@ app.whenReady().then(() => {
     togglePanelFromMain();
   });
 
-  // Register default global shortcut
-  registerGlobalHotkey('Alt+Space');
+  // Register persisted or default global shortcut
+  const store = readLocalStore();
+  const savedShortcut = store.sideflow_shortcut as { label?: string } | undefined;
+  const initialAccel = savedShortcut?.label
+    ? savedShortcut.label.replace(/\s+/g, '')
+    : 'Alt+Space';
+  if (!registerGlobalHotkey(initialAccel)) {
+    registerGlobalHotkey('Alt+Space');
+  }
 
   // IPC Handlers
-  ipcMain.on('launch-native-app', (_event, command: string) => {
-    launchNativeCommand(command);
-  });
-
   ipcMain.handle('launch-native-app', async (_event, command: string) => {
     return launchNativeCommand(command);
-  });
-
-  ipcMain.on('update-global-shortcut', (_event, accelerator: string) => {
-    registerGlobalHotkey(accelerator);
   });
 
   ipcMain.handle('update-global-shortcut', async (_event, accelerator: string) => {
@@ -268,8 +361,12 @@ app.whenReady().then(() => {
     isPanelVisible = Boolean(visible);
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (isPanelVisible) {
+      mainWindow.setIgnoreMouseEvents(false);
       mainWindow.show();
       mainWindow.focus();
+    } else {
+      // Forward mouse events so desktop underneath remains clickable while edge handle can still be hovered
+      mainWindow.setIgnoreMouseEvents(true, { forward: true });
     }
   });
 

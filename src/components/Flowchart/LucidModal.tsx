@@ -28,6 +28,15 @@ export const LucidModal: React.FC<LucidModalProps> = ({
     }
   }, [isOpen, flowData]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const handleCopyMermaid = async () => {
@@ -76,13 +85,17 @@ export const LucidModal: React.FC<LucidModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="Lucidchart Integration Hub"
+      onClick={onClose}
       className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
     >
-      <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-5 shadow-2xl space-y-4"
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
-              <Share2 className="w-4 h-4" />
+              <Share2 className="w-4 h-4" aria-hidden="true" />
             </div>
             <div>
               <h3 className="text-sm font-semibold text-white">
@@ -100,7 +113,7 @@ export const LucidModal: React.FC<LucidModalProps> = ({
             onClick={onClose}
             className="text-slate-400 hover:text-white"
           >
-            <X className="w-4 h-4" />
+            <X className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
 
@@ -120,7 +133,8 @@ export const LucidModal: React.FC<LucidModalProps> = ({
                   className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1"
                   title="Parse edited Mermaid code back onto the canvas"
                 >
-                  <RefreshCw className="w-3 h-3" /> Sync to Canvas
+                  <RefreshCw className="w-3 h-3" aria-hidden="true" /> Sync to
+                  Canvas
                 </button>
               )}
               <button
@@ -128,7 +142,7 @@ export const LucidModal: React.FC<LucidModalProps> = ({
                 onClick={handleCopyMermaid}
                 className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
               >
-                <Copy className="w-3 h-3" /> Copy Code
+                <Copy className="w-3 h-3" aria-hidden="true" /> Copy Code
               </button>
             </div>
           </div>
@@ -161,7 +175,7 @@ export const LucidModal: React.FC<LucidModalProps> = ({
               className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs flex items-center gap-1 shrink-0"
             >
               <span>Open Lucidchart</span>
-              <ExternalLink className="w-3.5 h-3.5" />
+              <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
           </div>
         </div>

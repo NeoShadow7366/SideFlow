@@ -30,6 +30,7 @@ export const AppTile: React.FC<AppTileProps> = ({
   const styleClass = colorMap[app.color] || colorMap.indigo;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onLaunch(app, drawerId);
@@ -57,7 +58,7 @@ export const AppTile: React.FC<AppTileProps> = ({
             title="Edit App"
             className="w-5 h-5 rounded-full bg-slate-950/80 text-slate-400 hover:text-indigo-400 flex items-center justify-center transition"
           >
-            <Pencil className="w-2.5 h-2.5" />
+            <Pencil className="w-2.5 h-2.5" aria-hidden="true" />
           </button>
         )}
         <button
@@ -70,19 +71,23 @@ export const AppTile: React.FC<AppTileProps> = ({
           title="Remove App"
           className="w-5 h-5 rounded-full bg-slate-950/80 text-slate-400 hover:text-rose-400 flex items-center justify-center transition"
         >
-          <X className="w-3 h-3" />
+          <X className="w-3 h-3" aria-hidden="true" />
         </button>
       </div>
 
       <div
         className={`w-11 h-11 rounded-2xl border ${styleClass} flex items-center justify-center mb-2 shadow-inner`}
       >
-        <DynamicIcon name={app.icon || 'app-window'} className="w-5 h-5" />
+        <DynamicIcon
+          name={app.icon || 'app-window'}
+          className="w-5 h-5"
+          aria-hidden="true"
+        />
       </div>
 
       <span className="text-xs font-medium text-slate-200 line-clamp-1">{app.name}</span>
       <span
-        className="text-[10px] font-mono text-slate-500 truncate max-w-full mt-0.5"
+        className="text-[10px] font-mono text-slate-400 truncate max-w-full mt-0.5"
         title={app.cmd}
       >
         {app.cmd}

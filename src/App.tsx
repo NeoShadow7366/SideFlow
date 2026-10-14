@@ -76,6 +76,8 @@ export const App: React.FC = () => {
   );
 
   const toastTimerRef = useRef<number | null>(null);
+  const isPinnedRef = useRef<boolean>(isPinned);
+  isPinnedRef.current = isPinned;
   const isElectronWindow = Boolean(window.sideflow?.isElectron);
 
   const notify = useCallback(
@@ -95,6 +97,14 @@ export const App: React.FC = () => {
     },
     []
   );
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   const togglePanel = useCallback((forceState?: boolean) => {
     setIsPanelOpen((prev) => {
@@ -131,8 +141,8 @@ export const App: React.FC = () => {
       setIsPanelOpen(true);
     });
     const unsubBlur = window.sideflow?.onWindowBlur?.(() => {
-      if (!isPinned) {
-        setIsPanelOpen(false);
+      if (!isPinnedRef.current) {
+        togglePanel(false);
       }
     });
 
@@ -141,20 +151,25 @@ export const App: React.FC = () => {
       unsubSwitchTab?.();
       unsubBlur?.();
     };
-  }, [isPinned]);
+  }, [togglePanel]);
 
   // Global keyboard shortcut & recorder listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isRecordingHotkey) {
         e.preventDefault();
+        if (e.key === 'Escape') {
+          setIsRecordingHotkey(false);
+          return;
+        }
         if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
 
         const parts: string[] = [];
         if (e.ctrlKey) parts.push('Ctrl');
         if (e.altKey) parts.push('Alt');
         if (e.shiftKey) parts.push('Shift');
-        const keyName = e.code === 'Space' || e.key === ' ' ? 'Space' : e.key.toUpperCase();
+        const keyName =
+          e.code === 'Space' || e.key === ' ' ? 'Space' : e.key.toUpperCase();
         parts.push(keyName);
 
         const label = parts.join(' + ');
@@ -266,7 +281,7 @@ export const App: React.FC = () => {
           <div className="flex flex-wrap items-center justify-between gap-4 max-w-4xl bg-slate-900/80 backdrop-blur-md border border-slate-700/60 rounded-2xl px-5 py-3.5 shadow-2xl z-10">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
-                <Layers className="w-5 h-5" />
+                <Layers className="w-5 h-5" aria-hidden="true" />
               </div>
               <div>
                 <div className="flex items-center gap-2">
@@ -297,7 +312,7 @@ export const App: React.FC = () => {
                 onClick={() => togglePanel()}
                 className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition flex items-center gap-1.5 shadow-lg shadow-indigo-600/30"
               >
-                <PanelRightOpen className="w-4 h-4" />
+                <PanelRightOpen className="w-4 h-4" aria-hidden="true" />
                 <span>Toggle Panel</span>
               </button>
               <button
@@ -305,7 +320,7 @@ export const App: React.FC = () => {
                 onClick={() => setIsElectronModalOpen(true)}
                 className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600/80 text-xs font-medium text-slate-200 transition flex items-center gap-1.5"
               >
-                <Terminal className="w-4 h-4 text-amber-400" />
+                <Terminal className="w-4 h-4 text-amber-400" aria-hidden="true" />
                 <span>Get Native .EXE / Tray Code</span>
               </button>
             </div>
@@ -314,24 +329,46 @@ export const App: React.FC = () => {
           {/* Desktop Mock Icons (Left side) */}
           <div className="grid grid-cols-1 gap-5 w-24 my-auto opacity-85">
             <div
+              role="button"
+              tabIndex={0}
+              aria-label="Launch Projects Explorer"
               onDoubleClick={() =>
                 notify('Launching Workspace Explorer...', 'folder-open', 'explorer.exe')
               }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  notify(
+                    'Launching Workspace Explorer...',
+                    'folder-open',
+                    'explorer.exe'
+                  );
+                }
+              }}
               className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/10 cursor-pointer transition group"
             >
               <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-400/30 flex items-center justify-center text-amber-300 group-hover:scale-105 transition">
-                <Folder className="w-6 h-6" />
+                <Folder className="w-6 h-6" aria-hidden="true" />
               </div>
               <span className="text-[11px] text-center font-medium text-slate-200 drop-shadow">
                 Projects
               </span>
             </div>
             <div
+              role="button"
+              tabIndex={0}
+              aria-label="Open Electron Native Wrapper Guide"
               onDoubleClick={() => setIsElectronModalOpen(true)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setIsElectronModalOpen(true);
+                }
+              }}
               className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/10 cursor-pointer transition group"
             >
               <div className="w-12 h-12 rounded-2xl bg-cyan-500/20 border border-cyan-400/30 flex items-center justify-center text-cyan-300 group-hover:scale-105 transition">
-                <FileCode className="w-6 h-6" />
+                <FileCode className="w-6 h-6" aria-hidden="true" />
               </div>
               <span className="text-[11px] text-center font-medium text-slate-200 drop-shadow">
                 Electron Guide
@@ -343,7 +380,7 @@ export const App: React.FC = () => {
           <div className="fixed bottom-0 inset-x-0 h-12 bg-slate-950/90 backdrop-blur-xl border-t border-slate-800/80 px-4 flex items-center justify-between z-40">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 rounded-lg bg-slate-800/90 flex items-center justify-center text-sky-400">
-                <LayoutGrid className="w-4 h-4" />
+                <LayoutGrid className="w-4 h-4" aria-hidden="true" />
               </div>
               <span className="text-xs text-slate-400 hidden sm:inline">
                 Desktop Simulation Mode
@@ -356,6 +393,8 @@ export const App: React.FC = () => {
               {isTrayMenuOpen && (
                 <div
                   id="tray-context-menu"
+                  role="menu"
+                  aria-label="SideFlow System Tray Menu"
                   className="absolute bottom-14 right-4 w-56 bg-slate-900/95 backdrop-blur-xl border border-slate-700 rounded-2xl p-2 shadow-2xl z-50"
                 >
                   <div className="px-3 py-2 border-b border-slate-800 mb-1">
@@ -369,6 +408,7 @@ export const App: React.FC = () => {
                   </div>
                   <button
                     type="button"
+                    role="menuitem"
                     onClick={() => {
                       togglePanel();
                       setIsTrayMenuOpen(false);
@@ -376,7 +416,10 @@ export const App: React.FC = () => {
                     className="w-full text-left px-3 py-2 text-xs rounded-xl hover:bg-slate-800 flex items-center justify-between text-slate-200"
                   >
                     <span className="flex items-center gap-2">
-                      <PanelRight className="w-3.5 h-3.5 text-indigo-400" />
+                      <PanelRight
+                        className="w-3.5 h-3.5 text-indigo-400"
+                        aria-hidden="true"
+                      />
                       Toggle Side Panel
                     </span>
                     <span
@@ -388,6 +431,7 @@ export const App: React.FC = () => {
                   </button>
                   <button
                     type="button"
+                    role="menuitem"
                     onClick={() => {
                       setActiveTab('drawers');
                       togglePanel(true);
@@ -395,11 +439,12 @@ export const App: React.FC = () => {
                     }}
                     className="w-full text-left px-3 py-2 text-xs rounded-xl hover:bg-slate-800 flex items-center gap-2 text-slate-200"
                   >
-                    <Grid className="w-3.5 h-3.5 text-amber-400" /> Open App
-                    Drawers
+                    <Grid className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />{' '}
+                    Open App Drawers
                   </button>
                   <button
                     type="button"
+                    role="menuitem"
                     onClick={() => {
                       setActiveTab('flowchart');
                       togglePanel(true);
@@ -407,11 +452,15 @@ export const App: React.FC = () => {
                     }}
                     className="w-full text-left px-3 py-2 text-xs rounded-xl hover:bg-slate-800 flex items-center gap-2 text-slate-200"
                   >
-                    <GitBranch className="w-3.5 h-3.5 text-cyan-400" /> Quick
-                    Flowchart
+                    <GitBranch
+                      className="w-3.5 h-3.5 text-cyan-400"
+                      aria-hidden="true"
+                    />{' '}
+                    Quick Flowchart
                   </button>
                   <button
                     type="button"
+                    role="menuitem"
                     onClick={() => {
                       setActiveTab('notes');
                       togglePanel(true);
@@ -419,12 +468,13 @@ export const App: React.FC = () => {
                     }}
                     className="w-full text-left px-3 py-2 text-xs rounded-xl hover:bg-slate-800 flex items-center gap-2 text-slate-200"
                   >
-                    <Mic className="w-3.5 h-3.5 text-rose-400" /> Voice Dictation
-                    Note
+                    <Mic className="w-3.5 h-3.5 text-rose-400" aria-hidden="true" />{' '}
+                    Voice Dictation Note
                   </button>
                   <div className="border-t border-slate-800 my-1" />
                   <button
                     type="button"
+                    role="menuitem"
                     onClick={() => {
                       setActiveTab('settings');
                       togglePanel(true);
@@ -432,8 +482,11 @@ export const App: React.FC = () => {
                     }}
                     className="w-full text-left px-3 py-2 text-xs rounded-xl hover:bg-slate-800 flex items-center gap-2 text-slate-300"
                   >
-                    <Settings className="w-3.5 h-3.5 text-slate-400" /> Configure
-                    Hotkey
+                    <Settings
+                      className="w-3.5 h-3.5 text-slate-400"
+                      aria-hidden="true"
+                    />{' '}
+                    Configure Hotkey
                   </button>
                 </div>
               )}
@@ -442,6 +495,8 @@ export const App: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIsTrayMenuOpen((prev) => !prev)}
+                aria-expanded={isTrayMenuOpen}
+                aria-controls="tray-context-menu"
                 title="SideFlow System Tray Icon (Click for menu)"
                 className="px-2.5 py-1.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 flex items-center gap-2 text-indigo-300 transition"
               >
@@ -449,13 +504,13 @@ export const App: React.FC = () => {
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-400" />
                 </span>
-                <Zap className="w-3.5 h-3.5" />
+                <Zap className="w-3.5 h-3.5" aria-hidden="true" />
                 <span className="text-xs font-medium">SideFlow Tray</span>
               </button>
 
               <div className="flex items-center gap-2 text-slate-400 text-xs pl-2 border-l border-slate-800">
-                <Wifi className="w-3.5 h-3.5" />
-                <Volume2 className="w-3.5 h-3.5" />
+                <Wifi className="w-3.5 h-3.5" aria-hidden="true" />
+                <Volume2 className="w-3.5 h-3.5" aria-hidden="true" />
                 <span
                   id="tray-clock"
                   className="font-mono text-[11px] text-slate-300"
@@ -474,7 +529,7 @@ export const App: React.FC = () => {
         role="status"
         aria-live="polite"
         className={`fixed ${
-          isElectronWindow ? 'bottom-4 right-4' : 'bottom-16 left-6'
+          isElectronWindow ? 'bottom-16 right-4' : 'bottom-16 left-6'
         } bg-slate-900/95 border border-indigo-500/40 text-white px-4 py-3 rounded-2xl shadow-2xl backdrop-blur-md flex items-center gap-3 transition-all duration-300 z-50 ${
           toast
             ? 'opacity-100 translate-y-0'
@@ -482,7 +537,11 @@ export const App: React.FC = () => {
         }`}
       >
         <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
-          <DynamicIcon name={toast?.icon || 'rocket'} className="w-5 h-5" />
+          <DynamicIcon
+            name={toast?.icon || 'rocket'}
+            className="w-5 h-5"
+            aria-hidden="true"
+          />
         </div>
         <div>
           <div id="toast-title" className="text-xs font-semibold text-white">
@@ -503,15 +562,20 @@ export const App: React.FC = () => {
         id="edge-peek-handle"
         data-testid="edge-peek-handle"
         onClick={() => togglePanel(true)}
+        tabIndex={!isPanelOpen && showEdgeHandle ? 0 : -1}
+        aria-hidden={isPanelOpen || !showEdgeHandle}
         aria-label={`Open SideFlow Panel (${shortcut.label})`}
         title={`Open SideFlow Panel (${shortcut.label})`}
         className={`fixed right-0 top-1/2 -translate-y-1/2 z-30 bg-indigo-600/80 hover:bg-indigo-500 text-white py-6 px-1.5 rounded-l-xl shadow-lg border-y border-l border-indigo-300/40 transition-all duration-300 hover:px-2.5 group ${
           !isPanelOpen && showEdgeHandle
             ? 'opacity-100'
-            : 'opacity-0 pointer-events-none'
+            : 'opacity-0 pointer-events-none invisible'
         }`}
       >
-        <ChevronLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" />
+        <ChevronLeft
+          className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform"
+          aria-hidden="true"
+        />
       </button>
 
       {/* Main Slide-Out Side Panel */}
@@ -519,12 +583,13 @@ export const App: React.FC = () => {
         id="side-panel"
         data-testid="side-panel"
         aria-label="SideFlow Utility Panel"
+        aria-hidden={!isPanelOpen}
         className={`fixed top-0 right-0 ${
           isElectronWindow ? 'bottom-0 w-full' : 'bottom-12 w-full sm:w-[500px] md:w-[560px]'
         } bg-slate-900/90 backdrop-blur-2xl border-l border-slate-700/70 shadow-[-20px_0_50px_rgba(0,0,0,0.65)] z-30 flex flex-col side-panel-transition ${
           isPanelOpen
             ? 'translate-x-0'
-            : 'translate-x-full opacity-0 pointer-events-none'
+            : 'translate-x-full opacity-0 pointer-events-none invisible'
         }`}
       >
         <Header

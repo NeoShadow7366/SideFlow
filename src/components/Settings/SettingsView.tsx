@@ -60,6 +60,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <button
             type="button"
             id="record-hotkey-btn"
+            aria-pressed={isRecordingHotkey}
             onClick={onStartRecordingHotkey}
             className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-medium text-white transition flex items-center justify-center gap-2 ${
               isRecordingHotkey
@@ -67,8 +68,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 : 'bg-indigo-600 hover:bg-indigo-500'
             }`}
           >
-            <Keyboard className="w-4 h-4" />
-            <span id="record-hotkey-label">
+            <Keyboard className="w-4 h-4" aria-hidden="true" />
+            <span id="record-hotkey-label" aria-live="polite">
               {isRecordingHotkey
                 ? 'Press any key combo now (e.g. Ctrl + Space, Alt + Q)...'
                 : 'Click & Press New Shortcut Combo'}
@@ -140,7 +141,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 onClick={onExportBackup}
                 className="flex-1 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200 flex items-center justify-center gap-1.5 transition"
               >
-                <Download className="w-3.5 h-3.5 text-indigo-400" />
+                <Download className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
                 <span>Export Config JSON</span>
               </button>
             )}
@@ -150,7 +151,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 onClick={onResetAllData}
                 className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-rose-950/60 border border-slate-700 hover:border-rose-500/40 text-xs text-slate-300 hover:text-rose-300 flex items-center justify-center gap-1.5 transition"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
+                <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
                 <span>Reset Defaults</span>
               </button>
             )}
@@ -161,7 +162,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {/* Native Desktop Packaging Guide Card */}
       <div className="p-4 rounded-2xl bg-gradient-to-br from-indigo-950/70 to-slate-900 border border-indigo-500/30 space-y-2.5">
         <div className="flex items-center gap-2 text-indigo-300 font-semibold text-xs">
-          <Cpu className="w-4 h-4" />
+          <Cpu className="w-4 h-4" aria-hidden="true" />
           <span>Want to run this natively in Windows / macOS System Tray?</span>
         </div>
         <p className="text-[11px] text-slate-300 leading-relaxed">
@@ -176,7 +177,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           onClick={onOpenElectronModal}
           className="w-full py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition flex items-center justify-center gap-1.5"
         >
-          <Code className="w-4 h-4" />
+          <Code className="w-4 h-4" aria-hidden="true" />
           <span>View Electron System Tray &amp; App Launcher Script</span>
         </button>
       </div>

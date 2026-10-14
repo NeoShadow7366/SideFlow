@@ -6,6 +6,21 @@ export interface InferredAppMeta {
   color: AccentColor;
 }
 
+const SAFE_URI_PROTOCOLS = new Set([
+  'https:',
+  'http:',
+  'vscode:',
+  'x-github-client:',
+  'spotify:',
+  'slack:',
+  'figma:',
+  'notion:',
+  'obsidian:',
+  'ms-calculator:',
+  'mailto:',
+  'app:',
+]);
+
 export function extractFilenameFromPath(fullPath: string): string {
   const parts = fullPath.split(/[\\/]/);
   return parts[parts.length - 1] || fullPath;
@@ -86,14 +101,22 @@ export async function executeAppCommand(command: string): Promise<void> {
     }
   }
 
-  // 3. Browser environment fallback
+  // 3. Browser environment fallback with protocol validation
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
     window.open(trimmed, '_blank', 'noopener,noreferrer');
-  } else if (trimmed.includes('://')) {
-    const iframe = document.createElement('iframe');
-    iframe.style.display = 'none';
-    iframe.src = trimmed;
-    document.body.appendChild(iframe);
-    setTimeout(() => iframe.remove(), 2000);
+  } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      if (!SAFE_URI_PROTOCOLS.has(parsed.protocol.toLowerCase())) {
+        return;
+      }
+      const iframe = document.createElement('iframe');
+      iframe.style.display = 'none';
+      iframe.src = trimmed;
+      document.body.appendChild(iframe);
+      setTimeout(() => iframe.remove(), 2000);
+    } catch {
+      // Ignore malformed URIs
+    }
   }
 }

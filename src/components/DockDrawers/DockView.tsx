@@ -124,7 +124,6 @@ export const DockView: React.FC<DockViewProps> = ({
   };
 
   const handleBrowseFilesForDrawer = async (drawerId: string) => {
-    // Use native Electron file picker if available
     if (window.sideflow?.openFileDialog) {
       const filePaths = await window.sideflow.openFileDialog();
       if (!filePaths || filePaths.length === 0) return;
@@ -143,7 +142,6 @@ export const DockView: React.FC<DockViewProps> = ({
       return;
     }
 
-    // Fallback to HTML file input
     setTargetBrowseDrawerId(drawerId);
     if (drawerFileInputRef.current) {
       drawerFileInputRef.current.value = '';
@@ -254,7 +252,6 @@ export const DockView: React.FC<DockViewProps> = ({
 
     if (editingAppInfo) {
       onChangeDrawers((prev) => {
-        // Remove from old drawer if moved
         const updated = prev.map((d) => {
           if (d.id === editingAppInfo.drawerId && d.id !== targetDrawerId) {
             return {
@@ -338,7 +335,6 @@ export const DockView: React.FC<DockViewProps> = ({
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && filterText) {
-      // Find first matching app across visible drawers
       for (const drawer of visibleDrawers) {
         const match = drawer.apps.find(
           (a) =>
@@ -350,7 +346,6 @@ export const DockView: React.FC<DockViewProps> = ({
           return;
         }
       }
-      // Or if it looks like a URL/command, launch directly
       if (filterText.includes('://') || filterText.startsWith('http')) {
         onNotify(`Launching ${searchQuery}...`, 'rocket', searchQuery);
         executeAppCommand(searchQuery);
@@ -367,7 +362,10 @@ export const DockView: React.FC<DockViewProps> = ({
       {/* Search & Quick Add Bar */}
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <Search
+            className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"
+            aria-hidden="true"
+          />
           <input
             id="app-search-input"
             type="text"
@@ -376,7 +374,7 @@ export const DockView: React.FC<DockViewProps> = ({
             onKeyDown={handleSearchKeyDown}
             placeholder="Filter apps or type to launch..."
             aria-label="Filter apps or type to launch"
-            className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 outline-none transition"
+            className="w-full bg-slate-950/70 border border-slate-800 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/40 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-400 outline-none transition"
           />
         </div>
         <button
@@ -387,7 +385,7 @@ export const DockView: React.FC<DockViewProps> = ({
           }}
           className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 transition shrink-0"
         >
-          <FolderPlus className="w-3.5 h-3.5 text-amber-400" />
+          <FolderPlus className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
           <span>New Drawer</span>
         </button>
         <button
@@ -395,7 +393,7 @@ export const DockView: React.FC<DockViewProps> = ({
           onClick={openAddAppModal}
           className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white flex items-center gap-1.5 transition shrink-0 shadow-lg shadow-indigo-600/20"
         >
-          <Plus className="w-3.5 h-3.5" />
+          <Plus className="w-3.5 h-3.5" aria-hidden="true" />
           <span>Add App</span>
         </button>
       </div>
@@ -403,10 +401,18 @@ export const DockView: React.FC<DockViewProps> = ({
       {/* ObjectDock Style Drawer Selector Pills */}
       <div
         id="drawer-tabs-bar"
+        role="group"
+        aria-label="Filter by drawer"
+        onWheel={(e) => {
+          if (e.deltaY !== 0) {
+            e.currentTarget.scrollLeft += e.deltaY;
+          }
+        }}
         className="flex items-center gap-1.5 overflow-x-auto pb-1"
       >
         <button
           type="button"
+          aria-pressed={activeFilter === 'all'}
           onClick={() => setActiveFilter('all')}
           className={`px-3 py-1 rounded-full text-xs font-medium transition shrink-0 ${
             activeFilter === 'all'
@@ -420,6 +426,7 @@ export const DockView: React.FC<DockViewProps> = ({
           <button
             key={d.id}
             type="button"
+            aria-pressed={activeFilter === d.id}
             onClick={() => setActiveFilter(d.id)}
             className={`px-3 py-1 rounded-full text-xs font-medium transition shrink-0 ${
               activeFilter === d.id
@@ -464,14 +471,21 @@ export const DockView: React.FC<DockViewProps> = ({
       {/* Bottom Dock Status Footer */}
       <div className="px-3.5 py-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
         <span className="flex items-center gap-1.5">
-          <UploadCloud className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+          <UploadCloud
+            className="w-3.5 h-3.5 text-indigo-400 shrink-0"
+            aria-hidden="true"
+          />
           <span>
             Drag &amp; drop local <code className="text-slate-300 font-mono">.exe</code>,{' '}
             <code className="text-slate-300 font-mono">.app</code>, shortcuts, or files
             directly into any drawer
           </span>
         </span>
-        <span id="drawer-count-summary" className="font-mono text-slate-300 shrink-0 ml-2">
+        <span
+          id="drawer-count-summary"
+          aria-live="polite"
+          className="font-mono text-slate-300 shrink-0 ml-2"
+        >
           {drawers.length} Drawers • {totalApps} Apps
         </span>
       </div>
@@ -481,6 +495,8 @@ export const DockView: React.FC<DockViewProps> = ({
         ref={drawerFileInputRef}
         type="file"
         multiple
+        tabIndex={-1}
+        aria-hidden="true"
         className="hidden"
         onChange={handleDrawerFileInputChange}
       />
@@ -495,12 +511,19 @@ export const DockView: React.FC<DockViewProps> = ({
               ? 'Edit Application in Dock Drawer'
               : 'Add Application to Dock Drawer'
           }
+          onClick={() => setIsAppModalOpen(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setIsAppModalOpen(false);
+          }}
           className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
         >
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4"
+          >
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                <AppWindow className="w-4 h-4 text-indigo-400" />
+                <AppWindow className="w-4 h-4 text-indigo-400" aria-hidden="true" />
                 <span>
                   {editingAppInfo
                     ? 'Edit Application in Dock Drawer'
@@ -513,7 +536,7 @@ export const DockView: React.FC<DockViewProps> = ({
                 onClick={() => setIsAppModalOpen(false)}
                 className="text-slate-400 hover:text-white"
               >
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
 
@@ -528,6 +551,7 @@ export const DockView: React.FC<DockViewProps> = ({
                 <input
                   id="new-app-name"
                   type="text"
+                  autoFocus
                   value={appName}
                   onChange={(e) => setAppName(e.target.value)}
                   placeholder="e.g., Visual Studio Code, Spotify, Obsidian"
@@ -578,17 +602,19 @@ export const DockView: React.FC<DockViewProps> = ({
                     title="Browse Local File"
                     className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs text-slate-200 flex items-center gap-1 shrink-0"
                   >
-                    <FolderSearch className="w-3.5 h-3.5 text-amber-400" />
+                    <FolderSearch className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
                     <span>Browse</span>
                   </button>
                 </div>
                 <input
                   ref={modalFileInputRef}
                   type="file"
+                  tabIndex={-1}
+                  aria-hidden="true"
                   className="hidden"
                   onChange={handleModalFileInputChange}
                 />
-                <p className="text-[10px] text-slate-500 mt-1">
+                <p className="text-[10px] text-slate-400 mt-1">
                   Tip: You can also drag &amp; drop files from your desktop directly onto
                   any drawer card.
                 </p>
@@ -670,12 +696,19 @@ export const DockView: React.FC<DockViewProps> = ({
           role="dialog"
           aria-modal="true"
           aria-label="Create New App Drawer"
+          onClick={() => setIsDrawerModalOpen(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setIsDrawerModalOpen(false);
+          }}
           className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
         >
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-slate-900 border border-slate-700 rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4"
+          >
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                <FolderPlus className="w-4 h-4 text-amber-400" />
+                <FolderPlus className="w-4 h-4 text-amber-400" aria-hidden="true" />
                 <span>Create New App Drawer</span>
               </h3>
               <button
@@ -684,7 +717,7 @@ export const DockView: React.FC<DockViewProps> = ({
                 onClick={() => setIsDrawerModalOpen(false)}
                 className="text-slate-400 hover:text-white"
               >
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
 
@@ -698,6 +731,7 @@ export const DockView: React.FC<DockViewProps> = ({
               <input
                 id="new-drawer-title"
                 type="text"
+                autoFocus
                 value={newDrawerTitle}
                 onChange={(e) => setNewDrawerTitle(e.target.value)}
                 onKeyDown={(e) => {

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Terminal, X, Copy } from 'lucide-react';
 import { ELECTRON_WRAPPER_CODE } from '../utils/defaults';
 
@@ -13,6 +13,15 @@ export const ElectronModal: React.FC<ElectronModalProps> = ({
   onClose,
   onNotify,
 }) => {
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const handleCopyCode = async () => {
@@ -43,13 +52,17 @@ export const ElectronModal: React.FC<ElectronModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="Run SideFlow as a Native OS Background Tray App"
+      onClick={onClose}
       className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4"
     >
-      <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-5 shadow-2xl space-y-4 max-h-[90vh] flex flex-col">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-5 shadow-2xl space-y-4 max-h-[90vh] flex flex-col"
+      >
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300">
-              <Terminal className="w-4 h-4" />
+              <Terminal className="w-4 h-4" aria-hidden="true" />
             </div>
             <div>
               <h3 className="text-sm font-semibold text-white">
@@ -67,7 +80,7 @@ export const ElectronModal: React.FC<ElectronModalProps> = ({
             onClick={onClose}
             className="text-slate-400 hover:text-white"
           >
-            <X className="w-4 h-4" />
+            <X className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
 
@@ -94,10 +107,13 @@ export const ElectronModal: React.FC<ElectronModalProps> = ({
             onClick={handleCopyCode}
             className="absolute top-2.5 right-2.5 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs flex items-center gap-1 z-10"
           >
-            <Copy className="w-3 h-3" /> Copy main.js
+            <Copy className="w-3 h-3" aria-hidden="true" /> Copy main.js
           </button>
           <pre
             id="electron-code-block"
+            tabIndex={0}
+            role="region"
+            aria-label="Electron main.ts wrapper source code"
             className="flex-1 overflow-y-auto bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-[11px] text-sky-200 select-text leading-relaxed"
           >
             {ELECTRON_WRAPPER_CODE}

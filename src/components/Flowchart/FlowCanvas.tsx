@@ -150,6 +150,62 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     }
   };
 
+  const handleNodeKeyDown = (
+    e: React.KeyboardEvent<HTMLDivElement>,
+    node: FlowNode
+  ) => {
+    if (editingNodeId === node.id || e.target !== e.currentTarget) return;
+
+    const step = e.shiftKey ? 20 : 10;
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+      e.preventDefault();
+      const dx =
+        e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
+      const dy =
+        e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0;
+      onChangeFlowData((prev) => ({
+        ...prev,
+        nodes: prev.nodes.map((n) =>
+          n.id === node.id
+            ? { ...n, x: Math.max(8, n.x + dx), y: Math.max(8, n.y + dy) }
+            : n
+        ),
+      }));
+      return;
+    }
+
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (connectMode) {
+        if (!connectSourceNodeId) {
+          setConnectSourceNodeId(node.id);
+        } else if (connectSourceNodeId !== node.id) {
+          const sourceId = connectSourceNodeId;
+          onChangeFlowData((prev) => {
+            const exists = prev.edges.some(
+              (edge) => edge.from === sourceId && edge.to === node.id
+            );
+            if (exists) return prev;
+            return {
+              ...prev,
+              edges: [...prev.edges, { from: sourceId, to: node.id }],
+            };
+          });
+          setConnectSourceNodeId(null);
+          setConnectMode(false);
+        }
+      } else {
+        startEditingNode(node);
+      }
+      return;
+    }
+
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      handleDeleteNode(node.id);
+    }
+  };
+
   const startEditingNode = (node: FlowNode) => {
     setEditingNodeId(node.id);
     setEditingText(node.text);
@@ -234,7 +290,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             title="Add Process Box"
             className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-sky-300 flex items-center gap-1 transition"
           >
-            <Square className="w-3.5 h-3.5" /> Process
+            <Square className="w-3.5 h-3.5" aria-hidden="true" /> Process
           </button>
           <button
             type="button"
@@ -242,7 +298,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             title="Add Decision Diamond"
             className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-amber-300 flex items-center gap-1 transition"
           >
-            <Diamond className="w-3.5 h-3.5" /> Decision
+            <Diamond className="w-3.5 h-3.5" aria-hidden="true" /> Decision
           </button>
           <button
             type="button"
@@ -250,11 +306,12 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             title="Add Start/End Pill"
             className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-emerald-300 flex items-center gap-1 transition"
           >
-            <CircleDot className="w-3.5 h-3.5" /> Terminal
+            <CircleDot className="w-3.5 h-3.5" aria-hidden="true" /> Terminal
           </button>
           <button
             type="button"
             id="connect-mode-btn"
+            aria-pressed={connectMode}
             onClick={toggleConnectMode}
             title="Connect two nodes with an arrow"
             className={
@@ -263,7 +320,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 : 'px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 flex items-center gap-1 transition'
             }
           >
-            <GitCommit className="w-3.5 h-3.5" />
+            <GitCommit className="w-3.5 h-3.5" aria-hidden="true" />
             <span id="connect-btn-label">
               {connectMode ? 'Connecting...' : 'Connect'}
             </span>
@@ -278,7 +335,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             title="Reset Demo Flowchart"
             className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
           >
-            <RotateCcw className="w-3.5 h-3.5" />
+            <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -287,14 +344,14 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             title="Clear Canvas"
             className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950 hover:text-rose-300 text-slate-300 text-xs"
           >
-            <Trash2 className="w-3.5 h-3.5" />
+            <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
           <button
             type="button"
             onClick={() => setIsLucidModalOpen(true)}
             className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-medium flex items-center gap-1.5 transition"
           >
-            <Share2 className="w-3.5 h-3.5" />
+            <Share2 className="w-3.5 h-3.5" aria-hidden="true" />
             <span>Lucidchart Sync</span>
           </button>
         </div>
@@ -305,7 +362,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         id="flow-helper-bar"
         className="px-3.5 py-1.5 bg-indigo-950/40 border-b border-indigo-500/20 flex items-center justify-between text-[11px] text-indigo-200"
       >
-        <span id="flow-status-msg">{statusMessage}</span>
+        <span id="flow-status-msg" role="status" aria-live="polite">
+          {statusMessage}
+        </span>
         <button
           type="button"
           onClick={handleExportSVG}
@@ -344,35 +403,76 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               const toNode = flowData.nodes.find((n) => n.id === edge.to);
               if (!fromNode || !toNode) return null;
 
-              const x1 = fromNode.x + 72;
-              const y1 = fromNode.y + 26;
-              const x2 = toNode.x + 72;
-              const y2 = toNode.y + 26;
+              const nodeWidth = 144;
+              const nodeHeight = 52;
+              const cx1 = fromNode.x + nodeWidth / 2;
+              const cy1 = fromNode.y + nodeHeight / 2;
+              const cx2 = toNode.x + nodeWidth / 2;
+              const cy2 = toNode.y + nodeHeight / 2;
+
+              // Anchor connector start/end to node boundary ports so arrowheads remain clearly visible
+              let x1 = cx1;
+              let y1 = cy1;
+              let x2 = cx2;
+              let y2 = cy2;
+
+              if (Math.abs(cy2 - cy1) >= Math.abs(cx2 - cx1) * 0.35) {
+                if (cy2 >= cy1) {
+                  y1 = fromNode.y + nodeHeight;
+                  y2 = toNode.y;
+                } else {
+                  y1 = fromNode.y;
+                  y2 = toNode.y + nodeHeight;
+                }
+              } else {
+                if (cx2 >= cx1) {
+                  x1 = fromNode.x + nodeWidth;
+                  x2 = toNode.x;
+                } else {
+                  x1 = fromNode.x;
+                  x2 = toNode.x + nodeWidth;
+                }
+              }
+
               const dy = y2 - y1;
+              const controlOffset =
+                Math.max(Math.abs(dy) * 0.45, 24) * (dy >= 0 ? 1 : -1);
               const pathData = `M ${x1} ${y1} C ${x1} ${
-                y1 + dy * 0.45
-              }, ${x2} ${y2 - dy * 0.45}, ${x2} ${y2}`;
+                y1 + controlOffset
+              }, ${x2} ${y2 - controlOffset}, ${x2} ${y2}`;
 
               return (
-                <path
+                <g
                   key={`${edge.from}-${edge.to}-${idx}`}
-                  d={pathData}
-                  stroke="#818cf8"
-                  strokeWidth="2.2"
-                  fill="none"
-                  markerEnd="url(#arrowhead)"
                   onClick={() => handleDeleteEdge(idx)}
-                  className="pointer-events-auto cursor-pointer hover:stroke-rose-400 transition-colors"
+                  className="pointer-events-auto cursor-pointer group"
                 >
                   <title>Click to remove connector</title>
-                </path>
+                  <path
+                    d={pathData}
+                    stroke="transparent"
+                    strokeWidth="12"
+                    fill="none"
+                  />
+                  <path
+                    d={pathData}
+                    stroke="#818cf8"
+                    strokeWidth="2.2"
+                    fill="none"
+                    markerEnd="url(#arrowhead)"
+                    className="group-hover:stroke-rose-400 transition-colors"
+                  />
+                </g>
               );
             })}
           </g>
         </svg>
 
         {/* HTML Layer for Draggable Nodes */}
-        <div id="flow-nodes-layer" className="absolute inset-0 w-full h-full">
+        <div
+          id="flow-nodes-layer"
+          className="absolute inset-0 w-full h-full pointer-events-none"
+        >
           {flowData.nodes.map((node) => {
             let shapeClasses =
               'rounded-xl bg-sky-950/90 border-2 border-sky-400/70 text-sky-100';
@@ -391,15 +491,20 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             return (
               <div
                 key={node.id}
+                role="group"
+                tabIndex={0}
+                aria-label={`Node: ${node.text}`}
                 data-id={node.id}
                 data-testid={`flow-node-${node.id}`}
                 style={{ left: `${node.x}px`, top: `${node.y}px` }}
                 onMouseDown={(e) => handleNodeMouseDown(e, node)}
-                className={`absolute w-36 min-h-[52px] px-3 py-2 shadow-xl flex items-center justify-center text-center text-xs font-medium cursor-move select-none transition-shadow group ${shapeClasses}`}
+                onKeyDown={(e) => handleNodeKeyDown(e, node)}
+                className={`pointer-events-auto absolute w-36 min-h-[52px] px-3 py-2 shadow-xl flex items-center justify-center text-center text-xs font-medium cursor-move select-none transition-shadow group ${shapeClasses}`}
               >
                 {editingNodeId === node.id ? (
                   <input
                     type="text"
+                    aria-label="Edit node label"
                     value={editingText}
                     onChange={(e) => setEditingText(e.target.value)}
                     onBlur={() => commitEditingNode(node.id)}

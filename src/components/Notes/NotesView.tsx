@@ -135,12 +135,18 @@ export const NotesView: React.FC<NotesViewProps> = ({
       <div className="flex items-center justify-between gap-2">
         <div
           id="notes-tabs-container"
-          className="flex items-center gap-1.5 overflow-x-auto"
+          onWheel={(e) => {
+            if (e.deltaY !== 0) {
+              e.currentTarget.scrollLeft += e.deltaY;
+            }
+          }}
+          className="flex items-center gap-1.5 overflow-x-auto pb-1"
         >
           {notes.map((n) => (
             <button
               key={n.id}
               type="button"
+              aria-pressed={n.id === currentNote.id}
               onClick={() => setActiveNoteId(n.id)}
               className={`px-3 py-1.5 rounded-xl text-xs font-medium transition truncate max-w-[140px] ${
                 n.id === currentNote.id
@@ -157,7 +163,8 @@ export const NotesView: React.FC<NotesViewProps> = ({
           onClick={handleCreateNewNote}
           className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200 flex items-center gap-1 shrink-0"
         >
-          <FilePlus className="w-3.5 h-3.5 text-indigo-400" /> New Note
+          <FilePlus className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />{' '}
+          New Note
         </button>
       </div>
 
@@ -179,7 +186,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
             value={currentNote.title}
             onChange={(e) => handleUpdateCurrentNote({ title: e.target.value })}
             placeholder="Note Title..."
-            className="bg-transparent text-sm font-semibold text-white focus:outline-none w-full"
+            className="bg-transparent text-sm font-semibold text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 rounded px-1 -mx-1 w-full"
           />
           <button
             type="button"
@@ -187,9 +194,9 @@ export const NotesView: React.FC<NotesViewProps> = ({
             aria-label="Delete Note"
             title="Delete Note"
             disabled={notes.length <= 1}
-            className="text-slate-500 hover:text-rose-400 disabled:opacity-40 p-1"
+            className="text-slate-400 hover:text-rose-400 disabled:opacity-40 p-1"
           >
-            <Trash className="w-3.5 h-3.5" />
+            <Trash className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
         </div>
 
@@ -199,10 +206,10 @@ export const NotesView: React.FC<NotesViewProps> = ({
           value={currentNote.body}
           onChange={(e) => handleUpdateCurrentNote({ body: e.target.value })}
           placeholder="Start typing or click the microphone above for real-time voice dictation..."
-          className="flex-1 w-full bg-transparent p-4 text-xs sm:text-sm text-slate-200 leading-relaxed focus:outline-none resize-none select-text"
+          className="flex-1 w-full bg-transparent p-4 text-xs sm:text-sm text-slate-200 placeholder-slate-400 leading-relaxed focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500/40 resize-none select-text"
         />
 
-        <div className="px-4 py-2 bg-slate-950/80 border-t border-slate-800/70 flex items-center justify-between text-[11px] text-slate-500">
+        <div className="px-4 py-2 bg-slate-950/80 border-t border-slate-800/70 flex items-center justify-between text-[11px] text-slate-400">
           <span id="note-word-count">
             {wordsCount} words • {charsCount} chars
           </span>
@@ -210,7 +217,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
             id="note-saved-indicator"
             className="text-emerald-400 flex items-center gap-1"
           >
-            <Check className="w-3 h-3" /> Auto-saved locally
+            <Check className="w-3 h-3" aria-hidden="true" /> Auto-saved locally
           </span>
         </div>
       </div>

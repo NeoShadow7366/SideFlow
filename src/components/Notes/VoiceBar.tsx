@@ -43,6 +43,8 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
   const [interimText, setInterimText] = useState('');
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const isDictatingRef = useRef(false);
+  const onTranscriptRef = useRef(onTranscript);
+  onTranscriptRef.current = onTranscript;
 
   useEffect(() => {
     return () => {
@@ -89,7 +91,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
       }
       setInterimText(currentInterim);
       if (finalTranscript.trim()) {
-        onTranscript(finalTranscript.trim());
+        onTranscriptRef.current(finalTranscript.trim());
         setInterimText('');
       }
     };
@@ -120,7 +122,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
 
     if (!rec) {
       // Fallback simulated dictation if browser blocks mic or lacks SpeechRecognition in sandbox
-      onTranscript(
+      onTranscriptRef.current(
         '\n[Voice Dictation Sample]: Follow up on system tray hotkey integration and export the onboarding flowchart to Lucidchart.'
       );
       onNotify(
@@ -157,17 +159,20 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
         <button
           type="button"
           id="voice-record-btn"
-          aria-label={isDictating ? 'Stop voice dictation' : 'Start voice dictation'}
+          aria-pressed={isDictating}
+          aria-label={
+            isDictating ? 'Stop voice dictation' : 'Start voice dictation'
+          }
           onClick={handleToggleVoice}
-          className={`relative w-10 h-10 rounded-full border border-rose-500/40 flex items-center justify-center transition shrink-0 ${
+          className={`isolate relative w-10 h-10 rounded-full border border-rose-500/40 flex items-center justify-center transition shrink-0 ${
             isDictating
               ? 'recording-pulse bg-rose-600 text-white'
               : 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-400'
           }`}
         >
-          <Mic className="w-5 h-5" />
+          <Mic className="w-5 h-5" aria-hidden="true" />
         </button>
-        <div className="min-w-0">
+        <div className="min-w-0" role="status" aria-live="polite">
           <div className="flex items-center gap-2">
             <span
               id="voice-status-title"
@@ -182,7 +187,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
               aria-label="Dictation Language"
               value={lang}
               onChange={(e) => setLang(e.target.value)}
-              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 focus:outline-none"
+              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             >
               <option value="en-US">en-US</option>
               <option value="en-GB">en-GB</option>
@@ -213,7 +218,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
           title="Insert Timestamp"
           className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300"
         >
-          <Clock className="w-3.5 h-3.5" />
+          <Clock className="w-3.5 h-3.5" aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -222,7 +227,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
           title="Copy Note"
           className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 flex items-center gap-1"
         >
-          <Copy className="w-3.5 h-3.5" /> Copy
+          <Copy className="w-3.5 h-3.5" aria-hidden="true" /> Copy
         </button>
       </div>
     </div>
