@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Smooth Slide-Out Panel Transition */
+.side-panel-transition {
+  transition: transform 0.38s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.28s ease;
+}
+
+/* ObjectDock Style Hover Magnification */
+.dock-item {
+  transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1),
+    background-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.dock-item:hover {
+  transform: translateY(-6px) scale(1.12);
+  z-index: 20;
+}
+
+.dock-item:active {
+  transform: translateY(-2px) scale(0.96);
+}
+
+/* Drag-and-Drop Drawer Highlight */
+.drawer-drop-active {
+  border-color: #818cf8 !important;
+  background-color: rgba(79, 70, 229, 0.16) !important;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.35),
+    inset 0 0 20px rgba(99, 102, 241, 0.12);
+}
+
+/* Flowchart Grid Pattern */
+.canvas-grid {
+  background-size: 20px 20px;
+  background-image: linear-gradient(
+      to right,
+      rgba(255, 255, 255, 0.05) 1px,
+      transparent 1px
+    ),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.4);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.5);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.8);
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.8;
+  }
+  70% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+.recording-pulse::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 9999px;
+  background: #ef4444;
+  animation: pulse-ring 1.5s infinite;
+  z-index: -1;
+}
