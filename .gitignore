@@ -6,3 +6,7 @@ release/
 .DS_Store
 Thumbs.db
 coverage/
+__pycache__/
+*.pyc
+*.tsbuildinfo
+

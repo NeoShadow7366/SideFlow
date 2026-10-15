@@ -2,27 +2,129 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 export interface SideFlowElectronAPI {
   isElectron: boolean;
-  launchNativeApp: (command: string) => Promise<{ success: boolean; error?: string }>;
+  launchNativeApp: (
+    command: string,
+    args?: string[]
+  ) => Promise<{ success: boolean; error?: string }>;
   updateGlobalShortcut: (accelerator: string) => Promise<boolean>;
   setPanelVisibility: (visible: boolean) => void;
+  setPanelEdge: (edge: 'left' | 'right') => void;
+  setPanelWidthPercent: (widthPercent: number) => void;
   setIgnoreMouseEvents: (ignore: boolean) => void;
   openFileDialog: () => Promise<string[]>;
+  openDirectoryDialog: () => Promise<string | null>;
+  readDirectoryItems: (dirPath: string) => Promise<
+    Array<{
+      name: string;
+      path: string;
+      isDirectory: boolean;
+      iconDataUrl?: string;
+    }>
+  >;
+  extractFileIcon: (filePath: string) => Promise<string | null>;
+  resolveShortcutItem: (rawPathOrName: string) => Promise<{
+    name: string;
+    cmd: string;
+    args?: string;
+    iconDataUrl: string | null;
+  } | null>;
+  getSystemMetrics: () => Promise<{
+    cpuPercent: number;
+    memPercent: number;
+    memUsedGb: number;
+    memTotalGb: number;
+    uptimeHours: number;
+  }>;
+  getRunningProcesses: () => Promise<string[]>;
   getPathForFile: (file: File) => string;
   onSetPanelVisibility: (callback: (visible: boolean) => void) => () => void;
   onSwitchTab: (callback: (tab: 'drawers' | 'flowchart' | 'notes' | 'settings') => void) => () => void;
   onWindowBlur: (callback: () => void) => () => void;
   storeGetAll: () => Promise<Record<string, unknown>>;
   storeSet: (key: string, value: unknown) => void;
+  getLocalSttStatus: () => Promise<{
+    available: boolean;
+    fasterWhisperAvailable: boolean;
+    cudaAvailable: boolean;
+    gpuName?: string;
+    gpuVramMb?: number;
+    cpuThreads?: number;
+    windowsSapiAvailable: boolean;
+    activeModel?: string;
+  }>;
+  transcribeAudioLocal: (payload: {
+    pcm16Base64: string;
+    sampleRate: number;
+    lang: string;
+    modelSize?: string;
+    preferEngine?: string;
+    promptContext?: string;
+  }) => Promise<{
+    success: boolean;
+    text?: string;
+    engineUsed?: string;
+    durationMs?: number;
+    error?: string;
+  }>;
+  getAutoLaunch: () => Promise<{ enabled: boolean; isPackaged: boolean }>;
+  setAutoLaunch: (enabled: boolean) => Promise<{ enabled: boolean; isPackaged: boolean }>;
+  getUpdateStatus: () => Promise<{
+    status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+    currentVersion: string;
+    latestVersion?: string;
+    releaseNotes?: string;
+    releaseUrl?: string;
+    downloadPercent?: number;
+    error?: string;
+    lastCheckedAt?: number;
+    canQuitAndInstall?: boolean;
+  }>;
+  checkForUpdates: () => Promise<{
+    status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+    currentVersion: string;
+    latestVersion?: string;
+    releaseNotes?: string;
+    releaseUrl?: string;
+    downloadPercent?: number;
+    error?: string;
+    lastCheckedAt?: number;
+    canQuitAndInstall?: boolean;
+  }>;
+  installUpdateNow: () => Promise<{ success: boolean; error?: string }>;
+  onUpdateStatus: (
+    callback: (state: {
+      status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+      currentVersion: string;
+      latestVersion?: string;
+      releaseNotes?: string;
+      releaseUrl?: string;
+      downloadPercent?: number;
+      error?: string;
+      lastCheckedAt?: number;
+      canQuitAndInstall?: boolean;
+    }) => void
+  ) => () => void;
 }
 
 const sideflowAPI: SideFlowElectronAPI = {
   isElectron: true,
-  launchNativeApp: (command: string) => ipcRenderer.invoke('launch-native-app', command),
+  launchNativeApp: (command: string, args?: string[]) =>
+    ipcRenderer.invoke('launch-native-app', command, args),
   updateGlobalShortcut: (accelerator: string) =>
     ipcRenderer.invoke('update-global-shortcut', accelerator),
   setPanelVisibility: (visible: boolean) => ipcRenderer.send('set-panel-visibility', visible),
+  setPanelEdge: (edge: 'left' | 'right') => ipcRenderer.send('set-panel-edge', edge),
+  setPanelWidthPercent: (widthPercent: number) =>
+    ipcRenderer.send('set-panel-width-percent', widthPercent),
   setIgnoreMouseEvents: (ignore: boolean) => ipcRenderer.send('set-ignore-mouse-events', ignore),
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
+  openDirectoryDialog: () => ipcRenderer.invoke('open-directory-dialog'),
+  readDirectoryItems: (dirPath: string) => ipcRenderer.invoke('read-directory-items', dirPath),
+  extractFileIcon: (filePath: string) => ipcRenderer.invoke('extract-file-icon', filePath),
+  resolveShortcutItem: (rawPathOrName: string) =>
+    ipcRenderer.invoke('resolve-shortcut-item', rawPathOrName),
+  getSystemMetrics: () => ipcRenderer.invoke('get-system-metrics'),
+  getRunningProcesses: () => ipcRenderer.invoke('get-running-processes'),
   getPathForFile: (file: File) => {
     try {
       if (webUtils && typeof webUtils.getPathForFile === 'function') {
@@ -55,6 +157,21 @@ const sideflowAPI: SideFlowElectronAPI = {
   },
   storeGetAll: () => ipcRenderer.invoke('store-get-all'),
   storeSet: (key: string, value: unknown) => ipcRenderer.send('store-set', { key, value }),
+  getLocalSttStatus: () => ipcRenderer.invoke('get-local-stt-status'),
+  transcribeAudioLocal: (payload) => ipcRenderer.invoke('transcribe-audio-local', payload),
+  getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
+  setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke('set-auto-launch', enabled),
+  getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  installUpdateNow: () => ipcRenderer.invoke('install-update-now'),
+  onUpdateStatus: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: Parameters<typeof callback>[0]) =>
+      callback(state);
+    ipcRenderer.on('update-status-changed', listener);
+    return () => ipcRenderer.removeListener('update-status-changed', listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('sideflow', sideflowAPI);
+
+

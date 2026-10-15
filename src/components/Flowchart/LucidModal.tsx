@@ -21,10 +21,12 @@ export const LucidModal: React.FC<LucidModalProps> = ({
 }) => {
   const [mermaidText, setMermaidText] = useState('');
   const [lucidUrl, setLucidUrl] = useState('https://lucid.app/documents');
+  const [parseError, setParseError] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setMermaidText(generateMermaidCode(flowData));
+      setParseError(null);
     }
   }, [isOpen, flowData]);
 
@@ -61,8 +63,21 @@ export const LucidModal: React.FC<LucidModalProps> = ({
   };
 
   const handleApplyToCanvas = () => {
-    const parsed = parseMermaidCode(mermaidText);
-    if (parsed && onUpdateFlowData) {
+    const parsed = parseMermaidCode(mermaidText, flowData.nodes);
+    if (!parsed) {
+      setParseError(
+        'Could not parse Mermaid code. Include at least one node (e.g., n1["Step"]) or connection (n1 --> n2).'
+      );
+      onNotify(
+        'Invalid Mermaid Syntax',
+        'zap',
+        'Check node or arrow syntax and try again'
+      );
+      return;
+    }
+
+    setParseError(null);
+    if (onUpdateFlowData) {
       onUpdateFlowData(parsed);
       onNotify(
         'Synced Mermaid Code to Canvas',
@@ -73,10 +88,13 @@ export const LucidModal: React.FC<LucidModalProps> = ({
     }
   };
 
-  const handleOpenLucidchart = () => {
+  const handleOpenLucidchart = async () => {
     const url = lucidUrl.trim() || 'https://lucid.app/documents';
-    executeAppCommand(url);
     onNotify('Opening Lucidchart...', 'share-2', url);
+    const res = await executeAppCommand(url);
+    if (res && !res.success && res.error) {
+      onNotify('Unable to Open Lucidchart', 'zap', res.error);
+    }
   };
 
   return (
@@ -149,9 +167,27 @@ export const LucidModal: React.FC<LucidModalProps> = ({
           <textarea
             id="lucid-mermaid-output"
             value={mermaidText}
-            onChange={(e) => setMermaidText(e.target.value)}
+            onChange={(e) => {
+              setMermaidText(e.target.value);
+              if (parseError) setParseError(null);
+            }}
             className="w-full h-36 bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-xs text-emerald-300 focus:outline-none focus:border-indigo-500 select-text"
           />
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-slate-400 font-mono">
+            <span>{`Shapes: ["Box"] {"Dec"} (["Term"]) [("DB")] [["Sub"]] [/"IO"/] (("Circ")) {{"Hex"}} >"Flag"]`}</span>
+            <span>•</span>
+            <span>{`Links: --> -.-> ==> <--> --- --o --x`}</span>
+            <span>•</span>
+            <span>Dirs: TD LR BT RL</span>
+          </div>
+          {parseError && (
+            <p
+              role="alert"
+              className="text-[11px] text-rose-400 bg-rose-950/40 border border-rose-500/30 rounded-lg px-2.5 py-1.5"
+            >
+              {parseError}
+            </p>
+          )}
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
@@ -167,6 +203,9 @@ export const LucidModal: React.FC<LucidModalProps> = ({
               type="text"
               value={lucidUrl}
               onChange={(e) => setLucidUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleOpenLucidchart();
+              }}
               className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white"
             />
             <button

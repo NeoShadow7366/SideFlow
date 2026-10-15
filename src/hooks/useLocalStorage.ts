@@ -1,5 +1,21 @@
 import { useState, useEffect, useCallback } from 'react';
 
+const storeHydrationCache = new WeakMap<
+  () => Promise<Record<string, unknown>>,
+  Promise<Record<string, unknown>>
+>();
+
+function getHydratedElectronStore(
+  fetcher: () => Promise<Record<string, unknown>>
+): Promise<Record<string, unknown>> {
+  let cached = storeHydrationCache.get(fetcher);
+  if (!cached) {
+    cached = fetcher().catch(() => ({}));
+    storeHydrationCache.set(fetcher, cached);
+  }
+  return cached;
+}
+
 export function useLocalStorage<T>(
   key: string,
   initialValue: T
@@ -17,9 +33,9 @@ export function useLocalStorage<T>(
   // Hydrate from Electron userData store if running in Electron and localStorage wasn't set yet
   useEffect(() => {
     let mounted = true;
-    if (window.sideflow?.storeGetAll) {
-      window.sideflow
-        .storeGetAll()
+    const fetcher = window.sideflow?.storeGetAll;
+    if (fetcher) {
+      getHydratedElectronStore(fetcher)
         .then((store) => {
           if (!mounted || !store) return;
           if (store[key] !== undefined && !window.localStorage.getItem(key)) {

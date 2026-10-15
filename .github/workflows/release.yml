@@ -1,0 +1,81 @@
+name: Build & Publish SideFlow Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Version bump before building (or "current" to release existing version in package.json)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - current
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Build & Publish Windows Installer (NSIS + Auto-Update Metadata)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Automated Test Suite
+        run: npm test
+
+      - name: Bump Version & Push Tag (when triggered via workflow_dispatch)
+        id: version_step
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.release_type }}" -ne "current") {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            npm version ${{ inputs.release_type }} -m "chore(release): v%s"
+            git push origin HEAD --follow-tags
+          }
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $ver = $pkg.version
+          $tag = "v$ver"
+          Write-Output "Releasing SideFlow $tag"
+          "VERSION=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build Renderer & Electron Bundles
+        run: npm run build
+
+      - name: Package & Publish NSIS Installer + Auto-Update Artifacts to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win nsis portable --publish always
+
+      - name: Ensure GitHub Release is Published (Non-Draft) with Release Notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version_step.outputs.TAG }}"
+          try {
+            gh release edit $tag --draft=false --latest
+          } catch {
+            Write-Host "Release $tag already published or finalized."
+          }

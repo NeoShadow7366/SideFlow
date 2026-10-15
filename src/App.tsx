@@ -6,6 +6,7 @@ import {
   Folder,
   FileCode,
   ChevronLeft,
+  ChevronRight,
   LayoutGrid,
   PanelRight,
   Grid,
@@ -18,8 +19,12 @@ import {
 } from 'lucide-react';
 import {
   AppDrawer,
+  AppUpdateState,
+  DockHoverEffect,
+  DockIconSize,
   FlowchartState,
   NoteItem,
+  PanelEdge,
   ShortcutConfig,
   TabId,
   ToastMessage,
@@ -30,6 +35,10 @@ import {
   defaultFlowData,
   defaultNotes,
   defaultShortcut,
+  DEFAULT_PANEL_WIDTH_PERCENT,
+  MIN_PANEL_WIDTH_PERCENT,
+  MAX_PANEL_WIDTH_PERCENT,
+  clampPanelWidthPercent,
 } from './utils/defaults';
 import { Header } from './components/Header';
 import { DockView } from './components/DockDrawers/DockView';
@@ -64,9 +73,39 @@ export const App: React.FC = () => {
     'sideflow_edge_handle',
     true
   );
+  const [openAtLogin, setOpenAtLogin] = useLocalStorage<boolean>(
+    'sideflow_open_at_login',
+    true
+  );
+  const [panelEdge, setPanelEdge] = useLocalStorage<PanelEdge>(
+    'sideflow_panel_edge',
+    'right'
+  );
+  const [panelWidthPercent, setPanelWidthPercent] = useLocalStorage<number>(
+    'sideflow_panel_width_percent',
+    DEFAULT_PANEL_WIDTH_PERCENT
+  );
+  const [dockEffect, setDockEffect] = useLocalStorage<DockHoverEffect>(
+    'sideflow_dock_effect',
+    'zoom'
+  );
+  const [dockIconSize, setDockIconSize] = useLocalStorage<DockIconSize>(
+    'sideflow_dock_size',
+    'normal'
+  );
+  const [isDockLocked, setIsDockLocked] = useLocalStorage<boolean>(
+    'sideflow_lock_icons',
+    false
+  );
 
+  const [updateState, setUpdateState] = useState<AppUpdateState>({
+    status: 'idle',
+    currentVersion: '1.0.0',
+  });
   const [isPanelOpen, setIsPanelOpen] = useState<boolean>(true);
+  const [isResizingPanel, setIsResizingPanel] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<TabId>('drawers');
+  const [isDictating, setIsDictating] = useState<boolean>(false);
   const [isRecordingHotkey, setIsRecordingHotkey] = useState<boolean>(false);
   const [isTrayMenuOpen, setIsTrayMenuOpen] = useState<boolean>(false);
   const [isElectronModalOpen, setIsElectronModalOpen] = useState<boolean>(false);
@@ -78,6 +117,16 @@ export const App: React.FC = () => {
   const toastTimerRef = useRef<number | null>(null);
   const isPinnedRef = useRef<boolean>(isPinned);
   isPinnedRef.current = isPinned;
+  const panelWidthPercentRef = useRef<number>(
+    clampPanelWidthPercent(panelWidthPercent)
+  );
+  panelWidthPercentRef.current = clampPanelWidthPercent(panelWidthPercent);
+  const resizeDragStartRef = useRef<{
+    startX: number;
+    startScreenX: number;
+    startPercent: number;
+    hasChanged: boolean;
+  } | null>(null);
   const isElectronWindow = Boolean(window.sideflow?.isElectron);
 
   const notify = useCallback(
@@ -98,13 +147,69 @@ export const App: React.FC = () => {
     []
   );
 
+  // Sync initial visibility, edge, and screen presence with Electron and clean up toast timer
   useEffect(() => {
+    window.sideflow?.setPanelVisibility?.(true);
+    window.sideflow?.setPanelEdge?.(panelEdge);
+    window.sideflow?.setPanelWidthPercent?.(
+      clampPanelWidthPercent(panelWidthPercent)
+    );
+    window.sideflow
+      ?.getAutoLaunch?.()
+      .then((res) => {
+        if (res && typeof res.enabled === 'boolean') {
+          setOpenAtLogin(res.enabled);
+        }
+      })
+      .catch(() => {});
+    window.sideflow
+      ?.getUpdateStatus?.()
+      .then((state) => {
+        if (state) {
+          setUpdateState(state);
+        }
+      })
+      .catch(() => {});
     return () => {
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current);
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Automatically cancel hotkey recording if user leaves Settings tab or closes panel
+  useEffect(() => {
+    if (activeTab !== 'settings' || !isPanelOpen) {
+      setIsRecordingHotkey(false);
+    }
+  }, [activeTab, isPanelOpen]);
+
+  // Dismiss simulated System Tray menu on outside click or Escape
+  useEffect(() => {
+    if (!isTrayMenuOpen) return;
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        !target.closest('#tray-context-menu') &&
+        !target.closest('#tray-toggle-btn')
+      ) {
+        setIsTrayMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsTrayMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isTrayMenuOpen]);
 
   const togglePanel = useCallback((forceState?: boolean) => {
     setIsPanelOpen((prev) => {
@@ -145,17 +250,21 @@ export const App: React.FC = () => {
         togglePanel(false);
       }
     });
+    const unsubUpdate = window.sideflow?.onUpdateStatus?.((state) => {
+      setUpdateState(state);
+    });
 
     return () => {
       unsubVisibility?.();
       unsubSwitchTab?.();
       unsubBlur?.();
+      unsubUpdate?.();
     };
   }, [togglePanel]);
 
   // Global keyboard shortcut & recorder listener
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
       if (isRecordingHotkey) {
         e.preventDefault();
         if (e.key === 'Escape') {
@@ -163,6 +272,16 @@ export const App: React.FC = () => {
           return;
         }
         if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+
+        // Require at least one modifier key so single character keys don't hijack typing
+        if (!e.ctrlKey && !e.altKey && !e.shiftKey) {
+          notify(
+            'Modifier Key Required',
+            'zap',
+            'Hold Ctrl, Alt, or Shift + Key (or Esc to cancel)'
+          );
+          return;
+        }
 
         const parts: string[] = [];
         if (e.ctrlKey) parts.push('Ctrl');
@@ -182,10 +301,42 @@ export const App: React.FC = () => {
           label,
         };
 
+        const previousShortcut = shortcut;
         setShortcut(newShortcut);
         setIsRecordingHotkey(false);
-        window.sideflow?.updateGlobalShortcut?.(parts.join('+'));
+
+        if (window.sideflow?.updateGlobalShortcut) {
+          try {
+            const registered = await window.sideflow.updateGlobalShortcut(
+              parts.join('+')
+            );
+            if (registered === false) {
+              setShortcut(previousShortcut);
+              notify(
+                'Shortcut Registration Failed',
+                'zap',
+                `Could not bind ${label} in OS`
+              );
+              return;
+            }
+          } catch {
+            // ignore
+          }
+        }
+
         notify('Updated Global Hotkey', 'check', `Shortcut set to ${label}`);
+        return;
+      }
+
+      // Guard against intercepting normal typing inside inputs/textareas when Alt/Ctrl are not held
+      const target = e.target as HTMLElement | null;
+      const isEditableTarget =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+      if (isEditableTarget && !e.altKey && !e.ctrlKey) {
         return;
       }
 
@@ -216,6 +367,110 @@ export const App: React.FC = () => {
     notify('Reset Global Hotkey', 'check', 'Restored default Alt + Space');
   };
 
+  const handleChangePanelEdge = (nextEdge: PanelEdge) => {
+    setPanelEdge(nextEdge);
+    window.sideflow?.setPanelEdge?.(nextEdge);
+    notify(
+      `Docked to ${nextEdge === 'left' ? 'Left' : 'Right'} Screen Edge`,
+      'check',
+      'Updated panel anchor position'
+    );
+  };
+
+  const handleChangePanelWidthPercent = useCallback(
+    (nextPercent: number, showToast = false) => {
+      const clamped = clampPanelWidthPercent(nextPercent);
+      setPanelWidthPercent(clamped);
+      panelWidthPercentRef.current = clamped;
+      window.sideflow?.setPanelWidthPercent?.(clamped);
+      if (showToast) {
+        notify(
+          `Screen Presence: ${clamped}%`,
+          'check',
+          `Extended panel width saved at ${clamped}% of screen`
+        );
+      }
+    },
+    [setPanelWidthPercent, notify]
+  );
+
+  // On-the-fly interactive drag resizing of the panel inner edge
+  useEffect(() => {
+    if (!isResizingPanel) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const dragState = resizeDragStartRef.current;
+      if (!dragState) return;
+
+      let nextPercent = dragState.startPercent;
+
+      if (
+        isElectronWindow &&
+        (e.screenX !== 0 || dragState.startScreenX !== 0)
+      ) {
+        const screenWidth = Math.max(
+          320,
+          window.screen?.availWidth ||
+            window.screen?.width ||
+            window.innerWidth ||
+            1920
+        );
+        const deltaX = e.screenX - dragState.startScreenX;
+        const signedDelta = panelEdge === 'left' ? deltaX : -deltaX;
+        const deltaPct = (signedDelta / screenWidth) * 100;
+        nextPercent = clampPanelWidthPercent(dragState.startPercent + deltaPct);
+      } else {
+        const viewportWidth = Math.max(320, window.innerWidth || 1024);
+        if (dragState.startX > 0 && e.clientX > 0) {
+          const deltaX = e.clientX - dragState.startX;
+          const signedDelta = panelEdge === 'left' ? deltaX : -deltaX;
+          const deltaPct = (signedDelta / viewportWidth) * 100;
+          nextPercent = clampPanelWidthPercent(
+            dragState.startPercent + deltaPct
+          );
+        } else {
+          const widthPx =
+            panelEdge === 'left' ? e.clientX : viewportWidth - e.clientX;
+          nextPercent = clampPanelWidthPercent(
+            (widthPx / viewportWidth) * 100
+          );
+        }
+      }
+
+      if (nextPercent !== panelWidthPercentRef.current) {
+        dragState.hasChanged = true;
+        handleChangePanelWidthPercent(nextPercent, false);
+      }
+    };
+
+    const handleMouseUp = () => {
+      const dragState = resizeDragStartRef.current;
+      resizeDragStartRef.current = null;
+      setIsResizingPanel(false);
+      if (dragState?.hasChanged) {
+        const finalPct = panelWidthPercentRef.current;
+        notify(
+          `Screen Presence: ${finalPct}%`,
+          'check',
+          `Extended panel width saved at ${finalPct}% of screen`
+        );
+      }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [
+    isResizingPanel,
+    isElectronWindow,
+    panelEdge,
+    handleChangePanelWidthPercent,
+    notify,
+  ]);
+
   const handleExportBackup = () => {
     const backup = {
       version: '1.0.0',
@@ -224,6 +479,13 @@ export const App: React.FC = () => {
       flowData,
       notes,
       shortcut,
+      isPinned,
+      showEdgeHandle,
+      panelEdge,
+      panelWidthPercent,
+      dockEffect,
+      dockIconSize,
+      isDockLocked,
     };
     try {
       const blob = new Blob([JSON.stringify(backup, null, 2)], {
@@ -243,11 +505,191 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleImportBackup = (rawJson: string) => {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Invalid backup object');
+      }
+      let restoredAny = false;
+      if (Array.isArray(parsed.drawers) && parsed.drawers.length > 0) {
+        setDrawers(parsed.drawers);
+        restoredAny = true;
+      }
+      if (
+        parsed.flowData &&
+        Array.isArray(parsed.flowData.nodes) &&
+        Array.isArray(parsed.flowData.edges)
+      ) {
+        setFlowData(parsed.flowData);
+        restoredAny = true;
+      }
+      if (Array.isArray(parsed.notes) && parsed.notes.length > 0) {
+        setNotes(parsed.notes);
+        restoredAny = true;
+      }
+      if (parsed.shortcut && typeof parsed.shortcut.label === 'string') {
+        setShortcut(parsed.shortcut);
+        window.sideflow?.updateGlobalShortcut?.(
+          parsed.shortcut.label.replace(/\s+/g, '')
+        );
+        restoredAny = true;
+      }
+      if (typeof parsed.isPinned === 'boolean') {
+        setIsPinned(parsed.isPinned);
+        restoredAny = true;
+      }
+      if (typeof parsed.showEdgeHandle === 'boolean') {
+        setShowEdgeHandle(parsed.showEdgeHandle);
+        restoredAny = true;
+      }
+      if (parsed.panelEdge === 'left' || parsed.panelEdge === 'right') {
+        setPanelEdge(parsed.panelEdge);
+        window.sideflow?.setPanelEdge?.(parsed.panelEdge);
+        restoredAny = true;
+      }
+      if (typeof parsed.panelWidthPercent === 'number') {
+        const clampedPct = clampPanelWidthPercent(parsed.panelWidthPercent);
+        setPanelWidthPercent(clampedPct);
+        panelWidthPercentRef.current = clampedPct;
+        window.sideflow?.setPanelWidthPercent?.(clampedPct);
+        restoredAny = true;
+      }
+      if (
+        parsed.dockEffect === 'zoom' ||
+        parsed.dockEffect === 'swing' ||
+        parsed.dockEffect === 'glow' ||
+        parsed.dockEffect === 'none'
+      ) {
+        setDockEffect(parsed.dockEffect);
+        restoredAny = true;
+      }
+      if (
+        parsed.dockIconSize === 'compact' ||
+        parsed.dockIconSize === 'normal' ||
+        parsed.dockIconSize === 'large'
+      ) {
+        setDockIconSize(parsed.dockIconSize);
+        restoredAny = true;
+      }
+      if (typeof parsed.isDockLocked === 'boolean') {
+        setIsDockLocked(parsed.isDockLocked);
+        restoredAny = true;
+      }
+      if (typeof parsed.openAtLogin === 'boolean') {
+        setOpenAtLogin(parsed.openAtLogin);
+        void window.sideflow?.setAutoLaunch?.(parsed.openAtLogin);
+        restoredAny = true;
+      }
+
+      if (!restoredAny) {
+        throw new Error('No SideFlow workspace keys found');
+      }
+      notify(
+        'Restored SideFlow Backup',
+        'check',
+        'Workspace configuration imported'
+      );
+    } catch {
+      notify(
+        'Invalid Backup File',
+        'zap',
+        'Could not parse SideFlow JSON configuration'
+      );
+    }
+  };
+
+  const handleToggleOpenAtLogin = (enabled: boolean) => {
+    setOpenAtLogin(enabled);
+    void window.sideflow?.setAutoLaunch?.(enabled);
+    notify(
+      enabled ? 'Launch at Login Enabled' : 'Launch at Login Disabled',
+      'check',
+      enabled
+        ? 'SideFlow will start in the System Tray on Windows sign-in'
+        : 'Removed from automatic startup'
+    );
+  };
+
+  const handleCheckForUpdates = async () => {
+    setUpdateState((prev) => ({
+      ...prev,
+      status: 'checking',
+      error: undefined,
+    }));
+    if (window.sideflow?.checkForUpdates) {
+      try {
+        const nextState = await window.sideflow.checkForUpdates();
+        setUpdateState(nextState);
+        if (nextState.status === 'downloaded' || nextState.status === 'available') {
+          notify(
+            `Update v${nextState.latestVersion || ''} Available`,
+            'rocket',
+            'Ready to install from NeoShadow7366/SideFlow'
+          );
+        } else {
+          notify(
+            'SideFlow is Up to Date',
+            'check',
+            `Running latest version v${nextState.currentVersion || '1.0.0'}`
+          );
+        }
+        return;
+      } catch {
+        // fallback below
+      }
+    }
+
+    const now = Date.now();
+    setUpdateState((prev) => ({
+      ...prev,
+      status: 'not-available',
+      latestVersion: prev.currentVersion || '1.0.0',
+      lastCheckedAt: now,
+    }));
+    notify(
+      'SideFlow is Up to Date',
+      'check',
+      'Checked github.com/NeoShadow7366/SideFlow/releases'
+    );
+  };
+
+  const handleInstallUpdate = async () => {
+    if (window.sideflow?.installUpdateNow) {
+      const res = await window.sideflow.installUpdateNow();
+      if (res?.success) {
+        notify(
+          'Applying SideFlow Update...',
+          'rocket',
+          'Restarting application to complete update'
+        );
+        return;
+      }
+    }
+    window.open(
+      updateState.releaseUrl || 'https://github.com/NeoShadow7366/SideFlow/releases',
+      '_blank',
+      'noopener,noreferrer'
+    );
+  };
+
   const handleResetAllData = () => {
     setDrawers(defaultDrawers);
     setFlowData(defaultFlowData);
     setNotes(defaultNotes);
     setShortcut(defaultShortcut);
+    setIsPinned(true);
+    setShowEdgeHandle(true);
+    setPanelEdge('right');
+    setPanelWidthPercent(DEFAULT_PANEL_WIDTH_PERCENT);
+    panelWidthPercentRef.current = DEFAULT_PANEL_WIDTH_PERCENT;
+    setDockEffect('zoom');
+    setDockIconSize('normal');
+    setIsDockLocked(false);
+    setIsRecordingHotkey(false);
+    window.sideflow?.setPanelEdge?.('right');
+    window.sideflow?.setPanelWidthPercent?.(DEFAULT_PANEL_WIDTH_PERCENT);
+    window.sideflow?.updateGlobalShortcut?.('Alt+Space');
     notify('Restored Default Workspace', 'check', 'All drawers, flows & notes reset');
   };
 
@@ -494,6 +936,7 @@ export const App: React.FC = () => {
               {/* System Tray Button */}
               <button
                 type="button"
+                id="tray-toggle-btn"
                 onClick={() => setIsTrayMenuOpen((prev) => !prev)}
                 aria-expanded={isTrayMenuOpen}
                 aria-controls="tray-context-menu"
@@ -556,7 +999,7 @@ export const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Screen Right-Edge Peek Handle (When Panel is Closed) */}
+      {/* Screen Edge Peek Handle (When Panel is Closed) */}
       <button
         type="button"
         id="edge-peek-handle"
@@ -572,36 +1015,166 @@ export const App: React.FC = () => {
           }
         }}
         onClick={() => togglePanel(true)}
-        tabIndex={!isPanelOpen && showEdgeHandle ? 0 : -1}
-        aria-hidden={isPanelOpen || !showEdgeHandle}
+        tabIndex={!isPanelOpen && (showEdgeHandle || isDictating) ? 0 : -1}
+        aria-hidden={isPanelOpen || (!showEdgeHandle && !isDictating)}
         aria-label={`Open SideFlow Panel (${shortcut.label})`}
-        title={`Open SideFlow Panel (${shortcut.label})`}
-        className={`fixed right-0 top-1/2 -translate-y-1/2 z-30 bg-indigo-600/80 hover:bg-indigo-500 text-white py-6 px-1.5 rounded-l-xl shadow-lg border-y border-l border-indigo-300/40 transition-all duration-300 hover:px-2.5 group ${
-          !isPanelOpen && showEdgeHandle
+        title={
+          isDictating
+            ? `Voice Dictation Active — Click to Open SideFlow (${shortcut.label})`
+            : `Open SideFlow Panel (${shortcut.label})`
+        }
+        className={`fixed ${
+          panelEdge === 'left'
+            ? 'left-0 rounded-r-xl border-y border-r'
+            : 'right-0 rounded-l-xl border-y border-l'
+        } top-1/2 -translate-y-1/2 z-30 ${
+          isDictating
+            ? 'bg-rose-600/90 hover:bg-rose-500 border-rose-300/60'
+            : 'bg-indigo-600/80 hover:bg-indigo-500 border-indigo-300/40'
+        } text-white py-6 px-1.5 shadow-lg transition-all duration-300 hover:px-2.5 group flex flex-col items-center gap-2 ${
+          !isPanelOpen && (showEdgeHandle || isDictating)
             ? 'opacity-100'
             : 'opacity-0 pointer-events-none invisible'
         }`}
       >
-        <ChevronLeft
-          className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform"
-          aria-hidden="true"
-        />
+        {isDictating && (
+          <span
+            data-testid="collapsed-dictation-indicator"
+            className="relative flex h-2.5 w-2.5"
+          >
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
+            <Mic className="relative w-2.5 h-2.5 text-white" aria-hidden="true" />
+          </span>
+        )}
+        {panelEdge === 'left' ? (
+          <ChevronRight
+            className="w-4 h-4 group-hover:translate-x-0.5 transition-transform"
+            aria-hidden="true"
+          />
+        ) : (
+          <ChevronLeft
+            className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform"
+            aria-hidden="true"
+          />
+        )}
       </button>
 
       {/* Main Slide-Out Side Panel */}
       <aside
         id="side-panel"
         data-testid="side-panel"
+        data-width-percent={clampPanelWidthPercent(panelWidthPercent)}
         aria-label="SideFlow Utility Panel"
         aria-hidden={!isPanelOpen}
-        className={`fixed top-0 right-0 ${
-          isElectronWindow ? 'bottom-0 w-full' : 'bottom-12 w-full sm:w-[500px] md:w-[560px]'
-        } bg-slate-900/90 backdrop-blur-2xl border-l border-slate-700/70 shadow-[-20px_0_50px_rgba(0,0,0,0.65)] z-30 flex flex-col side-panel-transition ${
+        style={
+          isElectronWindow
+            ? undefined
+            : {
+                width: `${clampPanelWidthPercent(panelWidthPercent)}%`,
+                minWidth: '320px',
+                maxWidth: '90vw',
+              }
+        }
+        className={`fixed top-0 ${
+          panelEdge === 'left'
+            ? 'left-0 border-r shadow-[20px_0_50px_rgba(0,0,0,0.65)]'
+            : 'right-0 border-l shadow-[-20px_0_50px_rgba(0,0,0,0.65)]'
+        } ${
+          isElectronWindow ? 'bottom-0 w-full' : 'bottom-12'
+        } bg-slate-900/90 backdrop-blur-2xl border-slate-700/70 z-30 flex flex-col side-panel-transition ${
           isPanelOpen
             ? 'translate-x-0'
+            : panelEdge === 'left'
+            ? '-translate-x-full opacity-0 pointer-events-none invisible'
             : 'translate-x-full opacity-0 pointer-events-none invisible'
         }`}
       >
+        {/* Interactive On-The-Fly Edge Resize Handle */}
+        <div
+          id="panel-resize-handle"
+          data-testid="panel-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize SideFlow Panel Width"
+          aria-valuemin={MIN_PANEL_WIDTH_PERCENT}
+          aria-valuemax={MAX_PANEL_WIDTH_PERCENT}
+          aria-valuenow={clampPanelWidthPercent(panelWidthPercent)}
+          tabIndex={isPanelOpen ? 0 : -1}
+          title={`Drag to resize panel (${clampPanelWidthPercent(
+            panelWidthPercent
+          )}% of screen) • Double-click to reset`}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            resizeDragStartRef.current = {
+              startX: e.clientX,
+              startScreenX: e.screenX,
+              startPercent: panelWidthPercentRef.current,
+              hasChanged: false,
+            };
+            setIsResizingPanel(true);
+          }}
+          onDoubleClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handleChangePanelWidthPercent(DEFAULT_PANEL_WIDTH_PERCENT, true);
+          }}
+          onKeyDown={(e) => {
+            const step = e.shiftKey ? 5 : 1;
+            if (e.key === 'ArrowLeft') {
+              e.preventDefault();
+              const delta = panelEdge === 'right' ? step : -step;
+              handleChangePanelWidthPercent(panelWidthPercent + delta, true);
+            } else if (e.key === 'ArrowRight') {
+              e.preventDefault();
+              const delta = panelEdge === 'left' ? step : -step;
+              handleChangePanelWidthPercent(panelWidthPercent + delta, true);
+            } else if (e.key === 'Home') {
+              e.preventDefault();
+              handleChangePanelWidthPercent(MIN_PANEL_WIDTH_PERCENT, true);
+            } else if (e.key === 'End') {
+              e.preventDefault();
+              handleChangePanelWidthPercent(MAX_PANEL_WIDTH_PERCENT, true);
+            }
+          }}
+          className={`absolute top-0 bottom-0 ${
+            panelEdge === 'left'
+              ? isElectronWindow
+                ? 'right-0'
+                : 'right-0 translate-x-1/2'
+              : isElectronWindow
+              ? 'left-0'
+              : 'left-0 -translate-x-1/2'
+          } w-3 cursor-ew-resize z-40 group flex items-center justify-center select-none`}
+        >
+          <div
+            className={`w-1 h-full transition-colors ${
+              isResizingPanel
+                ? 'bg-indigo-500/80 shadow-[0_0_12px_rgba(99,102,241,0.8)]'
+                : 'bg-transparent group-hover:bg-indigo-500/50'
+            }`}
+          />
+          <div
+            className={`absolute top-1/2 -translate-y-1/2 w-2.5 h-12 rounded-full border flex flex-col items-center justify-center gap-0.5 transition-all ${
+              isResizingPanel
+                ? 'bg-indigo-600 border-indigo-300 scale-110 shadow-lg'
+                : 'bg-slate-800/90 border-slate-600/80 group-hover:bg-indigo-600/90 group-hover:border-indigo-400'
+            }`}
+          >
+            <span className="w-0.5 h-3 rounded-full bg-slate-300/80" />
+          </div>
+          {isResizingPanel && (
+            <div
+              data-testid="panel-resize-hud"
+              className={`absolute top-1/2 -translate-y-1/2 ${
+                panelEdge === 'left' ? 'left-4' : 'right-4'
+              } px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-mono text-xs font-semibold shadow-xl border border-indigo-300/60 whitespace-nowrap pointer-events-none`}
+            >
+              {clampPanelWidthPercent(panelWidthPercent)}%
+            </div>
+          )}
+        </div>
+
         <Header
           activeTab={activeTab}
           onSelectTab={setActiveTab}
@@ -609,6 +1182,7 @@ export const App: React.FC = () => {
           onTogglePin={() => togglePin()}
           onClosePanel={() => togglePanel(false)}
           shortcutLabel={shortcut.label}
+          isDictating={isDictating}
         />
 
         {activeTab === 'drawers' && (
@@ -616,6 +1190,10 @@ export const App: React.FC = () => {
             drawers={drawers}
             onChangeDrawers={setDrawers}
             onNotify={notify}
+            isLocked={isDockLocked}
+            onToggleLock={() => setIsDockLocked((prev) => !prev)}
+            dockEffect={dockEffect}
+            dockIconSize={dockIconSize}
           />
         )}
 
@@ -624,29 +1202,101 @@ export const App: React.FC = () => {
             flowData={flowData}
             onChangeFlowData={setFlowData}
             onNotify={notify}
+            onInsertMermaidToNote={(mermaidCode) => {
+              const fenced = `\n\`\`\`mermaid\n${mermaidCode.trim()}\n\`\`\`\n`;
+              setNotes((prev) => {
+                if (prev.length === 0) {
+                  return [
+                    {
+                      id: `note-${Date.now()}`,
+                      title: 'Architecture Diagram',
+                      body: fenced.trimStart(),
+                      updatedAt: Date.now(),
+                    },
+                  ];
+                }
+                return prev.map((n, idx) =>
+                  idx === 0
+                    ? {
+                        ...n,
+                        body: `${n.body.replace(/\s+$/, '')}${
+                          n.body.trim() ? '\n' : ''
+                        }${fenced}`,
+                        updatedAt: Date.now(),
+                      }
+                    : n
+                );
+              });
+              notify(
+                'Inserted Mermaid into Note',
+                'check',
+                'Appended ```mermaid block to Scratchpad Note'
+              );
+            }}
           />
         )}
 
-        {activeTab === 'notes' && (
-          <NotesView
-            notes={notes}
-            onChangeNotes={setNotes}
-            onNotify={notify}
-          />
-        )}
+        <NotesView
+          notes={notes}
+          onChangeNotes={setNotes}
+          isPanelOpen={isPanelOpen}
+          isActiveTab={activeTab === 'notes'}
+          onDictatingChange={setIsDictating}
+          onNotify={notify}
+          onOpenMermaidInFlow={(nextFlow) => {
+            setFlowData(nextFlow);
+            setActiveTab('flowchart');
+            notify(
+              'Opened Mermaid in Flow Tab',
+              'check',
+              `${nextFlow.nodes.length} nodes loaded onto canvas`
+            );
+          }}
+        />
 
         {activeTab === 'settings' && (
           <SettingsView
             shortcut={shortcut}
             isRecordingHotkey={isRecordingHotkey}
-            onStartRecordingHotkey={() => setIsRecordingHotkey(true)}
+            onStartRecordingHotkey={() => setIsRecordingHotkey((prev) => !prev)}
             onResetHotkey={handleResetHotkey}
             isPinned={isPinned}
             onTogglePin={togglePin}
             showEdgeHandle={showEdgeHandle}
             onToggleEdgeHandle={setShowEdgeHandle}
+            openAtLogin={openAtLogin}
+            onToggleOpenAtLogin={handleToggleOpenAtLogin}
+            updateState={updateState}
+            onCheckForUpdates={handleCheckForUpdates}
+            onInstallUpdate={handleInstallUpdate}
+            panelEdge={panelEdge}
+            onChangePanelEdge={handleChangePanelEdge}
+            panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
+            onChangePanelWidthPercent={(nextPct) =>
+              handleChangePanelWidthPercent(nextPct, true)
+            }
+            dockEffect={dockEffect}
+            onChangeDockEffect={(effect) => {
+              setDockEffect(effect);
+              notify('Updated Dock Hover Effect', 'check', `Effect: ${effect.toUpperCase()}`);
+            }}
+            dockIconSize={dockIconSize}
+            onChangeDockIconSize={(size) => {
+              setDockIconSize(size);
+              notify('Updated Dock Tile Size', 'check', `Size: ${size.toUpperCase()}`);
+            }}
+            isDockLocked={isDockLocked}
+            onToggleDockLock={(locked) => {
+              setIsDockLocked(locked);
+              notify(
+                locked ? 'Dock Icons Locked' : 'Dock Icons Unlocked',
+                'check',
+                locked ? 'Reordering disabled' : 'Reordering enabled'
+              );
+            }}
             onOpenElectronModal={() => setIsElectronModalOpen(true)}
             onExportBackup={handleExportBackup}
+            onImportBackup={handleImportBackup}
             onResetAllData={handleResetAllData}
           />
         )}

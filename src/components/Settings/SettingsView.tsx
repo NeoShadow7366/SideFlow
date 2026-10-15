@@ -1,7 +1,31 @@
-import React from 'react';
-import { Keyboard, Cpu, Code, Download, RotateCcw } from 'lucide-react';
-import { ShortcutConfig } from '../../types/sideflow';
-import { defaultShortcut } from '../../utils/defaults';
+import React, { useRef } from 'react';
+import {
+  Keyboard,
+  Cpu,
+  Code,
+  Download,
+  Upload,
+  RotateCcw,
+  Maximize2,
+  RefreshCw,
+  CheckCircle2,
+  Sparkles,
+} from 'lucide-react';
+import {
+  AppUpdateState,
+  DockHoverEffect,
+  DockIconSize,
+  PanelEdge,
+  ShortcutConfig,
+} from '../../types/sideflow';
+import {
+  defaultShortcut,
+  DEFAULT_PANEL_WIDTH_PERCENT,
+  MIN_PANEL_WIDTH_PERCENT,
+  MAX_PANEL_WIDTH_PERCENT,
+  PANEL_WIDTH_PRESETS,
+  clampPanelWidthPercent,
+} from '../../utils/defaults';
 
 interface SettingsViewProps {
   shortcut: ShortcutConfig;
@@ -12,8 +36,24 @@ interface SettingsViewProps {
   onTogglePin: (forcePin?: boolean) => void;
   showEdgeHandle: boolean;
   onToggleEdgeHandle: (show: boolean) => void;
+  openAtLogin?: boolean;
+  onToggleOpenAtLogin?: (enabled: boolean) => void;
+  updateState?: AppUpdateState;
+  onCheckForUpdates?: () => void;
+  onInstallUpdate?: () => void;
+  panelEdge?: PanelEdge;
+  onChangePanelEdge?: (edge: PanelEdge) => void;
+  panelWidthPercent?: number;
+  onChangePanelWidthPercent?: (percent: number) => void;
+  dockEffect?: DockHoverEffect;
+  onChangeDockEffect?: (effect: DockHoverEffect) => void;
+  dockIconSize?: DockIconSize;
+  onChangeDockIconSize?: (size: DockIconSize) => void;
+  isDockLocked?: boolean;
+  onToggleDockLock?: (locked: boolean) => void;
   onOpenElectronModal: () => void;
   onExportBackup?: () => void;
+  onImportBackup?: (rawJson: string) => void;
   onResetAllData?: () => void;
 }
 
@@ -26,10 +66,49 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onTogglePin,
   showEdgeHandle,
   onToggleEdgeHandle,
+  openAtLogin = true,
+  onToggleOpenAtLogin,
+  updateState,
+  onCheckForUpdates,
+  onInstallUpdate,
+  panelEdge = 'right',
+  onChangePanelEdge,
+  panelWidthPercent = DEFAULT_PANEL_WIDTH_PERCENT,
+  onChangePanelWidthPercent,
+  dockEffect = 'zoom',
+  onChangeDockEffect,
+  dockIconSize = 'normal',
+  onChangeDockIconSize,
+  isDockLocked = false,
+  onToggleDockLock,
   onOpenElectronModal,
   onExportBackup,
+  onImportBackup,
   onResetAllData,
 }) => {
+  const backupFileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImportFileChange = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file || !onImportBackup) return;
+    try {
+      if (typeof file.text === 'function') {
+        const text = await file.text();
+        onImportBackup(text);
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => {
+          onImportBackup(String(reader.result || ''));
+        };
+        reader.readAsText(file);
+      }
+    } catch {
+      onImportBackup('');
+    }
+  };
+
   return (
     <section
       id="tab-settings"
@@ -115,7 +194,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               Show Screen-Edge Peek Handle
             </div>
             <div className="text-[11px] text-slate-400">
-              Keep a subtle tab on the right monitor edge when minimized to tray
+              Keep a subtle tab on the active monitor edge when minimized to tray
             </div>
           </div>
           <input
@@ -126,15 +205,354 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             className="w-4 h-4 accent-indigo-500 rounded"
           />
         </label>
+
+        <label className="flex items-center justify-between py-1.5 cursor-pointer border-t border-slate-800/80 pt-3">
+          <div>
+            <div className="text-xs font-medium text-slate-200">
+              Start SideFlow Automatically at Login
+            </div>
+            <div className="text-[11px] text-slate-400">
+              Launch quietly into the System Tray when you sign in to your work laptop (no admin needed)
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            id="setting-open-at-login"
+            data-testid="setting-open-at-login"
+            checked={openAtLogin}
+            onChange={(e) => onToggleOpenAtLogin?.(e.target.checked)}
+            className="w-4 h-4 accent-indigo-500 rounded"
+          />
+        </label>
+      </div>
+
+      {/* Screen Presence & Extended Panel Size */}
+      <div
+        data-testid="screen-presence-settings-card"
+        className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-3"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h3 className="text-xs font-semibold text-white uppercase tracking-wider flex items-center gap-1.5">
+              <Maximize2 className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
+              <span>Screen Presence (Extended Panel Size)</span>
+            </h3>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              Set the percentage of screen width used when extended, or drag the inner panel border to resize on the fly
+            </p>
+          </div>
+          <span
+            id="panel-width-percent-badge"
+            data-testid="panel-width-percent-badge"
+            className="px-2.5 py-1 rounded-lg bg-indigo-500/20 border border-indigo-500/40 font-mono text-xs text-indigo-300 font-semibold whitespace-nowrap"
+          >
+            {panelWidthPercent}%
+          </span>
+        </div>
+
+        <div className="flex items-center gap-3 pt-1">
+          <input
+            type="range"
+            id="setting-panel-width-slider"
+            data-testid="setting-panel-width-slider"
+            aria-label="Extended Panel Screen Percentage"
+            min={MIN_PANEL_WIDTH_PERCENT}
+            max={MAX_PANEL_WIDTH_PERCENT}
+            step={1}
+            value={panelWidthPercent}
+            onChange={(e) =>
+              onChangePanelWidthPercent?.(clampPanelWidthPercent(e.target.value))
+            }
+            className="flex-1 h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+          />
+          <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-xl px-2 py-1">
+            <input
+              type="number"
+              id="setting-panel-width-number"
+              data-testid="setting-panel-width-number"
+              aria-label="Extended Panel Width Percentage Input"
+              min={MIN_PANEL_WIDTH_PERCENT}
+              max={MAX_PANEL_WIDTH_PERCENT}
+              value={panelWidthPercent}
+              onChange={(e) => {
+                const raw = Number(e.target.value);
+                if (Number.isFinite(raw)) {
+                  onChangePanelWidthPercent?.(clampPanelWidthPercent(raw));
+                }
+              }}
+              className="w-11 bg-transparent text-xs font-mono text-white text-right focus:outline-none"
+            />
+            <span className="text-xs font-mono text-slate-400">%</span>
+          </div>
+        </div>
+
+        <div
+          role="group"
+          aria-label="Screen Presence Presets"
+          className="flex flex-wrap items-center justify-between gap-1.5 pt-1"
+        >
+          <span className="text-[11px] text-slate-400">Quick Presets:</span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {PANEL_WIDTH_PRESETS.map((preset) => {
+              const isSelected = panelWidthPercent === preset;
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  data-testid={`panel-width-preset-${preset}`}
+                  aria-pressed={isSelected}
+                  onClick={() => onChangePanelWidthPercent?.(preset)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-medium transition border ${
+                    isSelected
+                      ? 'bg-indigo-600 text-white border-indigo-400/60 shadow-sm'
+                      : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
+                  }`}
+                >
+                  {preset}%
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* ObjectDock Appearance & Placement */}
+      <div className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-3">
+        <h3 className="text-xs font-semibold text-white uppercase tracking-wider">
+          ObjectDock Appearance &amp; Placement
+        </h3>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          <div>
+            <label
+              htmlFor="setting-panel-edge"
+              className="text-[11px] text-slate-400 block mb-1"
+            >
+              Screen Edge Placement
+            </label>
+            <select
+              id="setting-panel-edge"
+              aria-label="Screen Edge Placement"
+              value={panelEdge}
+              onChange={(e) =>
+                onChangePanelEdge?.(e.target.value as PanelEdge)
+              }
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2 text-xs text-white"
+            >
+              <option value="right">Right Edge</option>
+              <option value="left">Left Edge</option>
+            </select>
+          </div>
+
+          <div>
+            <label
+              htmlFor="setting-dock-effect"
+              className="text-[11px] text-slate-400 block mb-1"
+            >
+              Dock Hover Effect
+            </label>
+            <select
+              id="setting-dock-effect"
+              aria-label="Dock Hover Effect"
+              value={dockEffect}
+              onChange={(e) =>
+                onChangeDockEffect?.(e.target.value as DockHoverEffect)
+              }
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2 text-xs text-white"
+            >
+              <option value="zoom">Zoom Magnification</option>
+              <option value="swing">Pendulum Swing</option>
+              <option value="glow">Plateau Glow</option>
+              <option value="none">None (Static)</option>
+            </select>
+          </div>
+
+          <div>
+            <label
+              htmlFor="setting-dock-size"
+              className="text-[11px] text-slate-400 block mb-1"
+            >
+              Dock Tile Size
+            </label>
+            <select
+              id="setting-dock-size"
+              aria-label="Dock Tile Size"
+              value={dockIconSize}
+              onChange={(e) =>
+                onChangeDockIconSize?.(e.target.value as DockIconSize)
+              }
+              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2 text-xs text-white"
+            >
+              <option value="compact">Compact</option>
+              <option value="normal">Normal</option>
+              <option value="large">Large</option>
+            </select>
+          </div>
+        </div>
+
+        <label className="flex items-center justify-between py-1.5 cursor-pointer border-t border-slate-800/80 pt-3">
+          <div>
+            <div className="text-xs font-medium text-slate-200">
+              Lock Dock Icons (Prevent Drag Reordering)
+            </div>
+            <div className="text-[11px] text-slate-400">
+              Prevent accidental rearrangement or deletion of app tiles and drawers
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            id="setting-lock-icons"
+            checked={isDockLocked}
+            onChange={(e) => onToggleDockLock?.(e.target.checked)}
+            className="w-4 h-4 accent-indigo-500 rounded"
+          />
+        </label>
+      </div>
+
+      {/* Work Laptop Install & Seamless Auto-Updates */}
+      <div
+        data-testid="app-updates-settings-card"
+        className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-3"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h3 className="text-xs font-semibold text-white uppercase tracking-wider flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+              <span>Work Laptop Install &amp; Auto-Updates</span>
+            </h3>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              Per-user install (<code className="font-mono text-slate-300">%LOCALAPPDATA%\Programs\SideFlow</code>) • Zero Admin / UAC prompts • Delta updates via{' '}
+              <code className="font-mono text-indigo-300">NeoShadow7366/SideFlow</code>
+            </p>
+          </div>
+          <span
+            data-testid="app-version-badge"
+            className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 font-mono text-xs text-emerald-300 font-semibold whitespace-nowrap"
+          >
+            v{updateState?.currentVersion || '1.0.0'}
+          </span>
+        </div>
+
+        {/* Status Banner */}
+        <div
+          data-testid="update-status-banner"
+          className="px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-2 text-xs"
+        >
+          <div className="flex items-center gap-2 text-slate-300">
+            {updateState?.status === 'checking' ? (
+              <>
+                <RefreshCw
+                  className="w-3.5 h-3.5 text-indigo-400 animate-spin"
+                  aria-hidden="true"
+                />
+                <span>Checking GitHub Releases for updates...</span>
+              </>
+            ) : updateState?.status === 'downloading' ? (
+              <>
+                <RefreshCw
+                  className="w-3.5 h-3.5 text-amber-400 animate-spin"
+                  aria-hidden="true"
+                />
+                <span>
+                  Downloading update v{updateState.latestVersion || ''} (
+                  {updateState.downloadPercent ?? 0}%)...
+                </span>
+              </>
+            ) : updateState?.status === 'downloaded' ? (
+              <>
+                <Sparkles
+                  className="w-3.5 h-3.5 text-emerald-400"
+                  aria-hidden="true"
+                />
+                <span className="text-emerald-300 font-medium">
+                  Update v{updateState.latestVersion} downloaded and ready to apply!
+                </span>
+              </>
+            ) : updateState?.status === 'available' ? (
+              <>
+                <Sparkles
+                  className="w-3.5 h-3.5 text-amber-400"
+                  aria-hidden="true"
+                />
+                <span className="text-amber-300 font-medium">
+                  New release v{updateState.latestVersion} is available on GitHub!
+                </span>
+              </>
+            ) : (
+              <>
+                <CheckCircle2
+                  className="w-3.5 h-3.5 text-emerald-400"
+                  aria-hidden="true"
+                />
+                <span>
+                  SideFlow is up to date (v{updateState?.currentVersion || '1.0.0'})
+                </span>
+              </>
+            )}
+          </div>
+          {updateState?.lastCheckedAt && (
+            <span className="text-[10px] font-mono text-slate-500 whitespace-nowrap">
+              Checked{' '}
+              {new Date(updateState.lastCheckedAt).toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </span>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            id="check-updates-btn"
+            data-testid="check-updates-btn"
+            disabled={
+              updateState?.status === 'checking' ||
+              updateState?.status === 'downloading'
+            }
+            onClick={() => onCheckForUpdates?.()}
+            className="flex-1 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-slate-700 text-xs text-slate-200 flex items-center justify-center gap-1.5 transition"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 text-indigo-400 ${
+                updateState?.status === 'checking' ? 'animate-spin' : ''
+              }`}
+              aria-hidden="true"
+            />
+            <span>
+              {updateState?.status === 'checking'
+                ? 'Checking...'
+                : 'Check for Updates'}
+            </span>
+          </button>
+
+          {(updateState?.status === 'downloaded' ||
+            updateState?.status === 'available') && (
+            <button
+              type="button"
+              id="install-update-btn"
+              data-testid="install-update-btn"
+              onClick={() => onInstallUpdate?.()}
+              className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white flex items-center justify-center gap-1.5 transition shadow-lg shadow-emerald-600/25"
+            >
+              <Download className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>
+                {updateState.status === 'downloaded'
+                  ? `Restart & Install v${updateState.latestVersion || ''}`
+                  : `Get Update v${updateState.latestVersion || ''}`}
+              </span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Data Backup & Reset */}
-      {(onExportBackup || onResetAllData) && (
+      {(onExportBackup || onImportBackup || onResetAllData) && (
         <div className="p-4 rounded-2xl bg-slate-950/70 border border-slate-800 space-y-3">
           <h3 className="text-xs font-semibold text-white uppercase tracking-wider">
             Workspace Data &amp; Backup
           </h3>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {onExportBackup && (
               <button
                 type="button"
@@ -144,6 +562,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <Download className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
                 <span>Export Config JSON</span>
               </button>
+            )}
+            {onImportBackup && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (backupFileInputRef.current) {
+                      backupFileInputRef.current.value = '';
+                      backupFileInputRef.current.click();
+                    }
+                  }}
+                  className="flex-1 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200 flex items-center justify-center gap-1.5 transition"
+                >
+                  <Upload className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+                  <span>Import Config JSON</span>
+                </button>
+                <input
+                  ref={backupFileInputRef}
+                  data-testid="import-backup-input"
+                  type="file"
+                  accept=".json,application/json"
+                  tabIndex={-1}
+                  aria-hidden="true"
+                  className="hidden"
+                  onChange={handleImportFileChange}
+                />
+              </>
             )}
             {onResetAllData && (
               <button

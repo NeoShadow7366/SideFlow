@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "SideFlow — Background Slide-Out Desktop Utility Panel (ObjectDock App Drawers, Flowchart Scratchpad with Lucidchart Mermaid Bridge, Voice-Dictated Notes)",
   "main": "dist-electron/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NeoShadow7366/SideFlow.git"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build && npm run build:electron",
@@ -11,11 +15,20 @@
     "electron:dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173\" \"wait-on tcp:127.0.0.1:5173 && npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "electron:start": "npm run build && electron .",
     "electron:pack": "npm run build && electron-builder --dir",
-    "electron:dist": "npm run build && electron-builder",
+    "electron:dist": "npm run build && electron-builder --publish never",
+    "electron:publish": "npm run build && electron-builder --win nsis --publish always",
+    "release": "node scripts/release.mjs auto",
+    "release:patch": "node scripts/release.mjs patch",
+    "release:minor": "node scripts/release.mjs minor",
+    "release:major": "node scripts/release.mjs major",
+    "release:local": "node scripts/release.mjs auto --local",
+    "release:dry": "node scripts/release.mjs auto --dry-run",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.3.1",
+    "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -47,17 +60,47 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "electron/icon.png"
+      "electron/icon.png",
+      "electron/stt_worker.py"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/icon.png",
+        "to": "electron/icon.png"
+      },
+      {
+        "from": "electron/stt_worker.py",
+        "to": "electron/stt_worker.py"
+      }
     ],
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "NeoShadow7366",
+        "repo": "SideFlow",
+        "releaseType": "release"
+      }
+    ],
     "win": {
       "target": [
         "nsis",
         "portable"
       ],
       "icon": "electron/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "SideFlow",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "mac": {
       "target": [

@@ -107,7 +107,7 @@ export const ElectronModal: React.FC<ElectronModalProps> = ({
             onClick={handleCopyCode}
             className="absolute top-2.5 right-2.5 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs flex items-center gap-1 z-10"
           >
-            <Copy className="w-3 h-3" aria-hidden="true" /> Copy main.js
+            <Copy className="w-3 h-3" aria-hidden="true" /> Copy main.ts
           </button>
           <pre
             id="electron-code-block"

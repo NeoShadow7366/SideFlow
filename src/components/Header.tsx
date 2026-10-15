@@ -17,6 +17,7 @@ interface HeaderProps {
   onTogglePin: () => void;
   onClosePanel: () => void;
   shortcutLabel: string;
+  isDictating?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -26,6 +27,7 @@ export const Header: React.FC<HeaderProps> = ({
   onTogglePin,
   onClosePanel,
   shortcutLabel,
+  isDictating = false,
 }) => {
   const navTabs: { id: TabId; label?: string; title: string; icon: React.ReactNode }[] = [
     {
@@ -48,6 +50,7 @@ export const Header: React.FC<HeaderProps> = ({
     },
     {
       id: 'settings',
+      label: 'Config',
       title: 'Shortcut & Tray Settings',
       icon: <Sliders className="w-3.5 h-3.5" aria-hidden="true" />,
     },
@@ -109,7 +112,9 @@ export const Header: React.FC<HeaderProps> = ({
               role="tab"
               aria-selected={isActive}
               aria-controls={`tab-${tab.id}`}
-              aria-label={tab.label || tab.title}
+              aria-label={
+                tab.id === 'settings' ? tab.title : tab.label || tab.title
+              }
               title={tab.title}
               onClick={() => onSelectTab(tab.id)}
               onKeyDown={(e) => handleTabKeyDown(e, idx)}
@@ -121,6 +126,16 @@ export const Header: React.FC<HeaderProps> = ({
             >
               {tab.icon}
               {tab.label && <span>{tab.label}</span>}
+              {tab.id === 'notes' && isDictating && (
+                <span
+                  data-testid="header-dictating-indicator"
+                  title="Voice Dictation Active in Background"
+                  className="relative flex h-2 w-2 ml-0.5"
+                >
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500" />
+                </span>
+              )}
             </button>
           );
         })}

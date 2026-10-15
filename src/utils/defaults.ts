@@ -72,6 +72,23 @@ export const defaultShortcut: ShortcutConfig = {
   label: 'Alt + Space',
 };
 
+export const DEFAULT_PANEL_WIDTH_PERCENT = 35;
+export const MIN_PANEL_WIDTH_PERCENT = 15;
+export const MAX_PANEL_WIDTH_PERCENT = 90;
+export const PANEL_WIDTH_PRESETS = [25, 35, 50, 65, 75] as const;
+
+export function clampPanelWidthPercent(value: unknown): number {
+  if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) {
+    return DEFAULT_PANEL_WIDTH_PERCENT;
+  }
+  const num = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(num)) return DEFAULT_PANEL_WIDTH_PERCENT;
+  return Math.max(
+    MIN_PANEL_WIDTH_PERCENT,
+    Math.min(MAX_PANEL_WIDTH_PERCENT, Math.round(num))
+  );
+}
+
 export const ELECTRON_WRAPPER_CODE = `// electron/main.ts — Electron Background Tray + Global Shortcut + Native App Launcher
 const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, shell, screen, dialog } = require('electron');
 const { exec } = require('child_process');

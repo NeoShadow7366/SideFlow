@@ -26,8 +26,43 @@ body {
   z-index: 20;
 }
 
-.dock-item:active {
+.dock-item:active:not(:has(button:hover)):not(:has(button:active)) {
   transform: translateY(-2px) scale(0.96);
+}
+
+@keyframes objectdock-swing {
+  0% {
+    transform: translateY(-4px) rotate(0deg) scale(1.06);
+  }
+  25% {
+    transform: translateY(-4px) rotate(-6deg) scale(1.08);
+  }
+  75% {
+    transform: translateY(-4px) rotate(6deg) scale(1.08);
+  }
+  100% {
+    transform: translateY(-4px) rotate(0deg) scale(1.06);
+  }
+}
+
+.dock-effect-swing:hover,
+.dock-effect-swing:focus-visible {
+  animation: objectdock-swing 0.55s ease-in-out;
+  transform: translateY(-4px) scale(1.06);
+  z-index: 20;
+}
+
+.dock-effect-glow:hover,
+.dock-effect-glow:focus-visible {
+  transform: translateY(-3px) scale(1.04);
+  box-shadow: 0 0 18px rgba(99, 102, 241, 0.55),
+    inset 0 0 10px rgba(99, 102, 241, 0.25);
+  z-index: 20;
+}
+
+.dock-effect-none:hover,
+.dock-effect-none:focus-visible {
+  transform: none;
 }
 
 /* Drag-and-Drop Drawer Highlight */
