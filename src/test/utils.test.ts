@@ -15,6 +15,7 @@ import {
   executeAppCommand,
 } from '../utils/fileMeta';
 import {
+  alignOrDistributeNodes,
   computeDagLayout,
   computeEdgeGeometry,
   computeSubgraphBounds,
@@ -22,8 +23,12 @@ import {
   formatSequenceMessageOperator,
   generateMermaidCode,
   getMermaidTemplatePreset,
+  getNodeDimensions,
+  insertNodeOnEdge,
   parseMermaidCode,
   generateStandaloneSVG,
+  renderFlowchartToPngData,
+  spliceExistingNodeOnEdge,
 } from '../utils/mermaid';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { FlowchartState } from '../types/sideflow';
@@ -452,19 +457,81 @@ describe('Mermaid & SVG Flowchart utilities', () => {
     ],
   };
 
-  describe('computeEdgeGeometry', () => {
+  describe('computeEdgeGeometry & getNodeDimensions', () => {
     it('anchors vertical edges to top/bottom node boundary ports and horizontal edges to left/right ports', () => {
       const topNode = { id: 'a', type: 'start' as const, text: 'A', x: 50, y: 20 };
       const bottomNode = { id: 'b', type: 'process' as const, text: 'B', x: 50, y: 180 };
       const vGeom = computeEdgeGeometry(topNode, bottomNode);
       expect(vGeom.y1).toBe(20 + 52);
       expect(vGeom.y2).toBe(180);
+      expect(vGeom.pathData).toContain('C '); // Default Curved Bezier
 
       const leftNode = { id: 'l', type: 'start' as const, text: 'L', x: 20, y: 100 };
       const rightNode = { id: 'r', type: 'process' as const, text: 'R', x: 280, y: 100 };
       const hGeom = computeEdgeGeometry(leftNode, rightNode);
       expect(hGeom.x1).toBe(20 + 144);
       expect(hGeom.x2).toBe(280);
+      expect(hGeom.pathData).toContain('C ');
+    });
+
+    it('supports Curved Bezier (default), Orthogonal elbow, and Straight connector routing plus dynamic UML/ER node dimensions and negative subgraph coordinates', () => {
+      const nA = {
+        id: 'u1',
+        type: 'process' as const,
+        text: 'User',
+        x: 40,
+        y: 30,
+        stereotype: 'entity',
+        members: ['+id: uuid', '+email: string'],
+      };
+      const nB = { id: 'u2', type: 'process' as const, text: 'Account', x: 220, y: 260 };
+
+      const dims = getNodeDimensions(nA);
+      expect(dims.width).toBe(144);
+      expect(dims.height).toBeGreaterThan(52);
+
+      const bezier = computeEdgeGeometry(
+        nA,
+        nB,
+        dims.width,
+        dims.height,
+        'TD',
+        'bezier'
+      );
+      expect(bezier.pathData).toContain('C ');
+      expect(bezier.y1).toBe(30 + dims.height);
+
+      const ortho = computeEdgeGeometry(
+        nA,
+        nB,
+        dims.width,
+        dims.height,
+        'TD',
+        'orthogonal'
+      );
+      expect(ortho.pathData).toContain('L ');
+      expect(ortho.pathData).not.toContain('C ');
+
+      const straight = computeEdgeGeometry(
+        nA,
+        nB,
+        dims.width,
+        dims.height,
+        'TD',
+        'straight'
+      );
+      expect(straight.pathData).toBe(
+        `M ${straight.x1} ${straight.y1} L ${straight.x2} ${straight.y2}`
+      );
+
+      // Verify negative canvas coordinates are preserved in computeSubgraphBounds
+      const negBounds = computeSubgraphBounds(
+        { id: 'sg_neg', title: 'Negative Quadrant', nodeIds: ['neg1'] },
+        [{ id: 'neg1', type: 'process', text: 'NegNode', x: -240, y: -180 }]
+      );
+      expect(negBounds).not.toBeNull();
+      expect(negBounds!.x).toBeLessThan(0);
+      expect(negBounds!.y).toBeLessThan(0);
     });
   });
 
@@ -1234,4 +1301,119 @@ describe('Screen Presence clampPanelWidthPercent utility', () => {
     expect(clampPanelWidthPercent(false)).toBe(DEFAULT_PANEL_WIDTH_PERCENT);
   });
 });
+
+describe('Flowchart Edge Splicing, Multi-Select Alignment & High-DPI PNG Export utilities', () => {
+  it('splices a new node onto an edge via insertNodeOnEdge and splices an existing node via spliceExistingNodeOnEdge', () => {
+    const baseState: FlowchartState = {
+      nodes: [
+        { id: 'n1', type: 'start', text: 'Start', x: 40, y: 40 },
+        { id: 'n2', type: 'process', text: 'End', x: 40, y: 120 },
+        { id: 'n3', type: 'database', text: 'Audit Log', x: 240, y: 80 },
+      ],
+      edges: [
+        {
+          from: 'n1',
+          to: 'n2',
+          label: 'Yes',
+          style: 'dotted',
+          curve: 'orthogonal',
+        },
+      ],
+      subgraphs: [{ id: 'sg1', title: 'Core', nodeIds: ['n1', 'n2'] }],
+    };
+
+    const res = insertNodeOnEdge(baseState, 0, 'n4', 'process', 'Validate');
+    expect(res).not.toBeNull();
+    expect(res!.createdNode).toMatchObject({
+      id: 'n4',
+      type: 'process',
+      text: 'Validate',
+    });
+    expect(res!.state.edges).toEqual([
+      {
+        from: 'n1',
+        to: 'n4',
+        label: 'Yes',
+        style: 'dotted',
+        curve: 'orthogonal',
+      },
+      {
+        from: 'n4',
+        to: 'n2',
+        style: 'dotted',
+        curve: 'orthogonal',
+      },
+    ]);
+    // Both n1 and n2 belonged to sg1, so n4 is automatically added to sg1
+    expect(res!.state.subgraphs?.[0].nodeIds).toContain('n4');
+    // Tight downstream node n2 was nudged downward for clean spacing
+    const nudgedN2 = res!.state.nodes.find((n) => n.id === 'n2')!;
+    expect(nudgedN2.y).toBeGreaterThan(120);
+
+    // Splice existing unconnected node n3 onto the second edge (n4 -> n2)
+    const spliced = spliceExistingNodeOnEdge(res!.state, 1, 'n3');
+    expect(spliced).not.toBeNull();
+    expect(spliced!.edges).toEqual([
+      {
+        from: 'n1',
+        to: 'n4',
+        label: 'Yes',
+        style: 'dotted',
+        curve: 'orthogonal',
+      },
+      {
+        from: 'n4',
+        to: 'n3',
+        style: 'dotted',
+        curve: 'orthogonal',
+      },
+      {
+        from: 'n3',
+        to: 'n2',
+        style: 'dotted',
+        curve: 'orthogonal',
+      },
+    ]);
+  });
+
+  it('aligns and distributes multi-selected nodes via alignOrDistributeNodes', () => {
+    const state: FlowchartState = {
+      nodes: [
+        { id: 'a', type: 'process', text: 'A', x: 30, y: 20 },
+        { id: 'b', type: 'process', text: 'B', x: 90, y: 110 },
+        { id: 'c', type: 'process', text: 'C', x: 150, y: 260 },
+      ],
+      edges: [],
+    };
+
+    const alignedX = alignOrDistributeNodes(state, ['a', 'b', 'c'], 'align-x');
+    expect(alignedX.nodes[0].x).toBe(alignedX.nodes[1].x);
+    expect(alignedX.nodes[1].x).toBe(alignedX.nodes[2].x);
+
+    const alignedY = alignOrDistributeNodes(state, ['a', 'b', 'c'], 'align-y');
+    expect(alignedY.nodes[0].y).toBe(alignedY.nodes[1].y);
+    expect(alignedY.nodes[1].y).toBe(alignedY.nodes[2].y);
+
+    const distributed = alignOrDistributeNodes(
+      state,
+      ['a', 'b', 'c'],
+      'distribute'
+    );
+    expect(distributed.nodes.find((n) => n.id === 'b')?.y).toBe(144);
+  });
+
+  it('renders flowchart SVG and PNG data via renderFlowchartToPngData', async () => {
+    const state: FlowchartState = {
+      nodes: [
+        { id: 'n1', type: 'start', text: 'Start', x: 40, y: 40 },
+        { id: 'n2', type: 'process', text: 'Done', x: 40, y: 140 },
+      ],
+      edges: [{ from: 'n1', to: 'n2' }],
+    };
+    const res = await renderFlowchartToPngData(state, 2);
+    expect(res.svgString).toContain('<svg');
+    expect(res.dataUrl.length).toBeGreaterThan(20);
+  });
+});
+
 

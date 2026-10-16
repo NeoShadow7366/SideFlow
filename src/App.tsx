@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Layers,
   PanelRightOpen,
   Terminal,
   Folder,
@@ -13,7 +12,6 @@ import {
   GitBranch,
   Mic,
   Settings,
-  Zap,
   Wifi,
   Volume2,
 } from 'lucide-react';
@@ -47,6 +45,7 @@ import { NotesView } from './components/Notes/NotesView';
 import { SettingsView } from './components/Settings/SettingsView';
 import { ElectronModal } from './components/ElectronModal';
 import { DynamicIcon } from './components/DynamicIcon';
+import { SideFlowIcon } from './components/SideFlowIcon';
 
 export const App: React.FC = () => {
   const [drawers, setDrawers] = useLocalStorage<AppDrawer[]>(
@@ -722,8 +721,8 @@ export const App: React.FC = () => {
           {/* Top Desktop Helper Banner */}
           <div className="flex flex-wrap items-center justify-between gap-4 max-w-4xl bg-slate-900/80 backdrop-blur-md border border-slate-700/60 rounded-2xl px-5 py-3.5 shadow-2xl z-10">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-indigo-400">
-                <Layers className="w-5 h-5" aria-hidden="true" />
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-600 via-blue-500 to-cyan-400 border border-cyan-300/30 flex items-center justify-center text-white shadow-md shadow-indigo-500/20">
+                <SideFlowIcon className="w-5 h-5" aria-hidden="true" />
               </div>
               <div>
                 <div className="flex items-center gap-2">
@@ -947,7 +946,7 @@ export const App: React.FC = () => {
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-400" />
                 </span>
-                <Zap className="w-3.5 h-3.5" aria-hidden="true" />
+                <SideFlowIcon className="w-4 h-4" aria-hidden="true" />
                 <span className="text-xs font-medium">SideFlow Tray</span>
               </button>
 
@@ -1202,6 +1201,7 @@ export const App: React.FC = () => {
             flowData={flowData}
             onChangeFlowData={setFlowData}
             onNotify={notify}
+            panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
             onInsertMermaidToNote={(mermaidCode) => {
               const fenced = `\n\`\`\`mermaid\n${mermaidCode.trim()}\n\`\`\`\n`;
               setNotes((prev) => {

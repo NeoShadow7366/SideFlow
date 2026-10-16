@@ -22,8 +22,10 @@ import {
   Zap,
   LucideProps,
 } from 'lucide-react';
+import { SideFlowIcon } from './SideFlowIcon';
 
 const iconMap: Record<string, React.ComponentType<LucideProps>> = {
+  sideflow: SideFlowIcon,
   terminal: Terminal,
   globe: Globe,
   music: Music,

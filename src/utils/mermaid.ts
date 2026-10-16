@@ -5,6 +5,7 @@ import {
   FlowEdge,
   FlowNodeType,
   FlowEdgeStyle,
+  FlowEdgeCurve,
   FlowEdgeArrow,
   FlowDirection,
   FlowSubgraph,
@@ -270,6 +271,22 @@ function inferAccentColorFromStyle(raw: string): AccentColor | undefined {
   return undefined;
 }
 
+export function getNodeDimensions(
+  node: FlowNode,
+  baseWidth = 144,
+  baseHeight = 52
+): { width: number; height: number } {
+  const memberCount = node.members?.length || 0;
+  const height =
+    memberCount > 0 || node.stereotype
+      ? Math.max(
+          baseHeight,
+          34 + memberCount * 14 + (node.stereotype ? 14 : 0)
+        )
+      : baseHeight;
+  return { width: baseWidth, height };
+}
+
 export function computeSubgraphBounds(
   subgraph: FlowSubgraph,
   nodes: FlowNode[],
@@ -286,16 +303,26 @@ export function computeSubgraphBounds(
 
   const minX = Math.min(...members.map((n) => n.x)) - padX;
   const minY = Math.min(...members.map((n) => n.y)) - padTop;
-  const maxX = Math.max(...members.map((n) => n.x + nodeWidth)) + padX;
-  const maxY = Math.max(...members.map((n) => n.y + nodeHeight)) + padBottom;
+  const maxX =
+    Math.max(
+      ...members.map(
+        (n) => n.x + getNodeDimensions(n, nodeWidth, nodeHeight).width
+      )
+    ) + padX;
+  const maxY =
+    Math.max(
+      ...members.map(
+        (n) => n.y + getNodeDimensions(n, nodeWidth, nodeHeight).height
+      )
+    ) + padBottom;
 
   return {
     id: subgraph.id,
     title: subgraph.title,
-    x: Math.max(4, minX),
-    y: Math.max(4, minY),
-    width: Math.max(180, maxX - Math.max(4, minX)),
-    height: Math.max(96, maxY - Math.max(4, minY)),
+    x: minX,
+    y: minY,
+    width: Math.max(180, maxX - minX),
+    height: Math.max(96, maxY - minY),
   };
 }
 
@@ -460,12 +487,15 @@ export function computeEdgeGeometry(
   toNode: FlowNode,
   nodeWidth = 144,
   nodeHeight = 52,
-  direction?: FlowDirection
+  direction?: FlowDirection,
+  curve: FlowEdgeCurve = 'bezier',
+  toNodeWidth = nodeWidth,
+  toNodeHeight = nodeHeight
 ): EdgeGeometry {
   const cx1 = fromNode.x + nodeWidth / 2;
   const cy1 = fromNode.y + nodeHeight / 2;
-  const cx2 = toNode.x + nodeWidth / 2;
-  const cy2 = toNode.y + nodeHeight / 2;
+  const cx2 = toNode.x + toNodeWidth / 2;
+  const cy2 = toNode.y + toNodeHeight / 2;
 
   let x1 = cx1;
   let y1 = cy1;
@@ -482,22 +512,38 @@ export function computeEdgeGeometry(
       y2 = toNode.y;
     } else {
       y1 = fromNode.y;
-      y2 = toNode.y + nodeHeight;
+      y2 = toNode.y + toNodeHeight;
     }
-    const dy = y2 - y1;
-    const controlOffset = Math.max(Math.abs(dy) * 0.45, 24) * (dy >= 0 ? 1 : -1);
-    pathData = `M ${x1} ${y1} C ${x1} ${y1 + controlOffset}, ${x2} ${y2 - controlOffset}, ${x2} ${y2}`;
+    const midY = Math.round((y1 + y2) / 2);
+    if (curve === 'straight') {
+      pathData = `M ${x1} ${y1} L ${x2} ${y2}`;
+    } else if (curve === 'orthogonal') {
+      pathData = `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`;
+    } else {
+      const dy = y2 - y1;
+      const controlOffset =
+        Math.max(Math.abs(dy) * 0.45, 24) * (dy >= 0 ? 1 : -1);
+      pathData = `M ${x1} ${y1} C ${x1} ${y1 + controlOffset}, ${x2} ${y2 - controlOffset}, ${x2} ${y2}`;
+    }
   } else {
     if (cx2 >= cx1) {
       x1 = fromNode.x + nodeWidth;
       x2 = toNode.x;
     } else {
       x1 = fromNode.x;
-      x2 = toNode.x + nodeWidth;
+      x2 = toNode.x + toNodeWidth;
     }
-    const dx = x2 - x1;
-    const controlOffset = Math.max(Math.abs(dx) * 0.45, 24) * (dx >= 0 ? 1 : -1);
-    pathData = `M ${x1} ${y1} C ${x1 + controlOffset} ${y1}, ${x2 - controlOffset} ${y2}, ${x2} ${y2}`;
+    const midX = Math.round((x1 + x2) / 2);
+    if (curve === 'straight') {
+      pathData = `M ${x1} ${y1} L ${x2} ${y2}`;
+    } else if (curve === 'orthogonal') {
+      pathData = `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
+    } else {
+      const dx = x2 - x1;
+      const controlOffset =
+        Math.max(Math.abs(dx) * 0.45, 24) * (dx >= 0 ? 1 : -1);
+      pathData = `M ${x1} ${y1} C ${x1 + controlOffset} ${y1}, ${x2 - controlOffset} ${y2}, ${x2} ${y2}`;
+    }
   }
 
   return {
@@ -2075,10 +2121,14 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
         .join('\n    ')
     : '';
 
+  const nodesById = new Map<string, FlowNode>(
+    flowData.nodes.map((n) => [n.id, n])
+  );
+
   const edgesSvg = flowData.edges
     .map((edge, idx) => {
-      const fromNode = flowData.nodes.find((n) => n.id === edge.from);
-      const toNode = flowData.nodes.find((n) => n.id === edge.to);
+      const fromNode = nodesById.get(edge.from);
+      const toNode = nodesById.get(edge.to);
       if (!fromNode || !toNode) return '';
 
       let pathData: string;
@@ -2093,12 +2143,17 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
         midX = Math.round((x1 + x2) / 2);
         midY = y;
       } else {
+        const fromDim = getNodeDimensions(fromNode);
+        const toDim = getNodeDimensions(toNode);
         const geom = computeEdgeGeometry(
           fromNode,
           toNode,
-          144,
-          52,
-          flowData.direction
+          fromDim.width,
+          fromDim.height,
+          flowData.direction,
+          edge.curve || flowData.edgeCurve || 'bezier',
+          toDim.width,
+          toDim.height
         );
         pathData = geom.pathData;
         midX = geom.midX;
@@ -2270,3 +2325,305 @@ function subgraphBoundsSvgBlock(subgraphsSvg: string): string {
   if (!subgraphsSvg) return '';
   return `\n  <g id="subgraphs">\n    ${subgraphsSvg}\n  </g>`;
 }
+
+/**
+ * Splices a newly created node directly onto an existing edge (`from -> to` becomes `from -> newNodeId -> to`).
+ * Automatically nudges the target node if needed so the spliced step has clean breathing room.
+ */
+export function insertNodeOnEdge(
+  state: FlowchartState,
+  edgeIndex: number,
+  newNodeId: string,
+  nodeType: FlowNodeType = 'process',
+  nodeText = 'New Step'
+): { state: FlowchartState; createdNode: FlowNode } | null {
+  const edge = state.edges[edgeIndex];
+  if (!edge) return null;
+  const fromNode = state.nodes.find((n) => n.id === edge.from);
+  const toNode = state.nodes.find((n) => n.id === edge.to);
+  if (!fromNode || !toNode) return null;
+
+  const dx = toNode.x - fromNode.x;
+  const dy = toNode.y - fromNode.y;
+  const isPrimarilyVertical = Math.abs(dy) >= Math.abs(dx) * 0.5;
+
+  let adjustedToX = toNode.x;
+  let adjustedToY = toNode.y;
+  if (isPrimarilyVertical && Math.abs(dy) < 160) {
+    adjustedToY = fromNode.y + (dy >= 0 ? 192 : -192);
+  } else if (!isPrimarilyVertical && Math.abs(dx) < 260) {
+    adjustedToX = fromNode.x + (dx >= 0 ? 320 : -320);
+  }
+
+  const midX = Math.round(((fromNode.x + adjustedToX) / 2) / 8) * 8;
+  const midY = Math.round(((fromNode.y + adjustedToY) / 2) / 8) * 8;
+
+  const createdNode: FlowNode = {
+    id: newNodeId,
+    type: nodeType,
+    text: nodeText,
+    x: midX,
+    y: midY,
+    ...(fromNode.color ? { color: fromNode.color } : {}),
+  };
+
+  const updatedNodes = state.nodes.map((n) =>
+    n.id === toNode.id ? { ...n, x: adjustedToX, y: adjustedToY } : n
+  );
+
+  const firstEdge: FlowEdge = {
+    from: edge.from,
+    to: newNodeId,
+    ...(edge.label ? { label: edge.label } : {}),
+    ...(edge.style ? { style: edge.style } : {}),
+    ...(edge.arrow ? { arrow: edge.arrow } : {}),
+    ...(edge.cardinality ? { cardinality: edge.cardinality } : {}),
+    ...(edge.curve ? { curve: edge.curve } : {}),
+  };
+
+  const secondEdge: FlowEdge = {
+    from: newNodeId,
+    to: edge.to,
+    ...(edge.style ? { style: edge.style } : {}),
+    ...(edge.arrow ? { arrow: edge.arrow } : {}),
+    ...(edge.curve ? { curve: edge.curve } : {}),
+  };
+
+  const updatedEdges = [
+    ...state.edges.slice(0, edgeIndex),
+    firstEdge,
+    secondEdge,
+    ...state.edges.slice(edgeIndex + 1),
+  ];
+
+  const updatedSubgraphs = state.subgraphs?.map((sg) => {
+    if (
+      sg.nodeIds.includes(edge.from) &&
+      sg.nodeIds.includes(edge.to) &&
+      !sg.nodeIds.includes(newNodeId)
+    ) {
+      return { ...sg, nodeIds: [...sg.nodeIds, newNodeId] };
+    }
+    return sg;
+  });
+
+  return {
+    createdNode,
+    state: {
+      ...state,
+      nodes: [...updatedNodes, createdNode],
+      edges: updatedEdges,
+      ...(updatedSubgraphs ? { subgraphs: updatedSubgraphs } : {}),
+    },
+  };
+}
+
+/**
+ * Splices an existing node onto an edge (`from -> to` becomes `from -> nodeId -> to`).
+ */
+export function spliceExistingNodeOnEdge(
+  state: FlowchartState,
+  edgeIndex: number,
+  nodeId: string
+): FlowchartState {
+  const edge = state.edges[edgeIndex];
+  if (!edge || edge.from === nodeId || edge.to === nodeId) return state;
+  const nodeExists = state.nodes.some((n) => n.id === nodeId);
+  if (!nodeExists) return state;
+
+  const firstEdge: FlowEdge = {
+    from: edge.from,
+    to: nodeId,
+    ...(edge.label ? { label: edge.label } : {}),
+    ...(edge.style ? { style: edge.style } : {}),
+    ...(edge.arrow ? { arrow: edge.arrow } : {}),
+    ...(edge.cardinality ? { cardinality: edge.cardinality } : {}),
+    ...(edge.curve ? { curve: edge.curve } : {}),
+  };
+
+  const secondEdge: FlowEdge = {
+    from: nodeId,
+    to: edge.to,
+    ...(edge.style ? { style: edge.style } : {}),
+    ...(edge.arrow ? { arrow: edge.arrow } : {}),
+    ...(edge.curve ? { curve: edge.curve } : {}),
+  };
+
+  return {
+    ...state,
+    edges: [
+      ...state.edges.slice(0, edgeIndex),
+      firstEdge,
+      secondEdge,
+      ...state.edges.slice(edgeIndex + 1),
+    ],
+  };
+}
+
+/**
+ * Aligns or evenly distributes a multi-selection of nodes (`selectedIds.length >= 2`).
+ */
+export function alignOrDistributeNodes(
+  state: FlowchartState,
+  selectedIds: string[],
+  mode: 'align-x' | 'align-y' | 'distribute'
+): FlowchartState {
+  if (selectedIds.length < 2) return state;
+  const idSet = new Set(selectedIds);
+  const selectedNodes = state.nodes.filter((n) => idSet.has(n.id));
+  if (selectedNodes.length < 2) return state;
+
+  if (mode === 'align-x') {
+    const avgX =
+      Math.round(
+        selectedNodes.reduce((sum, n) => sum + n.x, 0) /
+          selectedNodes.length /
+          8
+      ) * 8;
+    return {
+      ...state,
+      nodes: state.nodes.map((n) => (idSet.has(n.id) ? { ...n, x: avgX } : n)),
+    };
+  }
+
+  if (mode === 'align-y') {
+    const avgY =
+      Math.round(
+        selectedNodes.reduce((sum, n) => sum + n.y, 0) /
+          selectedNodes.length /
+          8
+      ) * 8;
+    return {
+      ...state,
+      nodes: state.nodes.map((n) => (idSet.has(n.id) ? { ...n, y: avgY } : n)),
+    };
+  }
+
+  // Distribute evenly along the dominant span axis
+  const minX = Math.min(...selectedNodes.map((n) => n.x));
+  const maxX = Math.max(...selectedNodes.map((n) => n.x));
+  const minY = Math.min(...selectedNodes.map((n) => n.y));
+  const maxY = Math.max(...selectedNodes.map((n) => n.y));
+  const distributeHorizontally = maxX - minX > maxY - minY;
+
+  const sorted = [...selectedNodes].sort((a, b) =>
+    distributeHorizontally ? a.x - b.x : a.y - b.y
+  );
+  const count = sorted.length;
+  const startVal = distributeHorizontally ? sorted[0].x : sorted[0].y;
+  const endVal = distributeHorizontally
+    ? sorted[count - 1].x
+    : sorted[count - 1].y;
+  const minStep = distributeHorizontally ? 176 : 96;
+  const step = Math.max(
+    minStep,
+    Math.round((endVal - startVal) / Math.max(1, count - 1))
+  );
+
+  const posMap = new Map<string, number>();
+  sorted.forEach((n, idx) => {
+    posMap.set(n.id, Math.round((startVal + idx * step) / 8) * 8);
+  });
+
+  return {
+    ...state,
+    nodes: state.nodes.map((n) => {
+      const targetCoord = posMap.get(n.id);
+      if (targetCoord === undefined) return n;
+      return distributeHorizontally
+        ? { ...n, x: targetCoord }
+        : { ...n, y: targetCoord };
+    }),
+  };
+}
+
+/**
+ * Renders a FlowchartState into a standalone SVG and high-DPI PNG Data URL / Blob for clipboard or download.
+ */
+export async function renderFlowchartToPngData(
+  state: FlowchartState,
+  scale = 2
+): Promise<{ blob: Blob | null; dataUrl: string; svgString: string }> {
+  const svgString = generateStandaloneSVG(state);
+  const svgDataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+    svgString
+  )}`;
+
+  const widthMatch = svgString.match(/width="(\d+)"/);
+  const heightMatch = svgString.match(/height="(\d+)"/);
+  const width = widthMatch ? Number(widthMatch[1]) : 640;
+  const height = heightMatch ? Number(heightMatch[1]) : 420;
+
+  if (
+    typeof document === 'undefined' ||
+    (typeof navigator !== 'undefined' &&
+      /jsdom/i.test(navigator.userAgent || ''))
+  ) {
+    const fallbackBlob =
+      typeof Blob !== 'undefined'
+        ? new Blob([svgString], { type: 'image/png' })
+        : null;
+    return { blob: fallbackBlob, dataUrl: svgDataUrl, svgString };
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (blob: Blob | null, dataUrl: string) => {
+      if (settled) return;
+      settled = true;
+      resolve({ blob, dataUrl, svgString });
+    };
+
+    // Safety timeout for headless/JSDOM environments where Image.onload does not fire
+    const timer = setTimeout(() => {
+      const fallbackBlob = new Blob([svgString], { type: 'image/png' });
+      finish(fallbackBlob, svgDataUrl);
+    }, 120);
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = width * scale;
+      canvas.height = height * scale;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        clearTimeout(timer);
+        const fallbackBlob = new Blob([svgString], { type: 'image/png' });
+        finish(fallbackBlob, svgDataUrl);
+        return;
+      }
+
+      const img = new Image();
+      img.onload = () => {
+        clearTimeout(timer);
+        try {
+          ctx.scale(scale, scale);
+          ctx.fillStyle = '#020617';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          const pngDataUrl = canvas.toDataURL('image/png');
+          if (typeof canvas.toBlob === 'function') {
+            canvas.toBlob((b) => {
+              finish(
+                b || new Blob([svgString], { type: 'image/png' }),
+                pngDataUrl
+              );
+            }, 'image/png');
+          } else {
+            finish(new Blob([svgString], { type: 'image/png' }), pngDataUrl);
+          }
+        } catch {
+          finish(new Blob([svgString], { type: 'image/png' }), svgDataUrl);
+        }
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        finish(new Blob([svgString], { type: 'image/png' }), svgDataUrl);
+      };
+      img.src = svgDataUrl;
+    } catch {
+      clearTimeout(timer);
+      finish(new Blob([svgString], { type: 'image/png' }), svgDataUrl);
+    }
+  });
+}
+

@@ -1543,4 +1543,270 @@ describe('SideFlow Application Integration Suite', () => {
       expect(setPanelWidthPercentMock).toHaveBeenLastCalledWith(35);
     });
   });
+
+  describe('Flowchart Rapid Authoring (Lucidchart/draw.io Parity), Performance & Adaptive Layout', () => {
+    it('supports directional quick-add (+) ports, Decision auto-branch labeling, Tab keyboard branching, in-place shape switching, duplication, and non-destructive SVG edge selection', () => {
+      render(<App />);
+      fireEvent.click(screen.getByRole('tab', { name: /Flow/i }));
+
+      // Default edge curve is Curved Bezier ('bezier')
+      const curveSelect = screen.getByTestId(
+        'connector-curve-select'
+      ) as HTMLSelectElement;
+      expect(curveSelect.value).toBe('bezier');
+
+      // 1. Directional quick-add from Decision node n2 -> first labeled branch auto-labels "Yes"
+      const n2RightPort = screen.getByTestId('quick-add-right-n2');
+      fireEvent.click(n2RightPort);
+
+      // Inline editor opens immediately for the newly spawned node
+      const inlineInput = screen.getByLabelText(
+        /Edit node label/i
+      ) as HTMLInputElement;
+      fireEvent.change(inlineInput, { target: { value: 'Skip Action' } });
+
+      // 2. Press Tab while editing to commit "Skip Action" AND immediately spawn + link the next node!
+      fireEvent.keyDown(inlineInput, { key: 'Tab' });
+      expect(screen.getByText('Skip Action')).toBeInTheDocument();
+      // Verify first Decision branch automatically got labeled "Yes"
+      expect(
+        screen.getByRole('button', { name: /Edit edge label Yes/i })
+      ).toBeInTheDocument();
+
+      // Name the Tab-spawned node and commit with Enter
+      const tabSpawnedInput = screen.getByLabelText(
+        /Edit node label/i
+      ) as HTMLInputElement;
+      fireEvent.change(tabSpawnedInput, { target: { value: 'Return Idle' } });
+      fireEvent.keyDown(tabSpawnedInput, { key: 'Enter' });
+      expect(screen.getByText('Return Idle')).toBeInTheDocument();
+
+      // Quick-add a second branch from Decision node n2 -> automatically labeled "No"!
+      fireEvent.click(screen.getByTestId('quick-add-left-n2'));
+      fireEvent.keyDown(screen.getByLabelText(/Edit node label/i), {
+        key: 'Enter',
+      });
+      expect(
+        screen.getByRole('button', { name: /Edit edge label No/i })
+      ).toBeInTheDocument();
+
+      // 3. Select node n3 and change its shape in-place via the floating toolbar switcher
+      fireEvent.mouseDown(screen.getByTestId('flow-node-n3'), {
+        clientX: 60,
+        clientY: 260,
+      });
+      fireEvent.mouseUp(window);
+
+      const shapeSwitcher = screen.getByTestId(
+        'node-shape-switcher-n3'
+      ) as HTMLSelectElement;
+      expect(shapeSwitcher.value).toBe('process');
+      fireEvent.change(shapeSwitcher, { target: { value: 'database' } });
+      expect(shapeSwitcher.value).toBe('database');
+
+      // 4. Duplicate node n3 via floating duplicate button
+      fireEvent.click(screen.getByTestId('node-duplicate-btn-n3'));
+      expect(
+        screen.getByLabelText('Node: Launch from Dock Copy')
+      ).toBeInTheDocument();
+
+      // 5. Clicking an SVG edge opens uml-edge-toolbar instead of deleting the edge
+      const edgeGroup = screen.getByTestId('flow-edge-0');
+      fireEvent.click(edgeGroup);
+      expect(screen.getByTestId('uml-edge-toolbar')).toBeInTheDocument();
+      // Explicitly delete edge via toolbar button
+      fireEvent.click(screen.getByTestId('delete-edge-btn'));
+      expect(screen.queryByTestId('uml-edge-toolbar')).not.toBeInTheDocument();
+    });
+
+    it('commits transient node drags on mouseup with full Ctrl+Z Undo support and adapts UI layout across Compact, Standard, and Expanded Studio screen presence', () => {
+      render(<App />);
+      fireEvent.click(screen.getByRole('tab', { name: /Flow/i }));
+
+      const flowView = document.getElementById('tab-flowchart')!;
+      // At default 35% screen presence -> compact layout
+      expect(flowView).toHaveAttribute('data-layout-mode', 'compact');
+      expect(
+        screen.queryByTestId('flow-studio-sidebar')
+      ).not.toBeInTheDocument();
+
+      // Drag node n1 and verify transient drag commits on mouseup and is undoable via Ctrl+Z
+      const nodeN1 = screen.getByTestId('flow-node-n1');
+      const initialLeft = nodeN1.style.left;
+      fireEvent.mouseDown(nodeN1, { clientX: 50, clientY: 40 });
+      fireEvent.mouseMove(window, { clientX: 170, clientY: 120 });
+      expect(nodeN1.style.left).not.toBe(initialLeft);
+      fireEvent.mouseUp(window);
+
+      // Press Ctrl+Z to undo the drag back to initial coordinates
+      fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+      expect(nodeN1.style.left).toBe(initialLeft);
+
+      // Switch Screen Presence to 50% (Standard) and 75% (Expanded Studio)
+      fireEvent.click(
+        screen.getByRole('tab', { name: /Shortcut & Tray Settings/i })
+      );
+      fireEvent.click(screen.getByTestId('panel-width-preset-50'));
+      fireEvent.click(screen.getByRole('tab', { name: /Flow/i }));
+      expect(document.getElementById('tab-flowchart')).toHaveAttribute(
+        'data-layout-mode',
+        'standard'
+      );
+
+      fireEvent.click(
+        screen.getByRole('tab', { name: /Shortcut & Tray Settings/i })
+      );
+      fireEvent.click(screen.getByTestId('panel-width-preset-75'));
+      fireEvent.click(screen.getByRole('tab', { name: /Flow/i }));
+
+      expect(document.getElementById('tab-flowchart')).toHaveAttribute(
+        'data-layout-mode',
+        'expanded'
+      );
+      // Expanded tier reveals the Studio Stencil & Inspector Sidebar
+      const studioSidebar = screen.getByTestId('flow-studio-sidebar');
+      expect(studioSidebar).toBeInTheDocument();
+      fireEvent.click(
+        within(studioSidebar).getByRole('button', {
+          name: /Studio: Add Hexagon Prepare/i,
+        })
+      );
+      expect(screen.getByText('Prepare')).toBeInTheDocument();
+    });
+
+    it('supports Multi-Select (Shift+Click, Marquee box, Ctrl+A), Group Move, Align/Distribute, and 1-Click Wrap in Subgraph', () => {
+      render(<App />);
+      fireEvent.click(screen.getByRole('tab', { name: /Flow/i }));
+
+      // 1. Select node n1, then Shift+Click n2 and n3 to build a 3-node multi-selection
+      const n1 = screen.getByTestId('flow-node-n1');
+      const n2 = screen.getByTestId('flow-node-n2');
+      const n3 = screen.getByTestId('flow-node-n3');
+      fireEvent.mouseDown(n1, { clientX: 50, clientY: 30 });
+      fireEvent.mouseUp(window);
+      fireEvent.mouseDown(n2, { clientX: 50, clientY: 130, shiftKey: true });
+      fireEvent.mouseUp(window);
+      fireEvent.mouseDown(n3, { clientX: 50, clientY: 250, shiftKey: true });
+      fireEvent.mouseUp(window);
+
+      // Multi-select floating action bar appears with "3 Selected"
+      const multiToolbar = screen.getByTestId('multi-select-toolbar');
+      expect(multiToolbar).toBeInTheDocument();
+      expect(within(multiToolbar).getByText('3 Selected')).toBeInTheDocument();
+
+      // 2. Align X, Distribute, and Wrap in Subgraph
+      fireEvent.click(screen.getByTestId('multi-align-x'));
+      fireEvent.click(screen.getByTestId('multi-distribute-btn'));
+      fireEvent.click(screen.getByTestId('multi-wrap-subgraph-btn'));
+      expect(screen.getByText('Subgraph 1')).toBeInTheDocument();
+
+      // 3. Group Move: dragging any node in the multi-selection moves all selected nodes together
+      const n1InitialTop = n1.style.top;
+      const n2InitialTop = n2.style.top;
+      fireEvent.mouseDown(n1, { clientX: 60, clientY: 40 });
+      fireEvent.mouseMove(window, { clientX: 60, clientY: 120 });
+      fireEvent.mouseUp(window);
+      expect(n1.style.top).not.toBe(n1InitialTop);
+      expect(n2.style.top).not.toBe(n2InitialTop);
+
+      // 4. Marquee mode toggle + box drag on canvas
+      const marqueeBtn = screen.getByTestId('marquee-mode-btn');
+      fireEvent.click(marqueeBtn);
+      expect(marqueeBtn).toHaveAttribute('aria-pressed', 'true');
+      const canvasWrapper = document.getElementById('flow-canvas-wrapper')!;
+      fireEvent.mouseDown(canvasWrapper, { clientX: 10, clientY: 10 });
+      fireEvent.mouseMove(window, { clientX: 400, clientY: 400 });
+      expect(screen.getByTestId('flow-marquee-box')).toBeInTheDocument();
+      fireEvent.mouseUp(window);
+
+      // 5. Ctrl+A selects all 4 nodes, then batch delete removes them
+      fireEvent.keyDown(window, { key: 'a', ctrlKey: true });
+      expect(
+        within(screen.getByTestId('multi-select-toolbar')).getByText(
+          '4 Selected'
+        )
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('multi-delete-btn'));
+      expect(screen.getByText('Flowchart Canvas is Empty')).toBeInTheDocument();
+    });
+
+    it('manages multiple named flowcharts via the Multi-Diagram Workspace Switcher', () => {
+      render(<App />);
+      fireEvent.click(screen.getByRole('tab', { name: /Flow/i }));
+
+      // Open Diagram Switcher Drawer
+      const switcherBtn = screen.getByTestId('toggle-diagram-switcher-btn');
+      expect(screen.getByTestId('active-diagram-title')).toHaveTextContent(
+        'Hotkey Launch Flow'
+      );
+      fireEvent.click(switcherBtn);
+
+      const drawer = screen.getByTestId('flow-diagram-switcher');
+      expect(drawer).toBeInTheDocument();
+
+      // Switch to second preloaded diagram ("CI/CD Deployment Pipeline")
+      fireEvent.click(screen.getByTestId('flow-diagram-card-flow-2'));
+      expect(screen.getByTestId('active-diagram-title')).toHaveTextContent(
+        'CI/CD Deployment Pipeline'
+      );
+
+      // Rename the active diagram
+      const renameInput = screen.getByTestId(
+        'rename-diagram-input'
+      ) as HTMLInputElement;
+      fireEvent.change(renameInput, {
+        target: { value: 'Release Pipeline v2' },
+      });
+      expect(screen.getByTestId('active-diagram-title')).toHaveTextContent(
+        'Release Pipeline v2'
+      );
+
+      // Create a new diagram
+      fireEvent.click(screen.getByTestId('new-diagram-btn'));
+      expect(screen.getByTestId('active-diagram-title')).toHaveTextContent(
+        'Flowchart 3'
+      );
+      expect(screen.getByText('Start Flow')).toBeInTheDocument();
+
+      // Duplicate the current diagram
+      fireEvent.click(screen.getByTestId('duplicate-diagram-btn'));
+      expect(screen.getByTestId('active-diagram-title')).toHaveTextContent(
+        'Flowchart 3 Copy'
+      );
+
+      // Switch back to flow-1
+      fireEvent.click(screen.getByTestId('flow-diagram-card-flow-1'));
+      expect(screen.getByTestId('active-diagram-title')).toHaveTextContent(
+        'Hotkey Launch Flow'
+      );
+    });
+
+    it('splices a new step onto a connector via Insert Step and copies a 2x High-DPI PNG to clipboard', async () => {
+      render(<App />);
+      fireEvent.click(screen.getByRole('tab', { name: /Flow/i }));
+
+      // Click first connector to open #uml-edge-toolbar
+      fireEvent.click(screen.getByTestId('flow-edge-0'));
+      const insertStepBtn = screen.getByTestId('insert-node-on-edge-btn');
+      fireEvent.click(insertStepBtn);
+
+      // Inline editor opens automatically on the newly spliced node ("New Step")
+      const inlineEditor = screen.getByLabelText(
+        /Edit node label/i
+      ) as HTMLInputElement;
+      expect(inlineEditor.value).toBe('New Step');
+      fireEvent.change(inlineEditor, { target: { value: 'Auth Check' } });
+      fireEvent.keyDown(inlineEditor, { key: 'Enter' });
+      expect(screen.getByText('Auth Check')).toBeInTheDocument();
+
+      // Click Copy PNG button and verify notification toast
+      fireEvent.click(screen.getByTestId('copy-png-btn'));
+      expect(
+        await screen.findByText(/Copied Flowchart PNG/i)
+      ).toBeInTheDocument();
+    });
+  });
 });
+
+
+

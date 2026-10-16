@@ -57,6 +57,10 @@ export type FlowNodeType =
 
 export type FlowEdgeStyle = 'solid' | 'dotted' | 'thick';
 
+export type FlowEdgeCurve = 'bezier' | 'orthogonal' | 'straight';
+
+export type FlowPortDirection = 'top' | 'right' | 'bottom' | 'left';
+
 export type FlowEdgeArrow =
   | 'arrow'
   | 'none'
@@ -91,6 +95,7 @@ export interface FlowEdge {
   style?: FlowEdgeStyle;
   arrow?: FlowEdgeArrow;
   cardinality?: string;
+  curve?: FlowEdgeCurve;
 }
 
 export interface FlowSubgraph {
@@ -105,6 +110,14 @@ export interface FlowchartState {
   direction?: FlowDirection;
   subgraphs?: FlowSubgraph[];
   diagramType?: MermaidDiagramType;
+  edgeCurve?: FlowEdgeCurve;
+}
+
+export interface FlowDiagramItem {
+  id: string;
+  title: string;
+  flowData: FlowchartState;
+  updatedAt: number;
 }
 
 export interface NoteItem {
