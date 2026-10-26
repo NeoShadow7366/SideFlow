@@ -3,9 +3,123 @@
 @tailwind utilities;
 
 body {
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   overflow: hidden;
   user-select: none;
+}
+
+/* Container-Query Contexts for Resizable Side Panel (Fixes viewport sm: misfires) */
+.panel-cq-header {
+  container-type: inline-size;
+  container-name: sf-header;
+}
+
+.tab-content {
+  container-type: inline-size;
+  container-name: sf-panel;
+}
+
+.cq-docklets-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.cq-drawer-compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.cq-drawer-normal {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.625rem;
+}
+
+.cq-drawer-large {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.cq-notes-switcher-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
+}
+
+.cq-stt-grid,
+.cq-settings-3col {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.625rem;
+}
+
+.cq-split-editor {
+  display: flex;
+  flex-direction: column;
+}
+
+.cq-split-editor > .cq-split-pane {
+  width: 100%;
+  height: 50%;
+}
+
+.cq-split-editor > .cq-split-pane + .cq-split-pane {
+  border-top: 1px solid rgba(30, 41, 59, 0.85);
+}
+
+.cq-show-440 {
+  display: none;
+}
+
+@container sf-header (max-width: 430px) {
+  .cq-inactive-tab-label {
+    display: none;
+  }
+  .cq-hotkey-subtitle {
+    display: none;
+  }
+}
+
+@container sf-panel (min-width: 440px) {
+  .cq-drawer-compact {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .cq-notes-switcher-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cq-show-440 {
+    display: inline-flex;
+  }
+}
+
+@container sf-panel (min-width: 500px) {
+  .cq-docklets-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .cq-drawer-compact {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .cq-drawer-normal {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .cq-drawer-large {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .cq-stt-grid,
+  .cq-settings-3col {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .cq-split-editor {
+    flex-direction: row;
+  }
+  .cq-split-editor > .cq-split-pane {
+    width: 50%;
+    height: 100%;
+  }
+  .cq-split-editor > .cq-split-pane + .cq-split-pane {
+    border-top: none;
+    border-left: 1px solid rgba(30, 41, 59, 0.85);
+  }
 }
 
 /* Smooth Slide-Out Panel Transition */
@@ -15,53 +129,53 @@ body {
 
 /* ObjectDock Style Hover & Keyboard Focus Magnification */
 .dock-item {
-  transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1),
+  transition: transform 0.2s cubic-bezier(0.34, 1.4, 0.64, 1),
     background-color 0.2s ease,
     box-shadow 0.2s ease;
 }
 
 .dock-item:hover,
-.dock-item:focus-visible {
-  transform: translateY(-6px) scale(1.12);
+.dock-item:focus-within {
+  transform: translateY(-3px) scale(1.04);
   z-index: 20;
 }
 
 .dock-item:active:not(:has(button:hover)):not(:has(button:active)) {
-  transform: translateY(-2px) scale(0.96);
+  transform: translateY(-1px) scale(0.97);
 }
 
 @keyframes objectdock-swing {
   0% {
-    transform: translateY(-4px) rotate(0deg) scale(1.06);
+    transform: translateY(-3px) rotate(0deg) scale(1.04);
   }
   25% {
-    transform: translateY(-4px) rotate(-6deg) scale(1.08);
+    transform: translateY(-3px) rotate(-5deg) scale(1.05);
   }
   75% {
-    transform: translateY(-4px) rotate(6deg) scale(1.08);
+    transform: translateY(-3px) rotate(5deg) scale(1.05);
   }
   100% {
-    transform: translateY(-4px) rotate(0deg) scale(1.06);
+    transform: translateY(-3px) rotate(0deg) scale(1.04);
   }
 }
 
 .dock-effect-swing:hover,
-.dock-effect-swing:focus-visible {
+.dock-effect-swing:focus-within {
   animation: objectdock-swing 0.55s ease-in-out;
-  transform: translateY(-4px) scale(1.06);
+  transform: translateY(-3px) scale(1.04);
   z-index: 20;
 }
 
 .dock-effect-glow:hover,
-.dock-effect-glow:focus-visible {
-  transform: translateY(-3px) scale(1.04);
+.dock-effect-glow:focus-within {
+  transform: translateY(-2px) scale(1.03);
   box-shadow: 0 0 18px rgba(99, 102, 241, 0.55),
     inset 0 0 10px rgba(99, 102, 241, 0.25);
   z-index: 20;
 }
 
 .dock-effect-none:hover,
-.dock-effect-none:focus-visible {
+.dock-effect-none:focus-within {
   transform: none;
 }
 
@@ -128,15 +242,23 @@ body {
   z-index: -1;
 }
 
-/* Accessible Keyboard Focus Ring (WCAG 2.4.7) */
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
-[role="button"]:focus-visible,
-[role="tab"]:focus-visible {
-  outline: 2px solid #818cf8;
-  outline-offset: 2px;
+/* Accessible Keyboard Focus Ring (WCAG 2.4.7 / 2.4.11) — overrides .focus:outline-none on keyboard navigation */
+:is(
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [role="button"],
+  [role="tab"],
+  [role="radio"],
+  [role="menuitem"],
+  [role="separator"],
+  [role="switch"],
+  [tabindex="0"]
+):focus-visible {
+  outline: 2px solid #818cf8 !important;
+  outline-offset: 2px !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -144,7 +266,18 @@ textarea:focus-visible,
   .dock-item {
     transition: none !important;
   }
-  .recording-pulse::before {
+  .dock-item:hover,
+  .dock-item:focus-within,
+  .dock-effect-swing:hover,
+  .dock-effect-swing:focus-within,
+  .dock-effect-glow:hover,
+  .dock-effect-glow:focus-within {
+    animation: none !important;
+    transform: none !important;
+  }
+  .recording-pulse::before,
+  .animate-ping,
+  .animate-spin {
     animation: none !important;
   }
 }

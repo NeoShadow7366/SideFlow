@@ -8,6 +8,35 @@ export type DockIconSize = 'compact' | 'normal' | 'large';
 
 export type PanelEdge = 'left' | 'right';
 
+export type MonitorMode = 'primary' | 'single' | 'all' | 'custom';
+
+export interface MonitorDisplayInfo {
+  id: number;
+  index: number;
+  label: string;
+  isPrimary: boolean;
+  bounds: { x: number; y: number; width: number; height: number };
+  workArea: { x: number; y: number; width: number; height: number };
+  scaleFactor: number;
+}
+
+export interface MonitorSettings {
+  mode: MonitorMode;
+  /** Selected display ID when mode === 'single' */
+  targetDisplayId?: number | null;
+  /** Enabled display IDs when mode === 'custom' */
+  enabledDisplayIds?: number[];
+  /** Optional per-monitor edge overrides keyed by String(displayId) */
+  edgeOverrides?: Record<string, PanelEdge>;
+}
+
+export interface DisplayStatePayload {
+  displays: MonitorDisplayInfo[];
+  activeDisplayId: number;
+  effectiveEdge: PanelEdge;
+  monitorSettings: MonitorSettings;
+}
+
 export type DrawerSortMode = 'manual' | 'name' | 'type';
 
 export interface AppItem {
@@ -182,11 +211,30 @@ export interface ShortcutConfig {
   label: string;     // e.g., "Alt + Space"
 }
 
+export type ToastVariant = 'info' | 'success' | 'warning' | 'error';
+
+export interface NotifyOptions {
+  variant?: ToastVariant;
+  undoLabel?: string;
+  onUndo?: () => void;
+  durationMs?: number;
+}
+
+export type NotifyFn = (
+  title: string,
+  icon?: string,
+  subtitle?: string,
+  options?: NotifyOptions
+) => void;
+
 export interface ToastMessage {
   id: string;
   title: string;
   subtitle: string;
   icon: string;
+  variant?: ToastVariant;
+  undoLabel?: string;
+  onUndo?: () => void;
 }
 
 export type AppUpdateStatus =
@@ -223,6 +271,30 @@ export interface SideFlowElectronBridge {
   setPanelEdge?: (edge: PanelEdge) => void;
   setPanelWidthPercent?: (widthPercent: number) => void;
   setIgnoreMouseEvents?: (ignore: boolean) => void;
+  getDisplayState?: () => Promise<DisplayStatePayload>;
+  setMonitorSettings?: (settings: MonitorSettings) => Promise<DisplayStatePayload>;
+  activateDisplay?: (displayId: number, openPanel?: boolean) => Promise<DisplayStatePayload>;
+  setEdgeHandleState?: (state: {
+    showEdgeHandle: boolean;
+    isDictating: boolean;
+    shortcutLabel: string;
+  }) => void;
+  onDisplayStateChanged?: (
+    callback: (state: DisplayStatePayload) => void
+  ) => () => void;
+  clickEdgeTab?: (displayId: number) => void;
+  prepareEdgeTabClick?: () => void;
+  setCompanionIgnoreMouse?: (displayId: number, ignore: boolean) => void;
+  onEdgeTabUpdate?: (
+    callback: (payload: {
+      displayId: number;
+      edge: PanelEdge;
+      isDictating: boolean;
+      shortcutLabel: string;
+      displayName?: string;
+      isOpenElsewhere?: boolean;
+    }) => void
+  ) => () => void;
   openFileDialog: () => Promise<string[]>;
   openDirectoryDialog?: () => Promise<string | null>;
   readDirectoryItems?: (dirPath: string) => Promise<DirectoryEntryItem[]>;

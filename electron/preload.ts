@@ -1,5 +1,32 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
+export type PanelEdge = 'left' | 'right';
+export type MonitorMode = 'primary' | 'single' | 'all' | 'custom';
+
+export interface MonitorDisplayInfo {
+  id: number;
+  index: number;
+  label: string;
+  isPrimary: boolean;
+  bounds: { x: number; y: number; width: number; height: number };
+  workArea: { x: number; y: number; width: number; height: number };
+  scaleFactor: number;
+}
+
+export interface MonitorSettings {
+  mode: MonitorMode;
+  targetDisplayId?: number | null;
+  enabledDisplayIds?: number[];
+  edgeOverrides?: Record<string, PanelEdge>;
+}
+
+export interface DisplayStatePayload {
+  displays: MonitorDisplayInfo[];
+  activeDisplayId: number;
+  effectiveEdge: PanelEdge;
+  monitorSettings: MonitorSettings;
+}
+
 export interface SideFlowElectronAPI {
   isElectron: boolean;
   launchNativeApp: (
@@ -8,9 +35,31 @@ export interface SideFlowElectronAPI {
   ) => Promise<{ success: boolean; error?: string }>;
   updateGlobalShortcut: (accelerator: string) => Promise<boolean>;
   setPanelVisibility: (visible: boolean) => void;
-  setPanelEdge: (edge: 'left' | 'right') => void;
+  setPanelEdge: (edge: PanelEdge) => void;
   setPanelWidthPercent: (widthPercent: number) => void;
   setIgnoreMouseEvents: (ignore: boolean) => void;
+  getDisplayState: () => Promise<DisplayStatePayload>;
+  setMonitorSettings: (settings: MonitorSettings) => Promise<DisplayStatePayload>;
+  activateDisplay: (displayId: number, openPanel?: boolean) => Promise<DisplayStatePayload>;
+  setEdgeHandleState: (state: {
+    showEdgeHandle: boolean;
+    isDictating: boolean;
+    shortcutLabel: string;
+  }) => void;
+  onDisplayStateChanged: (callback: (state: DisplayStatePayload) => void) => () => void;
+  clickEdgeTab: (displayId: number) => void;
+  prepareEdgeTabClick: () => void;
+  setCompanionIgnoreMouse: (displayId: number, ignore: boolean) => void;
+  onEdgeTabUpdate: (
+    callback: (payload: {
+      displayId: number;
+      edge: PanelEdge;
+      isDictating: boolean;
+      shortcutLabel: string;
+      displayName?: string;
+      isOpenElsewhere?: boolean;
+    }) => void
+  ) => () => void;
   openFileDialog: () => Promise<string[]>;
   openDirectoryDialog: () => Promise<string | null>;
   readDirectoryItems: (dirPath: string) => Promise<
@@ -113,10 +162,34 @@ const sideflowAPI: SideFlowElectronAPI = {
   updateGlobalShortcut: (accelerator: string) =>
     ipcRenderer.invoke('update-global-shortcut', accelerator),
   setPanelVisibility: (visible: boolean) => ipcRenderer.send('set-panel-visibility', visible),
-  setPanelEdge: (edge: 'left' | 'right') => ipcRenderer.send('set-panel-edge', edge),
+  setPanelEdge: (edge: PanelEdge) => ipcRenderer.send('set-panel-edge', edge),
   setPanelWidthPercent: (widthPercent: number) =>
     ipcRenderer.send('set-panel-width-percent', widthPercent),
   setIgnoreMouseEvents: (ignore: boolean) => ipcRenderer.send('set-ignore-mouse-events', ignore),
+  getDisplayState: () => ipcRenderer.invoke('get-display-state'),
+  setMonitorSettings: (settings: MonitorSettings) =>
+    ipcRenderer.invoke('set-monitor-settings', settings),
+  activateDisplay: (displayId: number, openPanel = true) =>
+    ipcRenderer.invoke('activate-display', { displayId, openPanel }),
+  setEdgeHandleState: (state) => ipcRenderer.send('set-edge-handle-state', state),
+  onDisplayStateChanged: (callback: (state: DisplayStatePayload) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: DisplayStatePayload) =>
+      callback(state);
+    ipcRenderer.on('display-state-changed', listener);
+    return () => ipcRenderer.removeListener('display-state-changed', listener);
+  },
+  clickEdgeTab: (displayId: number) => ipcRenderer.send('edge-tab-clicked', displayId),
+  prepareEdgeTabClick: () => ipcRenderer.send('prepare-edge-tab-click'),
+  setCompanionIgnoreMouse: (displayId: number, ignore: boolean) =>
+    ipcRenderer.send('set-companion-ignore-mouse', { displayId, ignore }),
+  onEdgeTabUpdate: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: Parameters<typeof callback>[0]
+    ) => callback(payload);
+    ipcRenderer.on('edge-tab-update', listener);
+    return () => ipcRenderer.removeListener('edge-tab-update', listener);
+  },
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
   openDirectoryDialog: () => ipcRenderer.invoke('open-directory-dialog'),
   readDirectoryItems: (dirPath: string) => ipcRenderer.invoke('read-directory-items', dirPath),
@@ -173,5 +246,3 @@ const sideflowAPI: SideFlowElectronAPI = {
 };
 
 contextBridge.exposeInMainWorld('sideflow', sideflowAPI);
-
-

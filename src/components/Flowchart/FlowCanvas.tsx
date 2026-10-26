@@ -48,6 +48,7 @@ import {
   FlowPortDirection,
   FlowSubgraph,
   MermaidDiagramType,
+  NotifyFn,
 } from '../../types/sideflow';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import {
@@ -79,7 +80,7 @@ interface FlowCanvasProps {
   onChangeFlowData: (
     updater: FlowchartState | ((prev: FlowchartState) => FlowchartState)
   ) => void;
-  onNotify: (title: string, icon?: string, subtitle?: string) => void;
+  onNotify: NotifyFn;
   onInsertMermaidToNote?: (mermaidCode: string) => void;
   panelWidthPercent?: number;
 }
@@ -291,8 +292,11 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       },
     ]
   );
-  const [activeDiagramId, setActiveDiagramId] = useState<string>('flow-1');
-  const activeDiagramIdRef = useRef<string>('flow-1');
+  const [activeDiagramId, setActiveDiagramId] = useLocalStorage<string>(
+    'sideflow_active_diagram_id',
+    'flow-1'
+  );
+  const activeDiagramIdRef = useRef<string>(activeDiagramId);
   activeDiagramIdRef.current = activeDiagramId;
   const [isDiagramSwitcherOpen, setIsDiagramSwitcherOpen] =
     useState<boolean>(false);
@@ -513,9 +517,17 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       JSON.parse(JSON.stringify(current)) as FlowchartState,
       ...historyRef.current.future.slice(0, 29),
     ];
+    flowDataRef.current = previous;
     setHistoryTick((t) => t + 1);
     onChangeFlowData(previous);
-  }, [onChangeFlowData]);
+    setSavedDiagrams((prevDiagrams) =>
+      prevDiagrams.map((d) =>
+        d.id === activeDiagramIdRef.current
+          ? { ...d, flowData: previous, updatedAt: Date.now() }
+          : d
+      )
+    );
+  }, [onChangeFlowData, setSavedDiagrams]);
 
   const handleRedo = useCallback(() => {
     if (historyRef.current.future.length === 0) return;
@@ -526,9 +538,17 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       ...historyRef.current.past.slice(-29),
       JSON.parse(JSON.stringify(current)) as FlowchartState,
     ];
+    flowDataRef.current = next;
     setHistoryTick((t) => t + 1);
     onChangeFlowData(next);
-  }, [onChangeFlowData]);
+    setSavedDiagrams((prevDiagrams) =>
+      prevDiagrams.map((d) =>
+        d.id === activeDiagramIdRef.current
+          ? { ...d, flowData: next, updatedAt: Date.now() }
+          : d
+      )
+    );
+  }, [onChangeFlowData, setSavedDiagrams]);
 
   const handleZoomIn = () => {
     setZoomLevel((z) => Math.min(2.25, Math.round((z + 0.15) * 100) / 100));
@@ -1246,10 +1266,43 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
 
   const handleDeleteDiagram = (diagramId: string) => {
     if (savedDiagrams.length <= 1) return;
+    const deletedDiagram = savedDiagrams.find((d) => d.id === diagramId);
+    const deletedIdx = savedDiagrams.findIndex((d) => d.id === diagramId);
     const remaining = savedDiagrams.filter((d) => d.id !== diagramId);
     setSavedDiagrams(remaining);
     if (activeDiagramId === diagramId && remaining[0]) {
       handleSelectDiagram(remaining[0].id);
+    }
+    if (deletedDiagram) {
+      onNotify(
+        `Deleted "${deletedDiagram.title}"`,
+        'check',
+        'Flowchart removed from workspace',
+        {
+          variant: 'info',
+          undoLabel: 'Undo',
+          onUndo: () => {
+            setSavedDiagrams((prev) => {
+              if (prev.some((d) => d.id === deletedDiagram.id)) return prev;
+              const next = [...prev];
+              const insertAt =
+                deletedIdx >= 0
+                  ? Math.min(deletedIdx, next.length)
+                  : next.length;
+              next.splice(insertAt, 0, deletedDiagram);
+              return next;
+            });
+            setActiveDiagramId(deletedDiagram.id);
+            activeDiagramIdRef.current = deletedDiagram.id;
+            historyRef.current = { past: [], future: [] };
+            setHistoryTick((t) => t + 1);
+            setSelectedNodeId(null);
+            setSelectedNodeIds([]);
+            flowDataRef.current = deletedDiagram.flowData;
+            onChangeFlowData(deletedDiagram.flowData);
+          },
+        }
+      );
     }
   };
 
@@ -1316,7 +1369,20 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   // Global keyboard shortcuts (Escape, Ctrl+Z, Ctrl+Y, Ctrl+D, Ctrl+A, Delete/Backspace)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (document.body.hasAttribute('data-sideflow-modal-open')) {
+        return;
+      }
+
       if (e.key === 'Escape') {
+        const hasTransientOverlay =
+          connectMode ||
+          marqueeMode ||
+          Boolean(editingNodeId) ||
+          editingEdgeIdx !== null ||
+          Boolean(editingSubgraphId) ||
+          Boolean(compartmentNodeId) ||
+          Boolean(draftConnection);
+
         setConnectMode(false);
         setConnectSourceNodeId(null);
         setMarqueeMode(false);
@@ -1326,8 +1392,11 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         setEditingSubgraphId(null);
         setCompartmentNodeId(null);
         setDraftConnection(null);
-        setSelectedNodeIds([]);
-        setSelectedNodeId(null);
+
+        if (!hasTransientOverlay) {
+          setSelectedNodeIds([]);
+          setSelectedNodeId(null);
+        }
         return;
       }
 
@@ -1386,6 +1455,13 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
+    connectMode,
+    marqueeMode,
+    editingNodeId,
+    editingEdgeIdx,
+    editingSubgraphId,
+    compartmentNodeId,
+    draftConnection,
     handleUndo,
     handleRedo,
     handleDuplicateNode,
@@ -1962,8 +2038,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   ) => {
     if (editingNodeId === node.id || e.target !== e.currentTarget) return;
 
-    // Tab quick-branches a connected node in the current flow direction
-    if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+    // Alt+Enter or Ctrl/Cmd+Enter quick-branches a connected node in the current flow direction
+    // (Plain Tab / Shift+Tab navigates focus naturally across nodes & controls per WCAG 2.1.2)
+    if (e.key === 'Enter' && (e.altKey || e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       handleQuickAddDirection(node, directionToPort(currentDirection));
       return;
@@ -2075,6 +2152,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     setConnectMode(false);
     setConnectSourceNodeId(null);
     setSelectedNodeId(null);
+    setSelectedNodeIds([]);
     setEditingEdgeIdx(null);
     setZoomLevel(1);
     setPanOffset({ x: 0, y: 0 });
@@ -2082,12 +2160,22 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   };
 
   const handleClearCanvas = () => {
+    const previousState = JSON.parse(
+      JSON.stringify(flowDataRef.current)
+    ) as FlowchartState;
     commitFlowUpdate({ nodes: [], edges: [] });
     setConnectMode(false);
     setConnectSourceNodeId(null);
     setSelectedNodeId(null);
+    setSelectedNodeIds([]);
     setEditingEdgeIdx(null);
-    onNotify('Cleared Flowchart Canvas', 'check', 'Ready for a new diagram');
+    onNotify('Cleared Flowchart Canvas', 'check', 'Ready for a new diagram', {
+      variant: 'info',
+      undoLabel: 'Undo',
+      onUndo: () => {
+        commitFlowUpdate(previousState);
+      },
+    });
   };
 
   const handleExportSVG = () => {
@@ -2158,7 +2246,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     ? sourceNode
       ? `Selected "${sourceNode.text}". Click destination node (${activeOpPreview}) or Esc to cancel.`
       : `Click source node first, then destination node (${activeOpPreview}, Esc to cancel).`
-    : "Click '+' on any node or press Tab to quick-branch • Drag ports to connect";
+    : "Click '+' on any node or press Alt+Enter to quick-branch • Drag ports to connect";
 
   const subgraphBoundsList = useMemo(
     () =>
@@ -2254,34 +2342,38 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             >
               {activeDiagram?.title || 'Flowcharts'}
             </span>
-            <span className="px-1 py-0.2 rounded bg-slate-800 text-[10px] font-mono text-indigo-300">
+            <span className="px-1 py-0.5 rounded bg-slate-800 text-[10px] font-mono text-indigo-300">
               {savedDiagrams.length}
             </span>
           </button>
-          <button
-            type="button"
-            onClick={() => handleAddNode('process')}
-            title="Add Process Box"
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-sky-300 flex items-center gap-1 transition"
-          >
-            <Square className="w-3.5 h-3.5" aria-hidden="true" /> Process
-          </button>
-          <button
-            type="button"
-            onClick={() => handleAddNode('decision')}
-            title="Add Decision Diamond"
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-amber-300 flex items-center gap-1 transition"
-          >
-            <Diamond className="w-3.5 h-3.5" aria-hidden="true" /> Decision
-          </button>
-          <button
-            type="button"
-            onClick={() => handleAddNode('start')}
-            title="Add Start/End Pill"
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-emerald-300 flex items-center gap-1 transition"
-          >
-            <CircleDot className="w-3.5 h-3.5" aria-hidden="true" /> Terminal
-          </button>
+          {!(layoutMode === 'expanded' && isStudioSidebarOpen) && (
+            <>
+              <button
+                type="button"
+                onClick={() => handleAddNode('process')}
+                title="Add Process Box"
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-sky-300 flex items-center gap-1 transition"
+              >
+                <Square className="w-3.5 h-3.5" aria-hidden="true" /> Process
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAddNode('decision')}
+                title="Add Decision Diamond"
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-amber-300 flex items-center gap-1 transition"
+              >
+                <Diamond className="w-3.5 h-3.5" aria-hidden="true" /> Decision
+              </button>
+              <button
+                type="button"
+                onClick={() => handleAddNode('start')}
+                title="Add Start/End Pill"
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-emerald-300 flex items-center gap-1 transition"
+              >
+                <CircleDot className="w-3.5 h-3.5" aria-hidden="true" /> Terminal
+              </button>
+            </>
+          )}
           <button
             type="button"
             id="connect-mode-btn"
@@ -2308,7 +2400,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             disabled={!canUndo}
             aria-label="Undo Flowchart Edit"
             title="Undo Flowchart Edit (Ctrl+Z)"
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 text-xs"
+            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 text-xs"
           >
             <Undo2 className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
@@ -2318,7 +2410,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             disabled={!canRedo}
             aria-label="Redo Flowchart Edit"
             title="Redo Flowchart Edit (Ctrl+Y)"
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 text-xs"
+            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 text-xs"
           >
             <Redo2 className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
@@ -2329,7 +2421,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             aria-pressed={marqueeMode}
             onClick={() => setMarqueeMode((prev) => !prev)}
             title="Marquee Box Multi-Select (or Shift+Drag on canvas)"
-            className={`p-1.5 rounded-lg text-xs transition ${
+            className={`w-7 h-7 flex items-center justify-center rounded-lg text-xs transition ${
               marqueeMode
                 ? 'bg-cyan-500/30 border border-cyan-400/60 text-cyan-200'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
@@ -2339,26 +2431,11 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
           </button>
           <button
             type="button"
-            data-testid="snap-grid-toggle-btn"
-            aria-label="Toggle Grid & Smart Alignment Snap"
-            aria-pressed={snapToGrid}
-            onClick={() => setSnapToGrid((prev) => !prev)}
-            title="Toggle 8px Grid & Center Alignment Snap Guides"
-            className={`p-1.5 rounded-lg text-xs transition ${
-              snapToGrid
-                ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-300'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-400'
-            }`}
-          >
-            <Magnet className="w-3.5 h-3.5" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
             onClick={() => setIsLiveCodeOpen((prev) => !prev)}
             aria-label="Toggle Live Mermaid Editor"
             aria-pressed={isLiveCodeOpen}
             title="Toggle Live Mermaid Code Drawer"
-            className={`p-1.5 rounded-lg text-xs transition ${
+            className={`w-7 h-7 flex items-center justify-center rounded-lg text-xs transition ${
               isLiveCodeOpen
                 ? 'bg-indigo-600 text-white'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
@@ -2371,26 +2448,16 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             onClick={handleAutoAlign}
             aria-label="Auto-Align Nodes"
             title="Auto-Layout Nodes (Hierarchical DAG)"
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
+            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
           >
             <LayoutGrid className="w-3.5 h-3.5" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            data-testid="fit-to-view-btn"
-            onClick={handleFitView}
-            aria-label="Fit Flowchart to View"
-            title="Center & Fit Diagram in Viewport"
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
-          >
-            <Maximize2 className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
           <button
             type="button"
             onClick={handleResetDemo}
             aria-label="Reset Demo Flowchart"
             title="Reset Demo Flowchart"
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
+            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
           >
             <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
@@ -2399,7 +2466,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             onClick={handleClearCanvas}
             aria-label="Clear Canvas"
             title="Clear Canvas"
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950 hover:text-rose-300 text-slate-300 text-xs"
+            className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800 hover:bg-rose-950 hover:text-rose-300 text-slate-300 text-xs"
           >
             <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
@@ -2441,7 +2508,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 type="button"
                 data-testid="new-diagram-btn"
                 onClick={handleCreateDiagram}
-                className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-medium flex items-center gap-1 transition"
+                className="min-h-[26px] px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-medium flex items-center gap-1 transition"
               >
                 <Plus className="w-3 h-3" aria-hidden="true" /> New Flowchart
               </button>
@@ -2449,7 +2516,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 type="button"
                 data-testid="duplicate-diagram-btn"
                 onClick={handleDuplicateDiagram}
-                className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] flex items-center gap-1 transition"
+                className="min-h-[26px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] flex items-center gap-1 transition"
               >
                 <Copy className="w-3 h-3" aria-hidden="true" /> Duplicate
               </button>
@@ -2463,21 +2530,29 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   key={d.id}
                   data-testid={`flow-diagram-card-${d.id}`}
                   onClick={() => handleSelectDiagram(d.id)}
-                  className={`group flex items-center gap-2 px-2.5 py-1.5 rounded-lg border cursor-pointer shrink-0 transition ${
+                  className={`group flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border cursor-pointer shrink-0 transition ${
                     isCurrent
                       ? 'bg-indigo-600/25 border-indigo-400 text-white'
                       : 'bg-slate-900/90 hover:bg-slate-800 border-slate-800 text-slate-300'
                   }`}
                 >
-                  <div className="min-w-0">
+                  <button
+                    type="button"
+                    aria-pressed={isCurrent}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSelectDiagram(d.id);
+                    }}
+                    className="min-w-0 text-left rounded px-0.5"
+                  >
                     <div className="text-[11px] font-medium truncate max-w-[140px]">
                       {d.title}
                     </div>
-                    <div className="text-[9px] font-mono text-slate-400">
+                    <div className="text-[10px] font-mono text-slate-400">
                       {d.flowData.nodes.length} nodes • {d.flowData.edges.length}{' '}
                       links
                     </div>
-                  </div>
+                  </button>
                   {savedDiagrams.length > 1 && (
                     <button
                       type="button"
@@ -2487,7 +2562,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         e.stopPropagation();
                         handleDeleteDiagram(d.id);
                       }}
-                      className="p-0.5 rounded hover:bg-rose-600/80 text-slate-400 hover:text-white transition"
+                      className="w-6 h-6 flex items-center justify-center rounded hover:bg-rose-600/80 text-slate-400 hover:text-white transition"
                     >
                       <Trash2 className="w-3 h-3" aria-hidden="true" />
                     </button>
@@ -2506,32 +2581,33 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
           layoutMode === 'compact' ? 'px-2.5 py-1' : 'px-3 py-1.5'
         } border-b border-slate-800/80 bg-slate-900/60 flex flex-wrap items-center justify-between gap-2 text-[11px]`}
       >
-        {/* Additional Mermaid Node Shapes + Subgraph Group */}
+        {/* Additional Mermaid Node Shapes + Subgraph Group (De-duplicated when Studio Sidebar is open) */}
         <div
           role="group"
           aria-label="Additional Mermaid Shapes"
           className="flex items-center gap-1 flex-wrap"
         >
-          {EXTRA_SHAPE_BUTTONS.map(
-            ({ type, label, title, colorClass, Icon }) => (
-              <button
-                key={type}
-                type="button"
-                onClick={() => handleAddNode(type)}
-                title={title}
-                className={`px-2 py-1 rounded-md bg-slate-800/90 hover:bg-slate-700 border border-slate-700/80 ${colorClass} flex items-center gap-1 transition`}
-              >
-                <Icon className="w-3 h-3" aria-hidden="true" />
-                <span>{label}</span>
-              </button>
-            )
-          )}
+          {!(layoutMode === 'expanded' && isStudioSidebarOpen) &&
+            EXTRA_SHAPE_BUTTONS.map(
+              ({ type, label, title, colorClass, Icon }) => (
+                <button
+                  key={type}
+                  type="button"
+                  onClick={() => handleAddNode(type)}
+                  title={title}
+                  className={`min-h-[24px] px-2 py-0.5 rounded-md bg-slate-800/90 hover:bg-slate-700 border border-slate-700/80 ${colorClass} flex items-center gap-1 transition`}
+                >
+                  <Icon className="w-3 h-3" aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              )
+            )}
           <button
             type="button"
             onClick={() => handleAddSubgraph()}
             aria-label="Add Subgraph Group"
             title="Wrap nodes in a Mermaid subgraph ... end container"
-            className="px-2 py-1 rounded-md bg-slate-800/90 hover:bg-slate-700 border border-dashed border-slate-600 text-slate-200 flex items-center gap-1 transition"
+            className="min-h-[24px] px-2 py-0.5 rounded-md bg-slate-800/90 hover:bg-slate-700 border border-dashed border-slate-600 text-slate-200 flex items-center gap-1 transition"
           >
             <BoxSelect className="w-3 h-3 text-indigo-300" aria-hidden="true" />
             <span>Subgraph</span>
@@ -2547,7 +2623,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             onChange={(e) =>
               handleChangeDiagramType(e.target.value as MermaidDiagramType)
             }
-            className="bg-slate-800 border border-indigo-500/40 text-indigo-200 rounded-md px-1.5 py-0.5 text-[11px] font-medium focus:outline-none focus:border-indigo-500"
+            className="min-h-[24px] bg-slate-800 border border-indigo-500/40 text-indigo-200 rounded-md px-1.5 py-0.5 text-[11px] font-medium focus:outline-none focus:border-indigo-500"
           >
             <option value="flowchart">Flowchart</option>
             <option value="stateDiagram-v2">State Diagram</option>
@@ -2564,7 +2640,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               handleSelectTemplate(e.target.value);
               e.target.value = '';
             }}
-            className="bg-slate-800 border border-slate-700 text-slate-200 rounded-md px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-indigo-500"
+            className="min-h-[24px] bg-slate-800 border border-slate-700 text-slate-200 rounded-md px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-indigo-500"
           >
             <option value="" disabled>
               Templates...
@@ -2584,7 +2660,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             onChange={(e) =>
               handleSetGlobalEdgeCurve(e.target.value as FlowEdgeCurve)
             }
-            className="bg-slate-800 border border-slate-700 text-cyan-200 rounded-md px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-indigo-500"
+            className="min-h-[24px] bg-slate-800 border border-slate-700 text-cyan-200 rounded-md px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-indigo-500"
           >
             <option value="bezier">Curved (Bezier)</option>
             <option value="orthogonal">Orthogonal (Elbow)</option>
@@ -2598,7 +2674,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             onChange={(e) =>
               setActiveEdgeStyle(e.target.value as FlowEdgeStyle)
             }
-            className="bg-slate-800 border border-slate-700 text-slate-200 rounded-md px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-indigo-500"
+            className="min-h-[24px] bg-slate-800 border border-slate-700 text-slate-200 rounded-md px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-indigo-500"
           >
             <option value="solid">Solid (---)</option>
             <option value="dotted">Dotted (-.-)</option>
@@ -2612,7 +2688,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             onChange={(e) =>
               setActiveEdgeArrow(e.target.value as FlowEdgeArrow)
             }
-            className="bg-slate-800 border border-slate-700 text-slate-200 rounded-md px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-indigo-500"
+            className="min-h-[24px] bg-slate-800 border border-slate-700 text-slate-200 rounded-md px-1.5 py-0.5 text-[11px] focus:outline-none focus:border-indigo-500"
           >
             <option value="arrow">Arrow (--&gt;)</option>
             <option value="bidirectional">Bi-Dir (&lt;--&gt;)</option>
@@ -2638,7 +2714,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 aria-pressed={currentDirection === dir}
                 onClick={() => handleSetDirection(dir)}
                 title={`Set Mermaid flow direction to ${dir}`}
-                className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold transition ${
+                className={`min-h-[22px] min-w-[24px] px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold transition ${
                   currentDirection === dir
                     ? 'bg-indigo-600 text-white shadow'
                     : 'text-slate-400 hover:text-slate-200'
@@ -2651,12 +2727,10 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         </div>
       </div>
 
-      {/* Helper Subbar + Zoom Controls + Insert to Note + Copy PNG + SVG Export */}
+      {/* Slim Status & Export Strip (Zoom/Fit/Snap moved to floating bottom-right Canvas HUD) */}
       <div
         id="flow-helper-bar"
-        className={`${
-          layoutMode === 'compact' ? 'px-2.5 py-1' : 'px-3.5 py-1.5'
-        } bg-indigo-950/40 border-b border-indigo-500/20 flex flex-wrap items-center justify-between gap-2 text-[11px] text-indigo-200`}
+        className="px-3 py-1 bg-indigo-950/35 border-b border-indigo-500/20 flex flex-wrap items-center justify-between gap-2 text-[11px] text-indigo-200"
       >
         <div className="flex items-center gap-2 min-w-0">
           <span
@@ -2670,7 +2744,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
           {layoutMode !== 'compact' && (
             <span
               data-testid="flow-layout-mode-badge"
-              className="px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-400/30 text-[9px] font-mono uppercase tracking-wider text-indigo-300 shrink-0"
+              className="px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-400/30 text-[10px] font-mono uppercase tracking-wider text-indigo-300 shrink-0"
             >
               {layoutMode === 'expanded'
                 ? `Studio (${panelWidthPercent}%)`
@@ -2678,41 +2752,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <div
-            role="group"
-            aria-label="Canvas Zoom Controls"
-            className="flex items-center gap-0.5 bg-slate-900/80 border border-slate-700/80 rounded-md px-1 py-0.5"
-          >
-            <button
-              type="button"
-              onClick={handleZoomOut}
-              aria-label="Zoom Out Flowchart"
-              title="Zoom Out"
-              className="p-0.5 text-slate-300 hover:text-white"
-            >
-              <ZoomOut className="w-3 h-3" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={handleResetZoom}
-              aria-label="Reset Flowchart Zoom"
-              title="Reset Zoom & Pan (100%)"
-              className="px-1 font-mono text-[10px] text-indigo-300 hover:text-white"
-            >
-              {Math.round(zoomLevel * 100)}%
-            </button>
-            <button
-              type="button"
-              onClick={handleZoomIn}
-              aria-label="Zoom In Flowchart"
-              title="Zoom In"
-              className="p-0.5 text-slate-300 hover:text-white"
-            >
-              <ZoomIn className="w-3 h-3" aria-hidden="true" />
-            </button>
-          </div>
-
+        <div className="flex items-center gap-1.5">
           {onInsertMermaidToNote && (
             <button
               type="button"
@@ -2721,7 +2761,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 onInsertMermaidToNote(generateMermaidCode(flowData))
               }
               title="Append fenced ```mermaid code block into active Note"
-              className="flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-400/40 text-indigo-200 hover:text-white transition"
+              className="min-h-[24px] flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-400/40 text-indigo-200 hover:text-white transition"
             >
               <FileText className="w-3 h-3" aria-hidden="true" />
               <span>To Note</span>
@@ -2734,7 +2774,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             aria-label="Copy Flowchart as PNG"
             onClick={handleCopyPNG}
             title="Copy 2x High-DPI PNG to Clipboard"
-            className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600/25 hover:bg-emerald-600/40 border border-emerald-400/40 text-emerald-200 hover:text-white transition"
+            className="min-h-[24px] flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600/25 hover:bg-emerald-600/40 border border-emerald-400/40 text-emerald-200 hover:text-white transition"
           >
             <ImageIcon className="w-3 h-3" aria-hidden="true" />
             <span>Copy PNG</span>
@@ -2743,7 +2783,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
           <button
             type="button"
             onClick={handleExportSVG}
-            className="underline hover:text-white"
+            className="min-h-[24px] px-1.5 rounded underline hover:text-white"
           >
             Download SVG
           </button>
@@ -2762,7 +2802,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             <div>
               <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1.5 flex items-center justify-between">
                 <span>Quick Stencil Palette</span>
-                <span className="font-mono text-[9px] text-indigo-400">
+                <span className="font-mono text-[10px] text-indigo-400">
                   9 Shapes
                 </span>
               </div>
@@ -2824,14 +2864,14 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   <span className="text-[10px] text-slate-400 block">
                     Accent Color
                   </span>
-                  <div className="flex items-center gap-1.5 flex-wrap">
+                  <div className="flex items-center gap-1 flex-wrap">
                     <button
                       type="button"
                       aria-label="Studio: Reset node color"
                       onClick={() =>
                         handleSetNodeColor(selectedNode.id, undefined)
                       }
-                      className="w-4 h-4 rounded-full bg-slate-700 border border-slate-400 text-[8px] text-white flex items-center justify-center"
+                      className="w-6 h-6 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-600 text-[10px] text-white flex items-center justify-center"
                     >
                       ×
                     </button>
@@ -2844,14 +2884,18 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           onClick={() =>
                             handleSetNodeColor(selectedNode.id, c)
                           }
-                          className={`w-4 h-4 rounded-full border ${
-                            ACCENT_SWATCH_CLASSES[c]
-                          } ${
-                            selectedNode.color === c
-                              ? 'ring-2 ring-white scale-110'
-                              : ''
-                          }`}
-                        />
+                          className="w-6 h-6 rounded-md hover:bg-slate-800 flex items-center justify-center"
+                        >
+                          <span
+                            className={`w-3.5 h-3.5 rounded-full border ${
+                              ACCENT_SWATCH_CLASSES[c]
+                            } ${
+                              selectedNode.color === c
+                                ? 'ring-2 ring-white scale-110'
+                                : ''
+                            }`}
+                          />
+                        </button>
                       )
                     )}
                   </div>
@@ -2866,7 +2910,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         directionToPort(currentDirection)
                       )
                     }
-                    className="flex-1 px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-medium flex items-center justify-center gap-1"
+                    className="flex-1 min-h-[26px] px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-medium flex items-center justify-center gap-1"
                   >
                     <Plus className="w-3 h-3" aria-hidden="true" /> Branch
                   </button>
@@ -2874,7 +2918,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                     type="button"
                     aria-label="Studio: Duplicate selected node"
                     onClick={() => handleDuplicateNode(selectedNode.id)}
-                    className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[10px] flex items-center gap-1"
+                    className="min-h-[26px] px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[10px] flex items-center gap-1"
                   >
                     <Copy className="w-3 h-3" aria-hidden="true" /> Copy
                   </button>
@@ -2895,25 +2939,25 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 <Spline className="w-3 h-3" aria-hidden="true" /> Rapid Flow Keys
               </div>
               <div>
-                <kbd className="px-1 py-0.5 bg-slate-900 rounded border border-slate-700 font-mono text-[9px]">
-                  Tab
+                <kbd className="px-1 py-0.5 bg-slate-900 rounded border border-slate-700 font-mono text-[10px]">
+                  Alt+Enter
                 </kbd>{' '}
                 Spawn &amp; link next step
               </div>
               <div>
-                <kbd className="px-1 py-0.5 bg-slate-900 rounded border border-slate-700 font-mono text-[9px]">
+                <kbd className="px-1 py-0.5 bg-slate-900 rounded border border-slate-700 font-mono text-[10px]">
                   Click +
                 </kbd>{' '}
                 Directional quick-add
               </div>
               <div>
-                <kbd className="px-1 py-0.5 bg-slate-900 rounded border border-slate-700 font-mono text-[9px]">
+                <kbd className="px-1 py-0.5 bg-slate-900 rounded border border-slate-700 font-mono text-[10px]">
                   Ctrl+D
                 </kbd>{' '}
                 Duplicate node
               </div>
               <div>
-                <kbd className="px-1 py-0.5 bg-slate-900 rounded border border-slate-700 font-mono text-[9px]">
+                <kbd className="px-1 py-0.5 bg-slate-900 rounded border border-slate-700 font-mono text-[10px]">
                   Ctrl+Wheel
                 </kbd>{' '}
                 Zoom at cursor
@@ -2969,6 +3013,76 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
           }}
           className="relative flex-1 canvas-grid overflow-hidden bg-slate-950"
         >
+          {/* Floating Bottom-Right Viewport HUD (Zoom / Fit / Snap-to-Grid) */}
+          <div
+            data-testid="flow-canvas-hud"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            className="absolute bottom-3 right-3 z-30 flex items-center gap-1 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-xl p-1 shadow-xl"
+          >
+            <div
+              role="group"
+              aria-label="Canvas Zoom Controls"
+              className="flex items-center gap-0.5"
+            >
+              <button
+                type="button"
+                onClick={handleZoomOut}
+                aria-label="Zoom Out Flowchart"
+                title="Zoom Out"
+                className="w-6 h-6 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition"
+              >
+                <ZoomOut className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                onClick={handleResetZoom}
+                aria-label="Reset Flowchart Zoom"
+                title="Reset Zoom & Pan (100%)"
+                className="min-h-[24px] px-1.5 rounded-lg font-mono text-[10px] text-indigo-300 hover:text-white hover:bg-slate-800 transition"
+              >
+                {Math.round(zoomLevel * 100)}%
+              </button>
+              <button
+                type="button"
+                onClick={handleZoomIn}
+                aria-label="Zoom In Flowchart"
+                title="Zoom In"
+                className="w-6 h-6 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition"
+              >
+                <ZoomIn className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="h-3.5 w-px bg-slate-700/80 mx-0.5" />
+
+            <button
+              type="button"
+              data-testid="fit-to-view-btn"
+              onClick={handleFitView}
+              aria-label="Fit Flowchart to View"
+              title="Center & Fit Diagram in Viewport"
+              className="w-6 h-6 flex items-center justify-center rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition"
+            >
+              <Maximize2 className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              data-testid="snap-grid-toggle-btn"
+              aria-label="Toggle Grid & Smart Alignment Snap"
+              aria-pressed={snapToGrid}
+              onClick={() => setSnapToGrid((prev) => !prev)}
+              title="Toggle 8px Grid & Center Alignment Snap Guides"
+              className={`w-6 h-6 flex items-center justify-center rounded-lg transition ${
+                snapToGrid
+                  ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-300'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              <Magnet className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+          </div>
           {/* Floating Multi-Select Action Bar */}
           {selectedNodeIds.length > 1 && (
             <div
@@ -3453,8 +3567,11 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         aria-label="Edge Relationship Toolbar"
                         onMouseDown={(e) => e.stopPropagation()}
                         onClick={(e) => e.stopPropagation()}
-                        style={{ left: `${midX}px`, top: `${midY}px` }}
-                        className="pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 z-30 bg-slate-900/95 border border-indigo-400 rounded-xl p-2 shadow-2xl flex flex-col gap-1.5 items-center min-w-[195px]"
+                        style={{
+                          left: `${Math.max(110, midX)}px`,
+                          top: `${Math.max(70, midY)}px`,
+                        }}
+                        className="pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 z-30 bg-slate-900/95 border border-indigo-400 rounded-xl p-2 shadow-2xl flex flex-col gap-1.5 items-center min-w-[205px]"
                       >
                         <div className="flex items-center gap-1 w-full">
                           <input
@@ -3477,11 +3594,14 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             }}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') commitEditingEdge(idx);
-                              if (e.key === 'Escape') setEditingEdgeIdx(null);
+                              if (e.key === 'Escape') {
+                                e.stopPropagation();
+                                setEditingEdgeIdx(null);
+                              }
                             }}
                             placeholder="Label..."
                             autoFocus
-                            className="flex-1 bg-slate-950 text-indigo-200 text-[10px] px-2 py-0.5 rounded-full border border-indigo-500/60 focus:outline-none text-center"
+                            className="flex-1 min-h-[24px] bg-slate-950 text-indigo-200 text-[10px] px-2 py-0.5 rounded-full border border-indigo-500/60 focus:outline-none text-center"
                           />
                           <button
                             type="button"
@@ -3489,7 +3609,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             aria-label="Delete connector"
                             title="Delete connector"
                             onClick={() => handleDeleteEdge(idx)}
-                            className="p-1 rounded-full bg-rose-950/80 hover:bg-rose-600 text-rose-300 hover:text-white transition"
+                            className="w-6 h-6 flex items-center justify-center rounded-full bg-rose-950/80 hover:bg-rose-600 text-rose-300 hover:text-white transition"
                           >
                             <Trash2 className="w-3 h-3" aria-hidden="true" />
                           </button>
@@ -3503,7 +3623,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             aria-label="Insert step on connector"
                             title="Splice a new Process node into this connector"
                             onClick={() => handleInsertNodeOnEdge(idx)}
-                            className="px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-[9px] font-medium text-white flex items-center gap-0.5 transition"
+                            className="min-h-[22px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-[10px] font-medium text-white flex items-center gap-0.5 transition"
                           >
                             <Plus className="w-2.5 h-2.5" aria-hidden="true" />
                             <span>Insert Step</span>
@@ -3524,7 +3644,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                   preset
                                 );
                               }}
-                              className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-indigo-600 text-[9px] text-slate-300 hover:text-white transition"
+                              className="min-h-[22px] px-2 py-0.5 rounded bg-slate-800 hover:bg-indigo-600 text-[10px] text-slate-300 hover:text-white transition"
                             >
                               {preset}
                             </button>
@@ -3549,7 +3669,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 true
                               );
                             }}
-                            className="bg-slate-800 border border-slate-700 text-slate-200 rounded px-1 py-0.5 text-[9px]"
+                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-slate-200 rounded px-1 py-0.5 text-[10px]"
                           >
                             <option value="solid">Solid</option>
                             <option value="dotted">Dotted</option>
@@ -3572,7 +3692,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 true
                               );
                             }}
-                            className="bg-slate-800 border border-slate-700 text-slate-200 rounded px-1 py-0.5 text-[9px]"
+                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-slate-200 rounded px-1 py-0.5 text-[10px]"
                           >
                             <option value="arrow">--&gt;</option>
                             <option value="bidirectional">&lt;--&gt;</option>
@@ -3598,7 +3718,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 true
                               );
                             }}
-                            className="bg-slate-800 border border-slate-700 text-cyan-200 rounded px-1 py-0.5 text-[9px]"
+                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-cyan-200 rounded px-1 py-0.5 text-[10px]"
                           >
                             <option value="bezier">Curved</option>
                             <option value="orthogonal">Elbow</option>
@@ -3621,7 +3741,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 true
                               );
                             }}
-                            className="bg-slate-800 border border-indigo-500/40 text-cyan-300 font-mono rounded px-1 py-0.5 text-[9px]"
+                            className="min-h-[22px] bg-slate-800 border border-indigo-500/40 text-cyan-300 font-mono rounded px-1 py-0.5 text-[10px]"
                           >
                             <option value="">Standard</option>
                             <option value="<|--">&lt;|-- Inherits</option>
@@ -3761,7 +3881,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                               )
                             }
                             title="Switch node shape in-place"
-                            className="bg-slate-800 border border-slate-700 text-indigo-200 rounded px-1 py-0.5 text-[9px] focus:outline-none"
+                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-indigo-200 rounded px-1.5 py-0.5 text-[10px] focus:outline-none"
                           >
                             {ALL_NODE_SHAPES.map((s) => (
                               <option key={s.type} value={s.type}>
@@ -3775,9 +3895,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             aria-label={`Duplicate node ${node.text}`}
                             title="Duplicate Node (Ctrl+D)"
                             onClick={() => handleDuplicateNode(node.id)}
-                            className="p-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white"
+                            className="w-6 h-6 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white"
                           >
-                            <Copy className="w-2.5 h-2.5" aria-hidden="true" />
+                            <Copy className="w-3 h-3" aria-hidden="true" />
                           </button>
                         </div>
                       )}
@@ -3797,10 +3917,10 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             e.stopPropagation();
                             handleQuickAddDirection(node, dir);
                           }}
-                          className={`pointer-events-auto absolute ${positionClass} w-4 h-4 rounded-full bg-indigo-600 hover:bg-cyan-400 text-white hover:text-slate-950 border border-indigo-300/80 shadow flex items-center justify-center transition-all z-20 ${
+                          className={`pointer-events-auto absolute ${positionClass} w-5 h-5 rounded-full bg-indigo-600 hover:bg-cyan-400 text-white hover:text-slate-950 border border-indigo-300/80 shadow flex items-center justify-center transition-all z-20 focus:opacity-100 ${
                             isSelected
                               ? 'opacity-95 scale-100'
-                              : 'opacity-0 group-hover:opacity-95 scale-90 group-hover:scale-100'
+                              : 'opacity-0 group-hover:opacity-95 group-focus-within:opacity-95 scale-90 group-hover:scale-100'
                           } ${node.type === 'io' ? 'skew-x-6' : ''}`}
                         >
                           <Plus
@@ -3818,7 +3938,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           setCompartmentNodeId(node.id);
                         }}
                         title="Click to edit UML stereotype & members"
-                        className="text-[9px] italic text-amber-300/90 leading-tight mb-0.5 cursor-pointer hover:underline"
+                        className={`text-[10px] italic text-amber-300/90 leading-tight mb-0.5 cursor-pointer hover:underline ${
+                          node.type === 'io' ? 'skew-x-6' : ''
+                        }`}
                       >
                         &lt;&lt;{node.stereotype}&gt;&gt;
                       </span>
@@ -3836,17 +3958,36 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           onBlur={() => commitEditingNode(node.id)}
                           onKeyDown={(e) => {
                             e.stopPropagation();
-                            if (e.key === 'Enter') {
-                              commitEditingNode(node.id);
-                            } else if (e.key === 'Tab' && !e.shiftKey) {
+                            if (
+                              e.key === 'Enter' &&
+                              (e.altKey || e.ctrlKey || e.metaKey)
+                            ) {
                               e.preventDefault();
                               commitEditingNode(node.id);
                               handleQuickAddDirection(
                                 node,
                                 directionToPort(currentDirection)
                               );
+                            } else if (e.key === 'Enter') {
+                              commitEditingNode(node.id);
+                              window.requestAnimationFrame(() => {
+                                document
+                                  .querySelector<HTMLElement>(
+                                    `[data-testid="flow-node-${node.id}"]`
+                                  )
+                                  ?.focus();
+                              });
+                            } else if (e.key === 'Tab') {
+                              commitEditingNode(node.id);
                             } else if (e.key === 'Escape') {
                               setEditingNodeId(null);
+                              window.requestAnimationFrame(() => {
+                                document
+                                  .querySelector<HTMLElement>(
+                                    `[data-testid="flow-node-${node.id}"]`
+                                  )
+                                  ?.focus();
+                              });
                             }
                           }}
                           autoFocus
@@ -3877,7 +4018,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           setCompartmentNodeId(node.id);
                         }}
                         title="Click to edit compartment members"
-                        className="w-full mt-1.5 pt-1 border-t border-slate-500/40 text-left font-mono text-[9px] text-slate-200/90 space-y-0.5 cursor-pointer hover:text-white"
+                        className={`w-full mt-1.5 pt-1 border-t border-slate-500/40 text-left font-mono text-[10px] text-slate-200/90 space-y-0.5 cursor-pointer hover:text-white ${
+                          node.type === 'io' ? 'skew-x-6' : ''
+                        }`}
                       >
                         {node.members.map((member, mIdx) => (
                           <div
@@ -3900,9 +4043,11 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         e.stopPropagation();
                         handleCycleNodeColor(node.id);
                       }}
-                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 absolute -top-2 -left-2 w-5 h-5 rounded-full bg-slate-800 border border-slate-600 text-slate-200 hover:text-indigo-300 flex items-center justify-center shadow"
+                      className={`opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -top-2.5 -left-2.5 w-6 h-6 rounded-full bg-slate-800 border border-slate-600 text-slate-200 hover:text-indigo-300 flex items-center justify-center shadow z-20 ${
+                        node.type === 'io' ? 'skew-x-6' : ''
+                      }`}
                     >
-                      <Palette className="w-2.5 h-2.5" aria-hidden="true" />
+                      <Palette className="w-3 h-3" aria-hidden="true" />
                     </button>
 
                     <button
@@ -3919,9 +4064,11 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         );
                         setNewMemberInput('');
                       }}
-                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 absolute -top-2 left-4 w-5 h-5 rounded-full bg-slate-800 border border-slate-600 text-slate-200 hover:text-cyan-300 flex items-center justify-center shadow"
+                      className={`opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -bottom-2.5 -left-2.5 w-6 h-6 rounded-full bg-slate-800 border border-slate-600 text-slate-200 hover:text-cyan-300 flex items-center justify-center shadow z-20 ${
+                        node.type === 'io' ? 'skew-x-6' : ''
+                      }`}
                     >
-                      <ListPlus className="w-2.5 h-2.5" aria-hidden="true" />
+                      <ListPlus className="w-3 h-3" aria-hidden="true" />
                     </button>
 
                     <button
@@ -3933,7 +4080,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         e.stopPropagation();
                         handleDeleteNode(node.id);
                       }}
-                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 absolute -top-2 -right-2 w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center text-[10px] shadow"
+                      className={`opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -top-2.5 -right-2.5 w-6 h-6 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center text-xs shadow z-20 ${
+                        node.type === 'io' ? 'skew-x-6' : ''
+                      }`}
                     >
                       ×
                     </button>
@@ -3952,7 +4101,14 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             setCompartmentNodeId(null);
                           }
                         }}
-                        className="pointer-events-auto absolute top-full left-1/2 -translate-x-1/2 mt-2 z-50 w-64 rounded-xl border border-indigo-500/60 bg-slate-900/95 p-2.5 shadow-2xl text-left text-[10px] text-slate-100 flex flex-col gap-2 cursor-default"
+                        style={{
+                          left: node.x < 85 ? '0px' : '50%',
+                          transform:
+                            node.x < 85 ? 'none' : 'translateX(-50%)',
+                        }}
+                        className={`pointer-events-auto absolute top-full mt-2 z-50 w-64 rounded-xl border border-indigo-500/60 bg-slate-900/95 p-2.5 shadow-2xl text-left text-[10px] text-slate-100 flex flex-col gap-2 cursor-default ${
+                          node.type === 'io' ? 'skew-x-6' : ''
+                        }`}
                       >
                         <div className="flex items-center justify-between border-b border-slate-800 pb-1">
                           <span className="font-semibold text-indigo-300 truncate">
@@ -3962,7 +4118,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             type="button"
                             aria-label="Close compartment editor"
                             onClick={() => setCompartmentNodeId(null)}
-                            className="text-slate-400 hover:text-white px-1 text-xs leading-none"
+                            className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-800 text-slate-300 hover:text-white text-xs leading-none"
                           >
                             ×
                           </button>
@@ -3971,7 +4127,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         <div className="flex items-center justify-between gap-1.5">
                           <label
                             htmlFor={`stereo-select-${node.id}`}
-                            className="text-slate-400 text-[9px]"
+                            className="text-slate-300 text-[10px]"
                           >
                             Stereotype:
                           </label>
@@ -3983,7 +4139,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onChange={(e) =>
                               handleSetNodeStereotype(node.id, e.target.value)
                             }
-                            className="bg-slate-800 border border-slate-700 text-amber-300 font-mono rounded px-1.5 py-0.5 text-[9px] focus:outline-none focus:border-indigo-500"
+                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-amber-300 font-mono rounded px-1.5 py-0.5 text-[10px] focus:outline-none focus:border-indigo-500"
                           >
                             <option value="">None</option>
                             <option value="interface">
@@ -4030,7 +4186,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                       e.target.value
                                     )
                                   }
-                                  className="flex-1 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 font-mono text-[9px] text-slate-200 focus:outline-none focus:border-indigo-500"
+                                  className="flex-1 min-h-[22px] bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 font-mono text-[10px] text-slate-200 focus:outline-none focus:border-indigo-500"
                                 />
                                 <button
                                   type="button"
@@ -4039,7 +4195,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                   onClick={() =>
                                     handleRemoveNodeMember(node.id, mIdx)
                                   }
-                                  className="text-slate-400 hover:text-rose-400 px-1 text-xs leading-none"
+                                  className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-800 text-slate-300 hover:text-rose-400 text-xs leading-none"
                                 >
                                   ×
                                 </button>
@@ -4066,20 +4222,20 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 ? 'uuid user_id FK'
                                 : '+execute() bool'
                             }
-                            className="flex-1 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[9px] text-emerald-300 focus:outline-none focus:border-indigo-500"
+                            className="flex-1 min-h-[24px] bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 focus:outline-none focus:border-indigo-500"
                           />
                           <button
                             type="submit"
                             aria-label="Add node member"
                             data-testid="uml-member-add-btn"
-                            className="px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[9px] font-medium"
+                            className="min-h-[24px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-medium"
                           >
                             + Add
                           </button>
                         </form>
 
                         <div className="flex items-center gap-1 flex-wrap pt-0.5 border-t border-slate-800/80">
-                          <span className="text-[8px] text-slate-400">
+                          <span className="text-[10px] text-slate-400">
                             Quick:
                           </span>
                           <button
@@ -4087,7 +4243,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onClick={() =>
                               handleAddNodeMember(node.id, '+String id')
                             }
-                            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[8px] font-mono text-sky-300"
+                            className="min-h-[22px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-sky-300"
                           >
                             +Field
                           </button>
@@ -4096,7 +4252,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onClick={() =>
                               handleAddNodeMember(node.id, '+execute() bool')
                             }
-                            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[8px] font-mono text-indigo-300"
+                            className="min-h-[22px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-indigo-300"
                           >
                             +Method()
                           </button>
@@ -4105,7 +4261,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onClick={() =>
                               handleAddNodeMember(node.id, 'uuid id PK')
                             }
-                            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[8px] font-mono text-purple-300"
+                            className="min-h-[22px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-purple-300"
                           >
                             +PK
                           </button>
@@ -4114,7 +4270,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onClick={() =>
                               handleAddNodeMember(node.id, 'uuid ref_id FK')
                             }
-                            className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[8px] font-mono text-amber-300"
+                            className="min-h-[22px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-amber-300"
                           >
                             +FK
                           </button>
@@ -4147,7 +4303,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               <button
                 type="button"
                 onClick={handleApplyLiveMermaid}
-                className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium flex items-center gap-1 transition"
+                className="min-h-[26px] px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[11px] font-semibold flex items-center gap-1 transition"
               >
                 <RefreshCw className="w-3 h-3" aria-hidden="true" />
                 <span>Apply &amp; Layout</span>
@@ -4191,7 +4347,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             <button
               type="button"
               onClick={handleApplyLiveMermaid}
-              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium flex items-center gap-1 transition"
+              className="min-h-[26px] px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[11px] font-semibold flex items-center gap-1 transition"
             >
               <RefreshCw className="w-3 h-3" aria-hidden="true" />
               <span>Apply &amp; Layout</span>

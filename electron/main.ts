@@ -23,12 +23,54 @@ const GITHUB_OWNER = 'NeoShadow7366';
 const GITHUB_REPO = 'SideFlow';
 const GITHUB_RELEASES_URL = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases`;
 
+type MainMonitorMode = 'primary' | 'single' | 'all' | 'custom';
+
+interface MainMonitorDisplayInfo {
+  id: number;
+  index: number;
+  label: string;
+  isPrimary: boolean;
+  bounds: { x: number; y: number; width: number; height: number };
+  workArea: { x: number; y: number; width: number; height: number };
+  scaleFactor: number;
+}
+
+interface MainMonitorSettings {
+  mode: MainMonitorMode;
+  targetDisplayId?: number | null;
+  enabledDisplayIds?: number[];
+  edgeOverrides?: Record<string, 'left' | 'right'>;
+}
+
+interface MainDisplayStatePayload {
+  displays: MainMonitorDisplayInfo[];
+  activeDisplayId: number;
+  effectiveEdge: 'left' | 'right';
+  monitorSettings: MainMonitorSettings;
+}
+
+const EDGE_TAB_WIN_WIDTH = 40;
+const EDGE_TAB_WIN_HEIGHT = 96;
+
 let mainWindow: BrowserWindow | null = null;
+const edgeTabWindows = new Map<number, BrowserWindow>();
 let tray: Tray | null = null;
 let isPanelVisible = true;
 let currentAccelerator = 'Alt+Space';
 let currentPanelEdge: 'left' | 'right' = 'right';
 let currentPanelWidthPercent = 35;
+let monitorSettings: MainMonitorSettings = {
+  mode: 'primary',
+  targetDisplayId: null,
+  enabledDisplayIds: [],
+  edgeOverrides: {},
+};
+let activeDisplayId: number | null = null;
+let showEdgeHandleState = true;
+let isDictatingState = false;
+let shortcutLabelState = 'Alt + Space';
+let suppressBlurUntil = 0;
+let isHoveringCompanionTab = false;
 let cachedStore: Record<string, unknown> | null = null;
 let storeWriteChain: Promise<void> = Promise.resolve();
 let updateCheckInterval: NodeJS.Timeout | null = null;
@@ -257,9 +299,10 @@ function checkGitHubReleaseFallback(): Promise<MainUpdateState> {
           };
           const rawTag = (parsed.tag_name || '').replace(/^v/i, '').trim();
           const latestVersion = rawTag || app.getVersion();
-          const setupAsset = (parsed.assets || []).find(
-            (a) => a.name && a.name.toLowerCase().endsWith('.exe')
-          );
+          const assets = parsed.assets || [];
+          const setupAsset =
+            assets.find((a) => a.name && /setup.*\.exe$/i.test(a.name)) ||
+            assets.find((a) => a.name && a.name.toLowerCase().endsWith('.exe'));
           const releaseUrl =
             setupAsset?.browser_download_url || parsed.html_url || GITHUB_RELEASES_URL;
 
@@ -405,6 +448,9 @@ function setupAutoUpdater(): void {
 
 function createTrayIcon(): Electron.NativeImage {
   const candidates = [
+    ...(app.isPackaged && process.resourcesPath
+      ? [path.join(process.resourcesPath, 'electron/icon.png')]
+      : []),
     path.join(__dirname, '../electron/icon.png'),
     path.join(__dirname, 'icon.png'),
     path.join(process.resourcesPath || '', 'electron/icon.png'),
@@ -423,6 +469,76 @@ function createTrayIcon(): Electron.NativeImage {
   const fallbackBase64 =
     'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAADKklEQVR4nE2TXWhcRRTH/2dm7tyP3ex3kjbVmq5GUxF8kD4I1eBDYoW+KGolVgXTN/vkUyHSu2rFR19ERbAPog+CIEWDEgQ/QPNgX9pCrVDaIDY1ZLebbHbv7r175x65extwYA7DOTNnzvn9Zwj/G/43N0v/XOnu7+y0CVoj3AtonRoUJypcf9i9/fZT5e29EMH3BTcafOzkqt/aHJwKgkFNe0LEAFgQWCiwsiFsFwN2E7dca1b2Oed/OTflUwNEaZZji6t+85bVEOoOSuMWrv21A+0pGE7AUkFoD312MDtbQivIIyzMoDbRfue3t8Z9ceajy+Wd1vB0L+iYkGFeW3qUp2eKHMbMpGhUQGiY64dsfv3EfRwiNr3+ptnum9NLv3NFrK/3p+JEFJUrZavNYuX7v2n+6TqFhkhol0i7NEgkLcxN0YVf27QVkFSukaGkwsaN7gFlpMWsLJCxMCQDN+8gYYHA2Ki4uRGDoMdIWMIbI0RWDHYk2CEIFyxSwmTZ2I0kHjsyjoX5g/jywr9YOjGL7cgZzVPP1/H5T9t45vEyjjziYBcEciQiACoVaAiFQlXh5Zfux3sf3sCbrzyI5+YnUZ8ugoXE4kINh9cK8L/ewvKLk2j82MfQytRVqU1buCsIYDkg7WZr2wNU6meQawFOti+xCUn2NKCyMiw0O4Qvvmtj+Y1pnP14C1c3BL5a20ViA9c7wLdXd/D+CzV8crGHNlkoO4xIAyJNEwuF3JiLi9cIq2s9LB6v4rOf+yju81Ca9PDpHwFePTqGlesDrDUJXkHAqKxIlUgilhYSKChXohcJCAW4RcJQAqwAZyzzdRNA5gQSzaM2QhskJu4tbkhXdyLyTKVMyfGjHn64NGArL2E0w2hA5yRW1kN+9iGN8XxsBo420qHOzD35WyNyc8ubja3uhG9xE+XaEH82FeximgAjBnAJXWFwuBZjU1joHahif9x598qTxbMEnwU3gLlznUYzkEsBh1WdY2E0E6e0bWTEXeKeEoldcFo1Lz5/6Ym8n95+V7tsnLnM5fWb0dRuP6LIymTKvjNGxAslzQ9U+7c/OFi6s3foP3gzPVo6j3ULAAAAAElFTkSuQmCC';
   return nativeImage.createFromDataURL(`data:image/png;base64,${fallbackBase64}`);
+}
+
+function buildTrayMonitorSubmenu(): Electron.MenuItemConstructorOptions[] {
+  let displays: MainMonitorDisplayInfo[] = [];
+  try {
+    displays = getAllMonitorDisplayInfos();
+  } catch {
+    displays = [];
+  }
+
+  const items: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: 'Primary Monitor Only',
+      type: 'radio',
+      checked: monitorSettings.mode === 'primary',
+      click: () => {
+        applyMonitorSettingsFromMain({
+          ...monitorSettings,
+          mode: 'primary',
+        });
+      },
+    },
+    {
+      label: 'All Monitors (Open at Mouse Cursor)',
+      type: 'radio',
+      checked: monitorSettings.mode === 'all',
+      click: () => {
+        applyMonitorSettingsFromMain({
+          ...monitorSettings,
+          mode: 'all',
+        });
+      },
+    },
+  ];
+
+  if (displays.length > 0) {
+    items.push({ type: 'separator' });
+    for (const d of displays) {
+      const resLabel = `${d.bounds.width}×${d.bounds.height}`;
+      const primarySuffix = d.isPrimary ? ' [Primary]' : '';
+      items.push({
+        label: `Monitor ${d.index}: ${d.label} (${resLabel})${primarySuffix}`,
+        type: 'radio',
+        checked:
+          monitorSettings.mode === 'single' &&
+          monitorSettings.targetDisplayId === d.id,
+        click: () => {
+          applyMonitorSettingsFromMain({
+            ...monitorSettings,
+            mode: 'single',
+            targetDisplayId: d.id,
+          });
+        },
+      });
+    }
+  }
+
+  if (monitorSettings.mode === 'custom') {
+    items.push({ type: 'separator' });
+    items.push({
+      label: `Custom Multi-Monitor Subset (${
+        getEnabledMonitorDisplays(displays).length
+      } active)`,
+      type: 'radio',
+      checked: true,
+      click: () => navigateToTabFromMain('settings'),
+    });
+  }
+
+  return items;
 }
 
 function updateTrayMenu(): void {
@@ -460,6 +576,10 @@ function updateTrayMenu(): void {
       label: 'Configure Hotkey & Settings',
       click: () => navigateToTabFromMain('settings'),
     },
+    {
+      label: 'Monitor Display',
+      submenu: buildTrayMonitorSubmenu(),
+    },
     { type: 'separator' },
     {
       label: 'Start SideFlow at Login',
@@ -495,29 +615,135 @@ function updateTrayMenu(): void {
   tray.setContextMenu(contextMenu);
 }
 
-function togglePanelFromMain(forceState?: boolean): void {
+function openPanelOnDisplay(
+  targetDisplayId: number,
+  switchToTab?: 'drawers' | 'flowchart' | 'notes' | 'settings'
+): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const nextState = typeof forceState === 'boolean' ? forceState : !isPanelVisible;
-  isPanelVisible = nextState;
+  isHoveringCompanionTab = false;
+  suppressBlurUntil = Date.now() + 500;
 
-  if (isPanelVisible) {
-    mainWindow.setIgnoreMouseEvents(false);
-    mainWindow.show();
-    mainWindow.focus();
-  } else {
-    mainWindow.setIgnoreMouseEvents(true, { forward: true });
-  }
-  mainWindow.webContents.send('set-panel-visibility', isPanelVisible);
-}
+  const allDisplays = getAllMonitorDisplayInfos();
+  const enabledDisplays = getEnabledMonitorDisplays(allDisplays);
+  const targetDisplay =
+    enabledDisplays.find((d) => d.id === targetDisplayId) ??
+    ensureValidActiveDisplay(allDisplays);
 
-function navigateToTabFromMain(tab: 'drawers' | 'flowchart' | 'notes' | 'settings'): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  activeDisplayId = targetDisplay.id;
+  const effectiveEdge = getEffectiveEdgeForDisplay(targetDisplay.id);
+  const nextBounds = computePanelBoundsForDisplay(
+    targetDisplay,
+    effectiveEdge,
+    currentPanelWidthPercent
+  );
+  setWindowBoundsCrossDpiSafe(mainWindow, nextBounds);
+
   isPanelVisible = true;
   mainWindow.setIgnoreMouseEvents(false);
   mainWindow.show();
   mainWindow.focus();
+
+  broadcastDisplayState();
   mainWindow.webContents.send('set-panel-visibility', true);
-  mainWindow.webContents.send('switch-tab', tab);
+  if (switchToTab) {
+    mainWindow.webContents.send('switch-tab', switchToTab);
+  }
+  syncEdgeTabWindows();
+}
+
+function closePanelFromMain(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  isPanelVisible = false;
+  mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  mainWindow.webContents.send('set-panel-visibility', false);
+  syncEdgeTabWindows();
+}
+
+function resolveCursorOrConfiguredDisplay(
+  allDisplays: MainMonitorDisplayInfo[]
+): MainMonitorDisplayInfo | undefined {
+  const enabled = getEnabledMonitorDisplays(allDisplays);
+  if (enabled.length === 0) return undefined;
+
+  if (monitorSettings.mode === 'primary' || monitorSettings.mode === 'single') {
+    return enabled[0];
+  }
+
+  try {
+    const cursorPt = screen.getCursorScreenPoint();
+    const cursorDisp = screen.getDisplayNearestPoint(cursorPt);
+    const cursorMatch = enabled.find((d) => d.id === cursorDisp.id);
+    if (cursorMatch) {
+      return cursorMatch;
+    }
+  } catch {
+    // fallback below
+  }
+  return undefined;
+}
+
+function togglePanelFromMain(forceState?: boolean): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const allDisplays = getAllMonitorDisplayInfos();
+  const enabled = getEnabledMonitorDisplays(allDisplays);
+  const currentActive = ensureValidActiveDisplay(allDisplays);
+
+  if (typeof forceState === 'boolean') {
+    if (!forceState) {
+      closePanelFromMain();
+      return;
+    }
+    const preferred =
+      resolveCursorOrConfiguredDisplay(allDisplays) ?? currentActive;
+    openPanelOnDisplay(preferred.id);
+    return;
+  }
+
+  // Single-screen modes ('primary' | 'single')
+  if (monitorSettings.mode === 'primary' || monitorSettings.mode === 'single') {
+    const target = enabled[0] ?? currentActive;
+    if (!isPanelVisible || activeDisplayId !== target.id) {
+      openPanelOnDisplay(target.id);
+    } else {
+      closePanelFromMain();
+    }
+    return;
+  }
+
+  // Multi-monitor modes ('all' | 'custom'): check cursor display
+  const cursorMatch = resolveCursorOrConfiguredDisplay(allDisplays);
+  if (cursorMatch) {
+    if (!isPanelVisible) {
+      openPanelOnDisplay(cursorMatch.id);
+    } else if (activeDisplayId !== cursorMatch.id) {
+      // Immediately move open panel onto the monitor where the mouse is
+      openPanelOnDisplay(cursorMatch.id);
+    } else {
+      closePanelFromMain();
+    }
+    return;
+  }
+
+  // Cursor is on an excluded monitor in 'custom' mode
+  if (isPanelVisible) {
+    closePanelFromMain();
+  } else {
+    const fallback =
+      enabled.find((d) => d.id === activeDisplayId) ??
+      enabled[0] ??
+      currentActive;
+    openPanelOnDisplay(fallback.id);
+  }
+}
+
+function navigateToTabFromMain(tab: 'drawers' | 'flowchart' | 'notes' | 'settings'): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const allDisplays = getAllMonitorDisplayInfos();
+  const currentActive = ensureValidActiveDisplay(allDisplays);
+  const preferred =
+    resolveCursorOrConfiguredDisplay(allDisplays) ?? currentActive;
+  openPanelOnDisplay(preferred.id, tab);
 }
 
 function registerGlobalHotkey(accelerator: string): boolean {
@@ -690,6 +916,9 @@ function launchNativeCommand(
 
 function getSttWorkerScriptPath(): string | null {
   const candidates = [
+    ...(app.isPackaged && process.resourcesPath
+      ? [path.join(process.resourcesPath, 'electron/stt_worker.py')]
+      : []),
     path.join(__dirname, '../electron/stt_worker.py'),
     path.join(__dirname, 'stt_worker.py'),
     path.join(process.resourcesPath || '', 'electron/stt_worker.py'),
@@ -923,13 +1152,191 @@ function clampPanelWidthPercent(value: unknown): number {
   return Math.max(15, Math.min(90, Math.round(num)));
 }
 
-function computePanelBounds(
+const VALID_MONITOR_MODES = new Set<MainMonitorMode>([
+  'primary',
+  'single',
+  'all',
+  'custom',
+]);
+
+function sanitizeMainMonitorSettings(raw: unknown): MainMonitorSettings {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      mode: 'primary',
+      targetDisplayId: null,
+      enabledDisplayIds: [],
+      edgeOverrides: {},
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+  const mode: MainMonitorMode = VALID_MONITOR_MODES.has(
+    obj.mode as MainMonitorMode
+  )
+    ? (obj.mode as MainMonitorMode)
+    : 'primary';
+
+  const targetDisplayId =
+    typeof obj.targetDisplayId === 'number' &&
+    Number.isFinite(obj.targetDisplayId)
+      ? obj.targetDisplayId
+      : null;
+
+  const enabledDisplayIds = Array.isArray(obj.enabledDisplayIds)
+    ? Array.from(
+        new Set(
+          obj.enabledDisplayIds.filter(
+            (id): id is number => typeof id === 'number' && Number.isFinite(id)
+          )
+        )
+      )
+    : [];
+
+  const edgeOverrides: Record<string, 'left' | 'right'> = {};
+  if (
+    obj.edgeOverrides &&
+    typeof obj.edgeOverrides === 'object' &&
+    !Array.isArray(obj.edgeOverrides)
+  ) {
+    let count = 0;
+    for (const [key, val] of Object.entries(
+      obj.edgeOverrides as Record<string, unknown>
+    )) {
+      if (count >= 32) break;
+      if (
+        !FORBIDDEN_STORE_KEYS.has(key) &&
+        /^-?\d+$/.test(key) &&
+        (val === 'left' || val === 'right')
+      ) {
+        edgeOverrides[key] = val;
+        count++;
+      }
+    }
+  }
+
+  return {
+    mode,
+    targetDisplayId,
+    enabledDisplayIds,
+    edgeOverrides,
+  };
+}
+
+function getAllMonitorDisplayInfos(): MainMonitorDisplayInfo[] {
+  let rawDisplays: Electron.Display[] = [];
+  let primaryId: number | null = null;
+  try {
+    rawDisplays = screen.getAllDisplays();
+    primaryId = screen.getPrimaryDisplay()?.id ?? null;
+  } catch {
+    rawDisplays = [];
+  }
+
+  // Safe synthetic fallback during transient zero-display OS transitions (DisplayPort sleep / KVM / RDP)
+  if (!Array.isArray(rawDisplays) || rawDisplays.length === 0) {
+    return [
+      {
+        id: activeDisplayId ?? 1,
+        index: 1,
+        label: 'Primary Display',
+        isPrimary: true,
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+        scaleFactor: 1,
+      },
+    ];
+  }
+
+  const sorted = [...rawDisplays].sort(
+    (a, b) =>
+      a.bounds.x - b.bounds.x ||
+      a.bounds.y - b.bounds.y ||
+      a.id - b.id
+  );
+  return sorted.map((d, idx) => ({
+    id: d.id,
+    index: idx + 1,
+    label: (d.label && d.label.trim()) || `Display ${idx + 1}`,
+    isPrimary: primaryId != null ? d.id === primaryId : idx === 0,
+    bounds: { ...d.bounds },
+    workArea: { ...d.workArea },
+    scaleFactor: d.scaleFactor || 1,
+  }));
+}
+
+function getEnabledMonitorDisplays(
+  allDisplays = getAllMonitorDisplayInfos()
+): MainMonitorDisplayInfo[] {
+  if (allDisplays.length === 0) return [];
+  const primary = allDisplays.find((d) => d.isPrimary) ?? allDisplays[0];
+  switch (monitorSettings.mode) {
+    case 'primary':
+      return [primary];
+    case 'single': {
+      const target =
+        monitorSettings.targetDisplayId != null
+          ? allDisplays.find((d) => d.id === monitorSettings.targetDisplayId)
+          : undefined;
+      return [target ?? primary];
+    }
+    case 'all':
+      return [...allDisplays];
+    case 'custom': {
+      const enabledSet = new Set(monitorSettings.enabledDisplayIds ?? []);
+      const matched = allDisplays.filter((d) => enabledSet.has(d.id));
+      return matched.length > 0 ? matched : [primary];
+    }
+    default:
+      return [primary];
+  }
+}
+
+function getEffectiveEdgeForDisplay(
+  displayId: number | null | undefined
+): 'left' | 'right' {
+  if (displayId != null && monitorSettings.edgeOverrides) {
+    const override = monitorSettings.edgeOverrides[String(displayId)];
+    if (override === 'left' || override === 'right') {
+      return override;
+    }
+  }
+  return currentPanelEdge === 'left' ? 'left' : 'right';
+}
+
+function ensureValidActiveDisplay(
+  allDisplays = getAllMonitorDisplayInfos()
+): MainMonitorDisplayInfo {
+  const enabled = getEnabledMonitorDisplays(allDisplays);
+  const primary = allDisplays.find((d) => d.isPrimary) ?? allDisplays[0];
+  if (activeDisplayId != null) {
+    const existing = enabled.find((d) => d.id === activeDisplayId);
+    if (existing) return existing;
+  }
+
+  if (monitorSettings.mode === 'all' || monitorSettings.mode === 'custom') {
+    try {
+      const cursorPt = screen.getCursorScreenPoint();
+      const cursorDisp = screen.getDisplayNearestPoint(cursorPt);
+      const cursorMatch = enabled.find((d) => d.id === cursorDisp.id);
+      if (cursorMatch) {
+        activeDisplayId = cursorMatch.id;
+        return cursorMatch;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const next = enabled[0] ?? primary;
+  activeDisplayId = next.id;
+  return next;
+}
+
+function computePanelBoundsForDisplay(
+  display: MainMonitorDisplayInfo,
   edge: 'left' | 'right',
   widthPercent: number
 ): { x: number; y: number; width: number; height: number } {
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { width, height } = primaryDisplay.workAreaSize;
-  const { x: workAreaX, y: workAreaY } = primaryDisplay.workArea;
+  const { x: workAreaX, y: workAreaY, width, height } = display.workArea;
   const clampedPct = clampPanelWidthPercent(widthPercent);
   const panelWidth = Math.max(
     320,
@@ -944,9 +1351,259 @@ function computePanelBounds(
   };
 }
 
+function setWindowBoundsCrossDpiSafe(
+  win: BrowserWindow,
+  bounds: { x: number; y: number; width: number; height: number }
+): void {
+  if (win.isDestroyed()) return;
+  try {
+    win.setResizable(true);
+    win.setBounds(bounds);
+    win.setBounds(bounds);
+    win.setResizable(false);
+  } catch {
+    try {
+      win.setBounds(bounds);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function setEdgeTabBoundsSafe(
+  win: BrowserWindow,
+  bounds: { x: number; y: number; width: number; height: number }
+): void {
+  if (win.isDestroyed()) return;
+  try {
+    // Keep resizable: false on tiny 40px companion windows to avoid Win32 WS_THICKFRAME (SM_CXMINTRACK ~136px) width clamping
+    win.setMinimumSize(bounds.width, bounds.height);
+    win.setBounds(bounds);
+    win.setBounds(bounds);
+  } catch {
+    // ignore
+  }
+}
+
+function getDisplayStatePayload(): MainDisplayStatePayload {
+  const allDisplays = getAllMonitorDisplayInfos();
+  const activeDisplay = ensureValidActiveDisplay(allDisplays);
+  return {
+    displays: allDisplays,
+    activeDisplayId: activeDisplay.id,
+    effectiveEdge: getEffectiveEdgeForDisplay(activeDisplay.id),
+    monitorSettings,
+  };
+}
+
+function broadcastDisplayState(): MainDisplayStatePayload {
+  const payload = getDisplayStatePayload();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('display-state-changed', payload);
+  }
+  return payload;
+}
+
+function getEdgeTabHtmlPath(): string | null {
+  const candidates = [
+    ...(app.isPackaged && process.resourcesPath
+      ? [path.join(process.resourcesPath, 'electron/edge-tab.html')]
+      : []),
+    path.join(__dirname, '../electron/edge-tab.html'),
+    path.join(__dirname, 'edge-tab.html'),
+    path.join(process.resourcesPath || '', 'electron/edge-tab.html'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function computeEdgeTabBounds(
+  display: MainMonitorDisplayInfo,
+  edge: 'left' | 'right'
+): { x: number; y: number; width: number; height: number } {
+  const { x: workX, y: workY, width: workW, height: workH } = display.workArea;
+  const x = edge === 'left' ? workX : workX + workW - EDGE_TAB_WIN_WIDTH;
+  const y = Math.round(workY + (workH - EDGE_TAB_WIN_HEIGHT) / 2);
+  return {
+    x,
+    y,
+    width: EDGE_TAB_WIN_WIDTH,
+    height: EDGE_TAB_WIN_HEIGHT,
+  };
+}
+
+function destroyAllEdgeTabWindows(): void {
+  isHoveringCompanionTab = false;
+  for (const [, win] of edgeTabWindows) {
+    try {
+      if (!win.isDestroyed()) {
+        win.destroy();
+      }
+    } catch {
+      // ignore
+    }
+  }
+  edgeTabWindows.clear();
+}
+
+function createEdgeTabWindow(
+  display: MainMonitorDisplayInfo,
+  edge: 'left' | 'right',
+  bounds: { x: number; y: number; width: number; height: number }
+): BrowserWindow | null {
+  const htmlPath = getEdgeTabHtmlPath();
+  if (!htmlPath) return null;
+
+  const tabWin = new BrowserWindow({
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: EDGE_TAB_WIN_WIDTH,
+    minHeight: EDGE_TAB_WIN_HEIGHT,
+    maxWidth: EDGE_TAB_WIN_WIDTH,
+    maxHeight: EDGE_TAB_WIN_HEIGHT,
+    x: bounds.x,
+    y: bounds.y,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    focusable: false,
+    hasShadow: false,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  setEdgeTabBoundsSafe(tabWin, bounds);
+  tabWin.setIgnoreMouseEvents(true, { forward: true });
+
+  tabWin.webContents.on('will-navigate', (event) => {
+    event.preventDefault();
+  });
+  tabWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
+  tabWin.webContents.on('did-finish-load', () => {
+    if (tabWin.isDestroyed()) return;
+    syncEdgeTabWindows();
+  });
+
+  tabWin.on('closed', () => {
+    if (edgeTabWindows.get(display.id) === tabWin) {
+      edgeTabWindows.delete(display.id);
+    }
+  });
+
+  void tabWin
+    .loadFile(htmlPath, {
+      query: {
+        displayId: String(display.id),
+        edge,
+        dictating: isDictatingState ? '1' : '0',
+        shortcut: shortcutLabelState,
+        displayName: `Monitor ${display.index}`,
+        openElsewhere: isPanelVisible ? '1' : '0',
+      },
+    })
+    .catch(() => {});
+
+  edgeTabWindows.set(display.id, tabWin);
+  return tabWin;
+}
+
+function syncEdgeTabWindows(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    destroyAllEdgeTabWindows();
+    return;
+  }
+
+  const allDisplays = getAllMonitorDisplayInfos();
+  const allIds = new Set(allDisplays.map((d) => d.id));
+  const activeDisplay = ensureValidActiveDisplay(allDisplays);
+  const enabledDisplays = getEnabledMonitorDisplays(allDisplays);
+  const shouldShowTabs = showEdgeHandleState || isDictatingState;
+
+  // If in single-display routing where no companion windows are needed, release idle companion renderers
+  if (enabledDisplays.length <= 1) {
+    isHoveringCompanionTab = false;
+    destroyAllEdgeTabWindows();
+    return;
+  }
+
+  // Destroy companion windows for disconnected displays
+  for (const [id, win] of edgeTabWindows) {
+    if (!allIds.has(id) || win.isDestroyed()) {
+      isHoveringCompanionTab = false;
+      try {
+        if (!win.isDestroyed()) win.destroy();
+      } catch {
+        // ignore
+      }
+      edgeTabWindows.delete(id);
+    }
+  }
+
+  const companionTargetIds = new Set(
+    shouldShowTabs
+      ? enabledDisplays
+          .filter((d) => d.id !== activeDisplay.id)
+          .map((d) => d.id)
+      : []
+  );
+
+  // Hide companion windows that should not currently be visible (e.g. activeDisplayId)
+  for (const [id, win] of edgeTabWindows) {
+    if (!companionTargetIds.has(id) && !win.isDestroyed()) {
+      if (win.isVisible()) {
+        isHoveringCompanionTab = false;
+        win.hide();
+      }
+    }
+  }
+
+  // Show and position companion windows for all other enabled monitors
+  for (const display of enabledDisplays) {
+    if (!companionTargetIds.has(display.id)) continue;
+    const edge = getEffectiveEdgeForDisplay(display.id);
+    const bounds = computeEdgeTabBounds(display, edge);
+    const existing = edgeTabWindows.get(display.id);
+    if (!existing || existing.isDestroyed()) {
+      createEdgeTabWindow(display, edge, bounds);
+    } else {
+      setEdgeTabBoundsSafe(existing, bounds);
+      if (!existing.webContents.isLoading()) {
+        existing.webContents.send('edge-tab-update', {
+          displayId: display.id,
+          edge,
+          isDictating: isDictatingState,
+          shortcutLabel: shortcutLabelState,
+          displayName: `Monitor ${display.index}`,
+          isOpenElsewhere: isPanelVisible,
+        });
+        if (!existing.isVisible()) {
+          existing.setIgnoreMouseEvents(true, { forward: true });
+          existing.showInactive();
+        }
+      }
+    }
+  }
+}
+
 function applyMainWindowBounds(
   edge?: 'left' | 'right',
-  widthPercent?: number
+  widthPercent?: number,
+  options?: { skipCompanionSync?: boolean }
 ): void {
   if (edge === 'left' || edge === 'right') {
     currentPanelEdge = edge;
@@ -954,10 +1611,37 @@ function applyMainWindowBounds(
   if (widthPercent !== undefined) {
     currentPanelWidthPercent = clampPanelWidthPercent(widthPercent);
   }
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.setBounds(
-    computePanelBounds(currentPanelEdge, currentPanelWidthPercent)
-  );
+  if (isPanelVisible) {
+    suppressBlurUntil = Math.max(suppressBlurUntil, Date.now() + 300);
+  }
+  const allDisplays = getAllMonitorDisplayInfos();
+  const activeDisplay = ensureValidActiveDisplay(allDisplays);
+  const effectiveEdge = getEffectiveEdgeForDisplay(activeDisplay.id);
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    setWindowBoundsCrossDpiSafe(
+      mainWindow,
+      computePanelBoundsForDisplay(
+        activeDisplay,
+        effectiveEdge,
+        currentPanelWidthPercent
+      )
+    );
+  }
+  if (!options?.skipCompanionSync) {
+    broadcastDisplayState();
+    syncEdgeTabWindows();
+  }
+}
+
+function applyMonitorSettingsFromMain(
+  nextRaw: unknown
+): MainDisplayStatePayload {
+  monitorSettings = sanitizeMainMonitorSettings(nextRaw);
+  writeLocalStore('sideflow_monitor_settings', monitorSettings);
+  applyMainWindowBounds();
+  updateTrayMenu();
+  return getDisplayStatePayload();
 }
 
 function createWindow(): void {
@@ -970,8 +1654,25 @@ function createWindow(): void {
       store.sideflow_panel_width_percent
     );
   }
-  const initialBounds = computePanelBounds(
-    currentPanelEdge,
+  if (store.sideflow_monitor_settings !== undefined) {
+    monitorSettings = sanitizeMainMonitorSettings(
+      store.sideflow_monitor_settings
+    );
+  }
+  if (typeof store.sideflow_edge_handle === 'boolean') {
+    showEdgeHandleState = store.sideflow_edge_handle;
+  }
+  const savedShortcut = store.sideflow_shortcut as { label?: string } | undefined;
+  if (typeof savedShortcut?.label === 'string' && savedShortcut.label.trim()) {
+    shortcutLabelState = savedShortcut.label.trim();
+  }
+
+  const allDisplays = getAllMonitorDisplayInfos();
+  const initialDisplay = ensureValidActiveDisplay(allDisplays);
+  const initialEdge = getEffectiveEdgeForDisplay(initialDisplay.id);
+  const initialBounds = computePanelBoundsForDisplay(
+    initialDisplay,
+    initialEdge,
     currentPanelWidthPercent
   );
 
@@ -990,12 +1691,18 @@ function createWindow(): void {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
 
-  // Automatically grant local microphone access for Voice Dictation inside Electron
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    if (permission === 'media') {
+  // Automatically grant local microphone access for Voice Dictation inside mainWindow only
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (
+      permission === 'media' &&
+      mainWindow &&
+      !mainWindow.isDestroyed() &&
+      webContents === mainWindow.webContents
+    ) {
       callback(true);
       return;
     }
@@ -1028,6 +1735,7 @@ function createWindow(): void {
   });
 
   mainWindow.on('blur', () => {
+    if (isHoveringCompanionTab || Date.now() < suppressBlurUntil) return;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('window-blur');
     }
@@ -1035,6 +1743,7 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    destroyAllEdgeTabWindows();
   });
 }
 
@@ -1051,10 +1760,16 @@ app.whenReady().then(() => {
   if (!hasSingleInstanceLock) return;
 
   createWindow();
+  syncEdgeTabWindows();
 
-  screen.on('display-metrics-changed', () => {
+  const handleDisplayTopologyChanged = () => {
     applyMainWindowBounds();
-  });
+    updateTrayMenu();
+  };
+
+  screen.on('display-added', handleDisplayTopologyChanged);
+  screen.on('display-removed', handleDisplayTopologyChanged);
+  screen.on('display-metrics-changed', handleDisplayTopologyChanged);
 
   // Register persisted or default global shortcut & auto-launch on login
   const store = readLocalStore();
@@ -1089,19 +1804,49 @@ app.whenReady().then(() => {
     void performUpdateCheck();
   }, 4 * 60 * 60 * 1000);
 
+  const isMainSender = (
+    event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent
+  ): boolean =>
+    Boolean(
+      mainWindow &&
+        !mainWindow.isDestroyed() &&
+        event.sender === mainWindow.webContents
+    );
+
+  const isCompanionSender = (
+    event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent,
+    expectedDisplayId?: number
+  ): boolean => {
+    if (typeof expectedDisplayId === 'number') {
+      const win = edgeTabWindows.get(expectedDisplayId);
+      return Boolean(win && !win.isDestroyed() && event.sender === win.webContents);
+    }
+    for (const [, win] of edgeTabWindows) {
+      if (!win.isDestroyed() && event.sender === win.webContents) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   // IPC Handlers
   ipcMain.handle(
     'launch-native-app',
-    async (_event, command: string, args?: string[]) => {
+    async (event, command: string, args?: string[]) => {
+      if (!isMainSender(event)) {
+        return { success: false, error: 'Unauthorized IPC sender' };
+      }
       return launchNativeCommand(command, args);
     }
   );
 
-  ipcMain.handle('update-global-shortcut', async (_event, accelerator: string) => {
+  ipcMain.handle('update-global-shortcut', async (event, accelerator: string) => {
+    if (!isMainSender(event)) return false;
     return registerGlobalHotkey(accelerator);
   });
 
-  ipcMain.on('set-panel-visibility', (_event, visible: boolean) => {
+  ipcMain.on('set-panel-visibility', (event, visible: boolean) => {
+    if (!isMainSender(event)) return;
     isPanelVisible = Boolean(visible);
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (isPanelVisible) {
@@ -1112,21 +1857,25 @@ app.whenReady().then(() => {
       // Forward mouse events so desktop underneath remains clickable while edge handle can still be hovered
       mainWindow.setIgnoreMouseEvents(true, { forward: true });
     }
+    syncEdgeTabWindows();
   });
 
-  ipcMain.on('set-panel-edge', (_event, edge: 'left' | 'right') => {
+  ipcMain.on('set-panel-edge', (event, edge: 'left' | 'right') => {
+    if (!isMainSender(event)) return;
     if (edge !== 'left' && edge !== 'right') return;
     applyMainWindowBounds(edge);
     writeLocalStore('sideflow_panel_edge', currentPanelEdge);
   });
 
-  ipcMain.on('set-panel-width-percent', (_event, widthPercent: number) => {
+  ipcMain.on('set-panel-width-percent', (event, widthPercent: number) => {
+    if (!isMainSender(event)) return;
     const clamped = clampPanelWidthPercent(widthPercent);
-    applyMainWindowBounds(undefined, clamped);
+    applyMainWindowBounds(undefined, clamped, { skipCompanionSync: true });
     writeLocalStore('sideflow_panel_width_percent', clamped);
   });
 
-  ipcMain.on('set-ignore-mouse-events', (_event, ignore: boolean) => {
+  ipcMain.on('set-ignore-mouse-events', (event, ignore: boolean) => {
+    if (!isMainSender(event)) return;
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (ignore) {
       mainWindow.setIgnoreMouseEvents(true, { forward: true });
@@ -1135,8 +1884,111 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('open-file-dialog', async () => {
-    if (!mainWindow) return [];
+  ipcMain.handle('get-display-state', async (event) => {
+    if (!isMainSender(event)) return getDisplayStatePayload();
+    return getDisplayStatePayload();
+  });
+
+  ipcMain.handle('set-monitor-settings', async (event, nextSettings: unknown) => {
+    if (!isMainSender(event)) return getDisplayStatePayload();
+    return applyMonitorSettingsFromMain(nextSettings);
+  });
+
+  ipcMain.handle(
+    'activate-display',
+    async (
+      event,
+      payload: { displayId?: number; openPanel?: boolean } | number
+    ) => {
+      if (!isMainSender(event)) return getDisplayStatePayload();
+      const displayId =
+        typeof payload === 'number' ? payload : payload?.displayId;
+      const shouldOpen =
+        typeof payload === 'object' && payload !== null && typeof payload.openPanel === 'boolean'
+          ? payload.openPanel
+          : true;
+
+      if (typeof displayId === 'number' && Number.isFinite(displayId)) {
+        if (shouldOpen) {
+          openPanelOnDisplay(displayId);
+        } else {
+          const allDisplays = getAllMonitorDisplayInfos();
+          const enabledDisplays = getEnabledMonitorDisplays(allDisplays);
+          const target = enabledDisplays.find((d) => d.id === displayId);
+          if (target) {
+            activeDisplayId = target.id;
+            applyMainWindowBounds();
+          }
+        }
+      }
+      return getDisplayStatePayload();
+    }
+  );
+
+  ipcMain.on(
+    'set-edge-handle-state',
+    (
+      event,
+      state: {
+        showEdgeHandle?: boolean;
+        isDictating?: boolean;
+        shortcutLabel?: string;
+      }
+    ) => {
+      if (!isMainSender(event)) return;
+      if (!state || typeof state !== 'object') return;
+      if (typeof state.showEdgeHandle === 'boolean') {
+        showEdgeHandleState = state.showEdgeHandle;
+      }
+      if (typeof state.isDictating === 'boolean') {
+        isDictatingState = state.isDictating;
+      }
+      if (typeof state.shortcutLabel === 'string' && state.shortcutLabel.trim()) {
+        shortcutLabelState = state.shortcutLabel.trim().slice(0, 64);
+      }
+      syncEdgeTabWindows();
+    }
+  );
+
+  ipcMain.on('prepare-edge-tab-click', (event) => {
+    if (!isCompanionSender(event)) return;
+    isHoveringCompanionTab = true;
+    suppressBlurUntil = Date.now() + 600;
+  });
+
+  ipcMain.on('edge-tab-clicked', (event, displayId: unknown) => {
+    if (
+      typeof displayId === 'number' &&
+      Number.isFinite(displayId) &&
+      isCompanionSender(event, displayId)
+    ) {
+      openPanelOnDisplay(displayId);
+    }
+  });
+
+  ipcMain.on(
+    'set-companion-ignore-mouse',
+    (event, payload: { displayId?: number; ignore?: boolean }) => {
+      if (!payload || typeof payload.displayId !== 'number') return;
+      if (payload.ignore && isCompanionSender(event)) {
+        isHoveringCompanionTab = false;
+      }
+      if (!isCompanionSender(event, payload.displayId)) return;
+      const tabWin = edgeTabWindows.get(payload.displayId);
+      if (!tabWin || tabWin.isDestroyed()) return;
+      if (payload.ignore) {
+        isHoveringCompanionTab = false;
+        tabWin.setIgnoreMouseEvents(true, { forward: true });
+      } else {
+        isHoveringCompanionTab = true;
+        suppressBlurUntil = Date.now() + 800;
+        tabWin.setIgnoreMouseEvents(false);
+      }
+    }
+  );
+
+  ipcMain.handle('open-file-dialog', async (event) => {
+    if (!isMainSender(event) || !mainWindow) return [];
     const result = await dialog.showOpenDialog(mainWindow, {
       title: 'Select Application, Shortcut, Script, or File',
       properties: ['openFile', 'multiSelections'],
@@ -1145,8 +1997,8 @@ app.whenReady().then(() => {
     return result.filePaths;
   });
 
-  ipcMain.handle('open-directory-dialog', async () => {
-    if (!mainWindow) return null;
+  ipcMain.handle('open-directory-dialog', async (event) => {
+    if (!isMainSender(event) || !mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {
       title: 'Select Folder for Live ObjectDock Drawer',
       properties: ['openDirectory'],
@@ -1155,7 +2007,8 @@ app.whenReady().then(() => {
     return result.filePaths[0];
   });
 
-  ipcMain.handle('read-directory-items', async (_event, dirPath: string) => {
+  ipcMain.handle('read-directory-items', async (event, dirPath: string) => {
+    if (!isMainSender(event)) return [];
     if (!dirPath || typeof dirPath !== 'string') return [];
     try {
       const resolvedDir = path.resolve(dirPath.trim());
@@ -1390,7 +2243,8 @@ app.whenReady().then(() => {
     };
   };
 
-  ipcMain.handle('extract-file-icon', async (_event, filePath: string) => {
+  ipcMain.handle('extract-file-icon', async (event, filePath: string) => {
+    if (!isMainSender(event)) return null;
     if (!filePath || typeof filePath !== 'string') return null;
     try {
       const resolved = await resolveShortcutAndIcon(filePath);
@@ -1400,7 +2254,8 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('resolve-shortcut-item', async (_event, rawPathOrName: string) => {
+  ipcMain.handle('resolve-shortcut-item', async (event, rawPathOrName: string) => {
+    if (!isMainSender(event)) return null;
     if (!rawPathOrName || typeof rawPathOrName !== 'string') return null;
     try {
       return await resolveShortcutAndIcon(rawPathOrName);
@@ -1409,7 +2264,16 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('get-system-metrics', async () => {
+  ipcMain.handle('get-system-metrics', async (event) => {
+    if (!isMainSender(event)) {
+      return {
+        cpuPercent: 0,
+        memPercent: 0,
+        memUsedGb: 0,
+        memTotalGb: 0,
+        uptimeHours: 0,
+      };
+    }
     const cpus = os.cpus();
     let totalIdle = 0;
     let totalTick = 0;
@@ -1441,7 +2305,8 @@ app.whenReady().then(() => {
     };
   });
 
-  ipcMain.handle('get-running-processes', async () => {
+  ipcMain.handle('get-running-processes', async (event) => {
+    if (!isMainSender(event)) return [];
     return new Promise<string[]>((resolve) => {
       if (process.platform === 'win32') {
         execFile(
@@ -1485,17 +2350,49 @@ app.whenReady().then(() => {
     });
   });
 
-  ipcMain.handle('store-get-all', async () => {
+  ipcMain.handle('store-get-all', async (event) => {
+    if (!isMainSender(event)) return {};
     return readLocalStore();
   });
 
-  ipcMain.on('store-set', (_event, payload: { key: string; value: unknown }) => {
+  ipcMain.on('store-set', (event, payload: { key: string; value: unknown }) => {
+    if (!isMainSender(event)) return;
     if (payload && typeof payload.key === 'string') {
       writeLocalStore(payload.key, payload.value);
+      if (payload.key === 'sideflow_edge_handle' && typeof payload.value === 'boolean') {
+        showEdgeHandleState = payload.value;
+        syncEdgeTabWindows();
+      } else if (payload.key === 'sideflow_monitor_settings') {
+        const incoming = sanitizeMainMonitorSettings(payload.value);
+        if (JSON.stringify(incoming) !== JSON.stringify(monitorSettings)) {
+          applyMonitorSettingsFromMain(incoming);
+        }
+      } else if (
+        payload.key === 'sideflow_shortcut' &&
+        payload.value &&
+        typeof payload.value === 'object' &&
+        typeof (payload.value as { label?: unknown }).label === 'string'
+      ) {
+        const trimmedLabel = String((payload.value as { label: string }).label)
+          .trim()
+          .slice(0, 64);
+        if (trimmedLabel) {
+          shortcutLabelState = trimmedLabel;
+          syncEdgeTabWindows();
+        }
+      }
     }
   });
 
-  ipcMain.handle('get-local-stt-status', async () => {
+  ipcMain.handle('get-local-stt-status', async (event) => {
+    if (!isMainSender(event)) {
+      return {
+        available: false,
+        fasterWhisperAvailable: false,
+        cudaAvailable: false,
+        windowsSapiAvailable: false,
+      };
+    }
     if (sttStatusCache) return sttStatusCache;
     const workerOk = await ensureSttWorker();
     if (workerOk && sttStatusCache) {
@@ -1512,7 +2409,7 @@ app.whenReady().then(() => {
   ipcMain.handle(
     'transcribe-audio-local',
     async (
-      _event,
+      event,
       payload: {
         pcm16Base64: string;
         sampleRate: number;
@@ -1522,6 +2419,9 @@ app.whenReady().then(() => {
         promptContext?: string;
       }
     ) => {
+      if (!isMainSender(event)) {
+        return { success: false, error: 'Unauthorized IPC sender' };
+      }
       if (!payload || !payload.pcm16Base64) {
         return { success: false, error: 'Missing audio payload' };
       }
@@ -1559,26 +2459,43 @@ app.whenReady().then(() => {
     }
   );
 
-  ipcMain.handle('get-auto-launch', async () => {
+  ipcMain.handle('get-auto-launch', async (event) => {
+    if (!isMainSender(event)) return { enabled: false, isPackaged: app.isPackaged };
     return getAutoLaunchState();
   });
 
-  ipcMain.handle('set-auto-launch', async (_event, enabled: boolean) => {
+  ipcMain.handle('set-auto-launch', async (event, enabled: boolean) => {
+    if (!isMainSender(event)) return getAutoLaunchState();
     return setAutoLaunchState(Boolean(enabled));
   });
 
-  ipcMain.handle('get-update-status', async () => {
+  ipcMain.handle('get-update-status', async (event) => {
+    if (!isMainSender(event)) {
+      return {
+        ...updateState,
+        currentVersion: app.getVersion(),
+      };
+    }
     return {
       ...updateState,
       currentVersion: app.getVersion(),
     };
   });
 
-  ipcMain.handle('check-for-updates', async () => {
+  ipcMain.handle('check-for-updates', async (event) => {
+    if (!isMainSender(event)) {
+      return {
+        ...updateState,
+        currentVersion: app.getVersion(),
+      };
+    }
     return performUpdateCheck();
   });
 
-  ipcMain.handle('install-update-now', async () => {
+  ipcMain.handle('install-update-now', async (event) => {
+    if (!isMainSender(event)) {
+      return { success: false, error: 'Unauthorized IPC sender' };
+    }
     try {
       if (updateState.status === 'downloaded' && updateState.canQuitAndInstall) {
         setImmediate(() => {
@@ -1603,6 +2520,7 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  destroyAllEdgeTabWindows();
   if (updateCheckInterval) {
     clearInterval(updateCheckInterval);
     updateCheckInterval = null;

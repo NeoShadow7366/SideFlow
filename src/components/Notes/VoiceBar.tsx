@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, Clock, Copy, Download, Cpu, SlidersHorizontal } from 'lucide-react';
 import {
   LocalSttStatus,
+  NotifyFn,
   SttEngineMode,
   SttSettings,
   WhisperModelId,
@@ -48,12 +49,12 @@ interface AudioDeviceOption {
 interface VoiceBarProps {
   onTranscript: (text: string) => void;
   onInsertTimestamp: () => void;
-  onCopyNote: () => void;
+  onCopyNote?: () => void;
   onExportNote?: () => void;
   isPanelOpen?: boolean;
   promptContext?: string;
   onDictatingChange?: (isDictating: boolean) => void;
-  onNotify: (title: string, icon?: string, subtitle?: string) => void;
+  onNotify: NotifyFn;
 }
 
 const DEFAULT_STT_SETTINGS: SttSettings = {
@@ -382,13 +383,27 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
       }
     };
 
-    rec.onerror = () => {
+    rec.onerror = (event?: { error?: string }) => {
       if (!useForFinalTranscript) {
         return;
       }
+      const errCode = event?.error || '';
       const wasActiveWithoutSpeech =
         isDictatingRef.current && !hasReceivedSpeechRef.current;
       stopVoiceDictationUI();
+      if (
+        errCode === 'not-allowed' ||
+        errCode === 'service-not-allowed' ||
+        errCode === 'audio-capture'
+      ) {
+        onNotifyRef.current(
+          'Microphone Access Blocked',
+          'zap',
+          'Grant microphone permission in system settings or check input device.',
+          { variant: 'error' }
+        );
+        return;
+      }
       if (wasActiveWithoutSpeech) {
         triggerSimulatedFallback();
       }
@@ -408,20 +423,22 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
     return rec;
   };
 
-  const startLocalVadAudioCapture = async (): Promise<boolean> => {
+  const startLocalVadAudioCapture = async (): Promise<
+    'started' | 'denied' | 'unavailable'
+  > => {
     if (
       typeof navigator === 'undefined' ||
       !navigator.mediaDevices ||
       typeof navigator.mediaDevices.getUserMedia !== 'function'
     ) {
-      return false;
+      return 'unavailable';
     }
 
     const AudioCtx =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext?: typeof AudioContext })
         .webkitAudioContext;
-    if (!AudioCtx) return false;
+    if (!AudioCtx) return 'unavailable';
 
     try {
       const constraints: MediaStreamConstraints = {
@@ -443,6 +460,10 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (!isDictatingRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return 'started';
+      }
       mediaStreamRef.current = stream;
       refreshMicDevices();
 
@@ -515,9 +536,18 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
 
       source.connect(processor);
       processor.connect(ctx.destination);
-      return true;
-    } catch {
-      return false;
+      return 'started';
+    } catch (err) {
+      const errName = (err as { name?: string })?.name || '';
+      if (
+        errName === 'NotAllowedError' ||
+        errName === 'PermissionDeniedError' ||
+        errName === 'SecurityError' ||
+        errName === 'NotReadableError'
+      ) {
+        return 'denied';
+      }
+      return 'unavailable';
     }
   };
 
@@ -563,11 +593,20 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
       hasReceivedSpeechRef.current = false;
       setDictatingState(true);
 
-      const startedLocal = await startLocalVadAudioCapture();
-      if (startedLocal) {
+      const localResult = await startLocalVadAudioCapture();
+      if (localResult === 'started') {
         return;
       }
       stopVoiceDictationUI();
+      if (localResult === 'denied') {
+        onNotify(
+          'Microphone Access Blocked',
+          'zap',
+          'Grant microphone permission or choose a connected input device.',
+          { variant: 'error' }
+        );
+        return;
+      }
     }
 
     // Fallback to SpeechRecognition or simulated dictation (e.g. in jsdom or sandbox without mic)
@@ -631,10 +670,13 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
             <Mic className="w-5 h-5" aria-hidden="true" />
           </button>
 
-          <div className="min-w-0" role="status" aria-live="polite">
+          <div className="min-w-0">
             <div className="flex items-center gap-1.5 flex-wrap">
               <span
                 id="voice-status-title"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
                 className="text-xs font-semibold text-white truncate"
               >
                 {isDictating
@@ -649,7 +691,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
                 aria-label="Dictation Language"
                 value={lang}
                 onChange={(e) => handleLangChange(e.target.value)}
-                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="min-h-[24px] text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               >
                 <option value="en-US">en-US</option>
                 <option value="en-GB">en-GB</option>
@@ -674,6 +716,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
               <div
                 data-testid="voice-level-meter"
                 aria-label="Microphone Audio Level Meter"
+                aria-hidden="true"
                 className="flex items-end gap-0.5 h-3 shrink-0"
               >
                 {levelBars.map((pct, idx) => (
@@ -720,7 +763,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
             aria-expanded={showEngineConfig}
             aria-label="Configure Local STT Engine & Microphone"
             title="Configure Local STT Engine & Microphone"
-            className={`px-2 py-1.5 rounded-lg text-[11px] transition ${
+            className={`min-h-[28px] min-w-[28px] px-2 py-1.5 rounded-lg text-[11px] flex items-center justify-center transition ${
               showEngineConfig
                 ? 'bg-indigo-600 text-white'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
@@ -733,9 +776,10 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
             onClick={onInsertTimestamp}
             aria-label="Insert Timestamp"
             title="Insert Timestamp at Last Added Text Position"
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300"
+            className="min-h-[28px] min-w-[28px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 flex items-center gap-1"
           >
             <Clock className="w-3.5 h-3.5" aria-hidden="true" />
+            <span className="cq-show-440">Time</span>
           </button>
           {onExportNote && (
             <button
@@ -743,20 +787,22 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
               onClick={onExportNote}
               aria-label="Export Note"
               title="Download Note as Markdown (.md)"
-              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300"
+              className="min-h-[28px] min-w-[28px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 flex items-center justify-center"
             >
               <Download className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
           )}
-          <button
-            type="button"
-            onClick={onCopyNote}
-            aria-label="Copy Note"
-            title="Copy Note"
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 flex items-center gap-1"
-          >
-            <Copy className="w-3.5 h-3.5" aria-hidden="true" /> Copy
-          </button>
+          {onCopyNote && (
+            <button
+              type="button"
+              onClick={onCopyNote}
+              aria-label="Copy Note"
+              title="Copy Note"
+              className="min-h-[28px] px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 flex items-center gap-1"
+            >
+              <Copy className="w-3.5 h-3.5" aria-hidden="true" /> Copy
+            </button>
+          )}
         </div>
       </div>
 
@@ -764,7 +810,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
       {showEngineConfig && (
         <div
           data-testid="stt-config-drawer"
-          className="pt-2 border-t border-slate-800/80 grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]"
+          className="pt-2 border-t border-slate-800/80 cq-stt-grid text-[11px]"
         >
           <label className="flex flex-col gap-1">
             <span className="text-slate-400 font-medium">Local STT Engine</span>

@@ -1,4 +1,13 @@
-import { AppDrawer, FlowchartState, NoteItem, ShortcutConfig } from '../types/sideflow';
+import {
+  AppDrawer,
+  FlowchartState,
+  MonitorDisplayInfo,
+  MonitorMode,
+  MonitorSettings,
+  NoteItem,
+  PanelEdge,
+  ShortcutConfig,
+} from '../types/sideflow';
 
 export const defaultDrawers: AppDrawer[] = [
   {
@@ -87,6 +96,194 @@ export function clampPanelWidthPercent(value: unknown): number {
     MIN_PANEL_WIDTH_PERCENT,
     Math.min(MAX_PANEL_WIDTH_PERCENT, Math.round(num))
   );
+}
+
+export const defaultMonitorSettings: MonitorSettings = {
+  mode: 'primary',
+  targetDisplayId: null,
+  enabledDisplayIds: [],
+  edgeOverrides: {},
+};
+
+export const simulatedDisplays: MonitorDisplayInfo[] = [
+  {
+    id: 1,
+    index: 1,
+    label: 'Primary Workstation Display',
+    isPrimary: true,
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1,
+  },
+  {
+    id: 2,
+    index: 2,
+    label: 'Extended Secondary Display',
+    isPrimary: false,
+    bounds: { x: 1920, y: 0, width: 2560, height: 1440 },
+    workArea: { x: 1920, y: 0, width: 2560, height: 1400 },
+    scaleFactor: 1.25,
+  },
+];
+
+const VALID_MONITOR_MODES = new Set<MonitorMode>([
+  'primary',
+  'single',
+  'all',
+  'custom',
+]);
+const FORBIDDEN_OVERRIDE_KEYS = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
+
+export function sanitizeMonitorSettings(raw: unknown): MonitorSettings {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ...defaultMonitorSettings, edgeOverrides: {} };
+  }
+  const obj = raw as Record<string, unknown>;
+  const mode: MonitorMode = VALID_MONITOR_MODES.has(obj.mode as MonitorMode)
+    ? (obj.mode as MonitorMode)
+    : 'primary';
+
+  const targetDisplayId =
+    typeof obj.targetDisplayId === 'number' &&
+    Number.isFinite(obj.targetDisplayId)
+      ? obj.targetDisplayId
+      : null;
+
+  const enabledDisplayIds = Array.isArray(obj.enabledDisplayIds)
+    ? Array.from(
+        new Set(
+          obj.enabledDisplayIds.filter(
+            (id): id is number => typeof id === 'number' && Number.isFinite(id)
+          )
+        )
+      )
+    : [];
+
+  const edgeOverrides: Record<string, PanelEdge> = {};
+  if (
+    obj.edgeOverrides &&
+    typeof obj.edgeOverrides === 'object' &&
+    !Array.isArray(obj.edgeOverrides)
+  ) {
+    let count = 0;
+    for (const [key, val] of Object.entries(
+      obj.edgeOverrides as Record<string, unknown>
+    )) {
+      if (count >= 32) break;
+      if (
+        !FORBIDDEN_OVERRIDE_KEYS.has(key) &&
+        /^-?\d+$/.test(key) &&
+        (val === 'left' || val === 'right')
+      ) {
+        edgeOverrides[key] = val;
+        count++;
+      }
+    }
+  }
+
+  return {
+    mode,
+    targetDisplayId,
+    enabledDisplayIds,
+    edgeOverrides,
+  };
+}
+
+export function resolveEnabledDisplays(
+  displays: MonitorDisplayInfo[],
+  settings: MonitorSettings
+): MonitorDisplayInfo[] {
+  if (!Array.isArray(displays) || displays.length === 0) {
+    return [];
+  }
+  const primary = displays.find((d) => d.isPrimary) ?? displays[0];
+  switch (settings.mode) {
+    case 'primary':
+      return [primary];
+    case 'single': {
+      const target =
+        settings.targetDisplayId != null
+          ? displays.find((d) => d.id === settings.targetDisplayId)
+          : undefined;
+      return [target ?? primary];
+    }
+    case 'all':
+      return [...displays];
+    case 'custom': {
+      const enabledSet = new Set(settings.enabledDisplayIds ?? []);
+      const matched = displays.filter((d) => enabledSet.has(d.id));
+      return matched.length > 0 ? matched : [primary];
+    }
+    default:
+      return [primary];
+  }
+}
+
+export function resolveEffectiveEdge(
+  displayId: number | null | undefined,
+  settings: MonitorSettings | undefined,
+  defaultEdge: PanelEdge
+): PanelEdge {
+  if (displayId != null && settings?.edgeOverrides) {
+    const override = settings.edgeOverrides[String(displayId)];
+    if (override === 'left' || override === 'right') {
+      return override;
+    }
+  }
+  return defaultEdge === 'left' ? 'left' : 'right';
+}
+
+export function resolveShortcutTargetDisplay(params: {
+  displays: MonitorDisplayInfo[];
+  settings: MonitorSettings;
+  cursorDisplayId: number;
+  activeDisplayId: number;
+  isPanelOpen: boolean;
+}): { action: 'open' | 'close' | 'move'; targetDisplayId: number } {
+  const { displays, settings, cursorDisplayId, activeDisplayId, isPanelOpen } =
+    params;
+  const enabled = resolveEnabledDisplays(displays, settings);
+  if (enabled.length === 0) {
+    return {
+      action: isPanelOpen ? 'close' : 'open',
+      targetDisplayId: activeDisplayId,
+    };
+  }
+
+  if (settings.mode === 'primary' || settings.mode === 'single') {
+    const target = enabled[0];
+    if (!isPanelOpen) {
+      return { action: 'open', targetDisplayId: target.id };
+    }
+    if (activeDisplayId !== target.id) {
+      return { action: 'move', targetDisplayId: target.id };
+    }
+    return { action: 'close', targetDisplayId: target.id };
+  }
+
+  // Multi-monitor modes ('all' or 'custom'): follow cursor monitor when enabled
+  const cursorMatch = enabled.find((d) => d.id === cursorDisplayId);
+  if (cursorMatch) {
+    if (!isPanelOpen) {
+      return { action: 'open', targetDisplayId: cursorMatch.id };
+    }
+    if (activeDisplayId !== cursorMatch.id) {
+      return { action: 'move', targetDisplayId: cursorMatch.id };
+    }
+    return { action: 'close', targetDisplayId: cursorMatch.id };
+  }
+
+  // Cursor is on an excluded monitor in 'custom' mode
+  const fallback =
+    enabled.find((d) => d.id === activeDisplayId) ?? enabled[0];
+  return {
+    action: isPanelOpen ? 'close' : 'open',
+    targetDisplayId: fallback.id,
+  };
 }
 
 export const ELECTRON_WRAPPER_CODE = `// electron/main.ts — Electron Background Tray + Global Shortcut + Native App Launcher

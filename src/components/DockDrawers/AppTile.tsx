@@ -82,17 +82,12 @@ export const AppTile: React.FC<AppTileProps> = ({
       ? 'w-7 h-7'
       : 'w-5 h-5';
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.target !== e.currentTarget) return;
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      onLaunch(app, drawerId);
-    }
-  };
-
   const handleDragStart = (e: React.DragEvent<HTMLDivElement>) => {
     const targetEl = e.target as HTMLElement | null;
-    if (isLocked || targetEl?.closest?.('button')) {
+    if (
+      isLocked ||
+      targetEl?.closest?.('[data-tile-actions="true"]')
+    ) {
       e.preventDefault();
       return;
     }
@@ -164,17 +159,10 @@ export const AppTile: React.FC<AppTileProps> = ({
 
   return (
     <div
-      role="button"
-      tabIndex={0}
       draggable={!isLocked}
       data-testid={`app-tile-${app.id}`}
-      aria-label={`Launch ${app.name}`}
-      onClick={(e) => {
-        if ((e.target as HTMLElement | null)?.closest?.('button')) {
-          return;
-        }
-        onLaunch(app, drawerId);
-      }}
+      data-app-cmd={app.cmd}
+      title={`${app.name} — ${app.cmd}`}
       onContextMenu={(e) => {
         if (onEdit) {
           e.preventDefault();
@@ -182,28 +170,70 @@ export const AppTile: React.FC<AppTileProps> = ({
           onEdit(app, drawerId);
         }
       }}
-      onKeyDown={handleKeyDown}
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`dock-item ${effectClass} group relative flex flex-col items-center p-3 rounded-2xl bg-slate-900/90 hover:bg-slate-800/90 border cursor-pointer text-center focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+      className={`dock-item ${effectClass} group relative rounded-2xl bg-slate-900/90 hover:bg-slate-800/90 border transition ${
         isDragOverTile
           ? 'border-indigo-400 ring-2 ring-indigo-500/40 bg-indigo-950/30'
           : 'border-slate-800 hover:border-slate-600'
       }`}
     >
-      {hotkeyBadge && (
-        <span
-          data-testid={`hotkey-badge-${app.id}`}
-          title={`Quick Launch Shortcut: ${hotkeyBadge}`}
-          className="absolute top-1.5 left-1.5 px-1 py-0.5 rounded bg-slate-950/90 border border-slate-700/80 text-[9px] font-mono text-indigo-300 leading-none pointer-events-none"
-        >
-          {hotkeyBadge}
-        </span>
-      )}
+      {/* Primary Un-Nested Launch Button (WCAG 4.1.2) */}
+      <button
+        type="button"
+        aria-label={`Launch ${app.name}`}
+        title={`${app.name} — ${app.cmd}`}
+        onClick={() => onLaunch(app, drawerId)}
+        className="w-full flex flex-col items-center p-3 rounded-2xl text-center cursor-pointer focus:outline-none"
+      >
+        {hotkeyBadge && (
+          <span
+            data-testid={`hotkey-badge-${app.id}`}
+            title={`Quick Launch Shortcut: ${hotkeyBadge}`}
+            className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-slate-950/90 border border-slate-700/80 text-[10px] font-mono text-indigo-300 leading-none pointer-events-none"
+          >
+            {hotkeyBadge}
+          </span>
+        )}
 
+        <div
+          className={`relative ${boxSizeClass} border ${styleClass} flex items-center justify-center mb-2 shadow-inner overflow-hidden`}
+        >
+          {app.customIconUrl ? (
+            <img
+              src={app.customIconUrl}
+              alt={`${app.name} icon`}
+              data-testid={`custom-icon-${app.id}`}
+              className={`${iconSizeClass} object-contain`}
+            />
+          ) : (
+            <DynamicIcon
+              name={app.icon || 'app-window'}
+              className={iconSizeClass}
+              aria-hidden="true"
+            />
+          )}
+        </div>
+
+        <div className="flex items-center justify-center gap-1 max-w-full">
+          {isRunning && (
+            <span
+              data-testid={`running-indicator-${app.id}`}
+              title={`${app.name} is currently running`}
+              className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)] shrink-0"
+            />
+          )}
+          <span className="text-xs font-medium text-slate-100 line-clamp-1">
+            {app.name}
+          </span>
+        </div>
+      </button>
+
+      {/* Sibling Quick-Action Overlay Buttons (Edit / Remove — >= 24x24px hit targets) */}
       <div
+        data-tile-actions="true"
         draggable={false}
         onMouseDown={(e) => e.stopPropagation()}
         onPointerDown={(e) => e.stopPropagation()}
@@ -218,12 +248,8 @@ export const AppTile: React.FC<AppTileProps> = ({
             type="button"
             draggable={false}
             data-testid={`edit-app-btn-${app.id}`}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-            }}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -241,12 +267,8 @@ export const AppTile: React.FC<AppTileProps> = ({
             type="button"
             draggable={false}
             data-testid={`remove-app-btn-${app.id}`}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-            }}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -260,44 +282,6 @@ export const AppTile: React.FC<AppTileProps> = ({
           </button>
         )}
       </div>
-
-      <div
-        className={`relative ${boxSizeClass} border ${styleClass} flex items-center justify-center mb-2 shadow-inner overflow-hidden`}
-      >
-        {app.customIconUrl ? (
-          <img
-            src={app.customIconUrl}
-            alt={`${app.name} icon`}
-            data-testid={`custom-icon-${app.id}`}
-            className={`${iconSizeClass} object-contain`}
-          />
-        ) : (
-          <DynamicIcon
-            name={app.icon || 'app-window'}
-            className={iconSizeClass}
-            aria-hidden="true"
-          />
-        )}
-      </div>
-
-      <div className="flex items-center justify-center gap-1 max-w-full">
-        {isRunning && (
-          <span
-            data-testid={`running-indicator-${app.id}`}
-            title={`${app.name} is currently running`}
-            className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)] shrink-0"
-          />
-        )}
-        <span className="text-xs font-medium text-slate-200 line-clamp-1">
-          {app.name}
-        </span>
-      </div>
-      <span
-        className="text-[10px] font-mono text-slate-400 truncate max-w-full mt-0.5"
-        title={app.cmd}
-      >
-        {app.cmd}
-      </span>
     </div>
   );
 };

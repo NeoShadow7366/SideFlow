@@ -145,11 +145,17 @@ describe('SideFlow Application Integration Suite', () => {
         },
       });
 
-      // "obs64.exe" should be inferred as "Obs64" with path C:\Users\Local\Desktop\obs64.exe
-      expect(screen.getByText('Obs64')).toBeInTheDocument();
-      expect(
-        screen.getByText('C:\\Users\\Local\\Desktop\\obs64.exe')
-      ).toBeInTheDocument();
+      // "obs64.exe" should be inferred as "Obs64" with path C:\Users\Local\Desktop\obs64.exe stored in tooltip/data-app-cmd
+      const obsLaunchBtn = screen.getByRole('button', { name: /Launch Obs64/i });
+      expect(obsLaunchBtn).toBeInTheDocument();
+      expect(obsLaunchBtn).toHaveAttribute(
+        'title',
+        expect.stringContaining('C:\\Users\\Local\\Desktop\\obs64.exe')
+      );
+      expect(obsLaunchBtn.closest('[data-app-cmd]')).toHaveAttribute(
+        'data-app-cmd',
+        'C:\\Users\\Local\\Desktop\\obs64.exe'
+      );
       expect(screen.getByText(/3 Drawers • 11 Apps/i)).toBeInTheDocument();
     });
   });
@@ -1538,6 +1544,7 @@ describe('SideFlow Application Integration Suite', () => {
       expect(setPanelWidthPercentMock).toHaveBeenLastCalledWith(65);
 
       fireEvent.click(screen.getByRole('button', { name: /Reset Defaults/i }));
+      fireEvent.click(screen.getByTestId('confirm-reset-defaults-btn'));
       expect(sidePanel).toHaveAttribute('data-width-percent', '35');
       expect(sidePanel.style.width).toBe('35%');
       expect(setPanelWidthPercentMock).toHaveBeenLastCalledWith(35);
@@ -1545,7 +1552,7 @@ describe('SideFlow Application Integration Suite', () => {
   });
 
   describe('Flowchart Rapid Authoring (Lucidchart/draw.io Parity), Performance & Adaptive Layout', () => {
-    it('supports directional quick-add (+) ports, Decision auto-branch labeling, Tab keyboard branching, in-place shape switching, duplication, and non-destructive SVG edge selection', () => {
+    it('supports directional quick-add (+) ports, Decision auto-branch labeling, Alt+Enter keyboard branching, in-place shape switching, duplication, and non-destructive SVG edge selection', () => {
       render(<App />);
       fireEvent.click(screen.getByRole('tab', { name: /Flow/i }));
 
@@ -1565,8 +1572,8 @@ describe('SideFlow Application Integration Suite', () => {
       ) as HTMLInputElement;
       fireEvent.change(inlineInput, { target: { value: 'Skip Action' } });
 
-      // 2. Press Tab while editing to commit "Skip Action" AND immediately spawn + link the next node!
-      fireEvent.keyDown(inlineInput, { key: 'Tab' });
+      // 2. Press Alt+Enter while editing to commit "Skip Action" AND immediately spawn + link the next node!
+      fireEvent.keyDown(inlineInput, { key: 'Enter', altKey: true });
       expect(screen.getByText('Skip Action')).toBeInTheDocument();
       // Verify first Decision branch automatically got labeled "Yes"
       expect(

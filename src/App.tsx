@@ -12,8 +12,11 @@ import {
   GitBranch,
   Mic,
   Settings,
+  Monitor,
   Wifi,
   Volume2,
+  RotateCcw,
+  X,
 } from 'lucide-react';
 import {
   AppDrawer,
@@ -21,22 +24,33 @@ import {
   DockHoverEffect,
   DockIconSize,
   FlowchartState,
+  MonitorDisplayInfo,
+  MonitorSettings,
   NoteItem,
+  NotifyFn,
+  NotifyOptions,
   PanelEdge,
   ShortcutConfig,
   TabId,
   ToastMessage,
+  ToastVariant,
 } from './types/sideflow';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import {
   defaultDrawers,
   defaultFlowData,
+  defaultMonitorSettings,
   defaultNotes,
   defaultShortcut,
   DEFAULT_PANEL_WIDTH_PERCENT,
   MIN_PANEL_WIDTH_PERCENT,
   MAX_PANEL_WIDTH_PERCENT,
   clampPanelWidthPercent,
+  resolveEffectiveEdge,
+  resolveEnabledDisplays,
+  resolveShortcutTargetDisplay,
+  sanitizeMonitorSettings,
+  simulatedDisplays,
 } from './utils/defaults';
 import { Header } from './components/Header';
 import { DockView } from './components/DockDrawers/DockView';
@@ -60,6 +74,11 @@ export const App: React.FC = () => {
     'sideflow_notes',
     defaultNotes
   );
+  const [activeNoteId, setActiveNoteId] = useLocalStorage<string>(
+    'sideflow_active_note_id',
+    defaultNotes[0]?.id || 'note-1'
+  );
+  const [workspaceResetEpoch, setWorkspaceResetEpoch] = useState<number>(0);
   const [shortcut, setShortcut] = useLocalStorage<ShortcutConfig>(
     'sideflow_shortcut',
     defaultShortcut
@@ -96,6 +115,19 @@ export const App: React.FC = () => {
     'sideflow_lock_icons',
     false
   );
+  const [monitorSettings, setMonitorSettings] =
+    useLocalStorage<MonitorSettings>(
+      'sideflow_monitor_settings',
+      defaultMonitorSettings
+    );
+
+  const [displays, setDisplays] =
+    useState<MonitorDisplayInfo[]>(simulatedDisplays);
+  const [activeDisplayId, setActiveDisplayId] = useState<number>(
+    simulatedDisplays[0].id
+  );
+  const [simulatedCursorDisplayId, setSimulatedCursorDisplayId] =
+    useState<number>(simulatedDisplays[0].id);
 
   const [updateState, setUpdateState] = useState<AppUpdateState>({
     status: 'idle',
@@ -114,6 +146,7 @@ export const App: React.FC = () => {
   );
 
   const toastTimerRef = useRef<number | null>(null);
+  const userModifiedDisplayStateRef = useRef<boolean>(false);
   const isPinnedRef = useRef<boolean>(isPinned);
   isPinnedRef.current = isPinned;
   const panelWidthPercentRef = useRef<number>(
@@ -127,36 +160,161 @@ export const App: React.FC = () => {
     hasChanged: boolean;
   } | null>(null);
   const isElectronWindow = Boolean(window.sideflow?.isElectron);
+  const safeMonitorSettings = sanitizeMonitorSettings(monitorSettings);
+  const enabledDisplays = resolveEnabledDisplays(displays, safeMonitorSettings);
+  const activeDisplay =
+    displays.find((d) => d.id === activeDisplayId) ??
+    enabledDisplays[0] ??
+    displays[0];
+  const activeEffectiveEdge: PanelEdge = resolveEffectiveEdge(
+    activeDisplay?.id,
+    safeMonitorSettings,
+    panelEdge
+  );
 
-  const notify = useCallback(
-    (title: string, icon = 'rocket', subtitle = 'System Launch') => {
+  const toastDurationRef = useRef<number>(3200);
+  const toastHoverOrFocusRef = useRef<boolean>(false);
+
+  const scheduleToastDismiss = useCallback((ms: number) => {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    if (!toastHoverOrFocusRef.current) {
+      toastTimerRef.current = window.setTimeout(() => {
+        setToast(null);
+      }, ms);
+    }
+  }, []);
+
+  const notify: NotifyFn = useCallback(
+    (
+      title: string,
+      icon = 'rocket',
+      subtitle = 'System Launch',
+      options?: NotifyOptions
+    ) => {
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current);
       }
+      const inferredVariant: ToastVariant =
+        options?.variant ??
+        (/failed|invalid|unable|blocked|error/i.test(title)
+          ? 'error'
+          : /required|locked/i.test(title)
+          ? 'warning'
+          : icon === 'check'
+          ? 'success'
+          : 'info');
+      const durationMs =
+        options?.durationMs ?? (options?.onUndo ? 6000 : 3200);
+      toastDurationRef.current = durationMs;
+      toastHoverOrFocusRef.current = false;
       setToast({
         id: String(Date.now()),
         title,
         subtitle,
         icon,
+        variant: inferredVariant,
+        undoLabel: options?.undoLabel,
+        onUndo: options?.onUndo,
       });
       toastTimerRef.current = window.setTimeout(() => {
         setToast(null);
-      }, 3000);
+      }, durationMs);
     },
     []
   );
 
   // Sync initial visibility, edge, and screen presence with Electron and clean up toast timer
   useEffect(() => {
+    let isMounted = true;
     window.sideflow?.setPanelVisibility?.(true);
     window.sideflow?.setPanelEdge?.(panelEdge);
     window.sideflow?.setPanelWidthPercent?.(
       clampPanelWidthPercent(panelWidthPercent)
     );
+    const hasStoredMonitorSettings =
+      window.localStorage.getItem('sideflow_monitor_settings') !== null;
+    if (window.sideflow?.getDisplayState && !hasStoredMonitorSettings) {
+      void window.sideflow
+        .getDisplayState()
+        .then((state) => {
+          if (!isMounted || !state) return;
+          if (Array.isArray(state.displays) && state.displays.length > 0) {
+            setDisplays(state.displays);
+            if (!state.displays.some((d) => d.id === 1)) {
+              setSimulatedCursorDisplayId(
+                typeof state.activeDisplayId === 'number'
+                  ? state.activeDisplayId
+                  : state.displays[0].id
+              );
+            }
+          }
+          if (
+            !userModifiedDisplayStateRef.current &&
+            window.localStorage.getItem('sideflow_monitor_settings') === null
+          ) {
+            if (typeof state.activeDisplayId === 'number') {
+              setActiveDisplayId(state.activeDisplayId);
+            }
+            if (state.monitorSettings) {
+              setMonitorSettings(sanitizeMonitorSettings(state.monitorSettings));
+            }
+          }
+        })
+        .catch(() => {});
+    } else if (window.sideflow?.setMonitorSettings) {
+      void window.sideflow
+        .setMonitorSettings(safeMonitorSettings)
+        .then((state) => {
+          if (!isMounted || !state) return;
+          if (Array.isArray(state.displays) && state.displays.length > 0) {
+            setDisplays(state.displays);
+            if (!state.displays.some((d) => d.id === 1)) {
+              setSimulatedCursorDisplayId(
+                typeof state.activeDisplayId === 'number'
+                  ? state.activeDisplayId
+                  : state.displays[0].id
+              );
+            }
+          }
+          if (
+            !userModifiedDisplayStateRef.current &&
+            typeof state.activeDisplayId === 'number'
+          ) {
+            setActiveDisplayId(state.activeDisplayId);
+          }
+        })
+        .catch(() => {});
+    } else if (window.sideflow?.getDisplayState) {
+      void window.sideflow
+        .getDisplayState()
+        .then((state) => {
+          if (!isMounted || !state) return;
+          if (Array.isArray(state.displays) && state.displays.length > 0) {
+            setDisplays(state.displays);
+            if (!state.displays.some((d) => d.id === 1)) {
+              setSimulatedCursorDisplayId(
+                typeof state.activeDisplayId === 'number'
+                  ? state.activeDisplayId
+                  : state.displays[0].id
+              );
+            }
+          }
+          if (
+            !userModifiedDisplayStateRef.current &&
+            typeof state.activeDisplayId === 'number'
+          ) {
+            setActiveDisplayId(state.activeDisplayId);
+          }
+        })
+        .catch(() => {});
+    }
     window.sideflow
       ?.getAutoLaunch?.()
       .then((res) => {
-        if (res && typeof res.enabled === 'boolean') {
+        if (isMounted && res && typeof res.enabled === 'boolean') {
           setOpenAtLogin(res.enabled);
         }
       })
@@ -164,12 +322,13 @@ export const App: React.FC = () => {
     window.sideflow
       ?.getUpdateStatus?.()
       .then((state) => {
-        if (state) {
+        if (isMounted && state) {
           setUpdateState(state);
         }
       })
       .catch(() => {});
     return () => {
+      isMounted = false;
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current);
       }
@@ -252,14 +411,166 @@ export const App: React.FC = () => {
     const unsubUpdate = window.sideflow?.onUpdateStatus?.((state) => {
       setUpdateState(state);
     });
+    const unsubDisplay = window.sideflow?.onDisplayStateChanged?.((state) => {
+      if (!state) return;
+      if (Array.isArray(state.displays) && state.displays.length > 0) {
+        setDisplays(state.displays);
+      }
+      if (typeof state.activeDisplayId === 'number') {
+        setActiveDisplayId(state.activeDisplayId);
+      }
+      if (state.monitorSettings) {
+        const sanitized = sanitizeMonitorSettings(state.monitorSettings);
+        setMonitorSettings((prev) =>
+          JSON.stringify(sanitizeMonitorSettings(prev)) ===
+          JSON.stringify(sanitized)
+            ? prev
+            : sanitized
+        );
+      }
+    });
 
     return () => {
       unsubVisibility?.();
       unsubSwitchTab?.();
       unsubBlur?.();
       unsubUpdate?.();
+      unsubDisplay?.();
     };
-  }, [togglePanel]);
+  }, [togglePanel, setMonitorSettings]);
+
+  // Keep companion edge-tab windows synced with handle visibility, dictation state, and shortcut label
+  useEffect(() => {
+    window.sideflow?.setEdgeHandleState?.({
+      showEdgeHandle,
+      isDictating,
+      shortcutLabel: shortcut.label || defaultShortcut.label,
+    });
+  }, [showEdgeHandle, isDictating, shortcut.label]);
+
+  const handleActivateDisplay = useCallback(
+    (displayId: number, openPanel = true) => {
+      userModifiedDisplayStateRef.current = true;
+      setActiveDisplayId(displayId);
+      setSimulatedCursorDisplayId(displayId);
+      if (openPanel) {
+        setIsPanelOpen(true);
+      }
+      if (window.sideflow?.activateDisplay) {
+        void window.sideflow
+          .activateDisplay(displayId, openPanel)
+          .then((state) => {
+            if (state) {
+              if (Array.isArray(state.displays) && state.displays.length > 0) {
+                setDisplays(state.displays);
+              }
+              if (typeof state.activeDisplayId === 'number') {
+                setActiveDisplayId(state.activeDisplayId);
+              }
+            }
+          })
+          .catch(() => {});
+      } else if (openPanel) {
+        window.sideflow?.setPanelVisibility?.(true);
+      }
+    },
+    []
+  );
+
+  const handleChangeMonitorSettings = useCallback(
+    (
+      nextRaw: MonitorSettings,
+      toastTitle = 'Updated Multi-Monitor Routing',
+      toastSubtitle = 'Applied display configuration'
+    ) => {
+      userModifiedDisplayStateRef.current = true;
+      const sanitized = sanitizeMonitorSettings(nextRaw);
+      setMonitorSettings(sanitized);
+
+      const nextEnabled = resolveEnabledDisplays(displays, sanitized);
+      if (
+        nextEnabled.length > 0 &&
+        !nextEnabled.some((d) => d.id === activeDisplayId)
+      ) {
+        setActiveDisplayId(nextEnabled[0].id);
+      }
+
+      if (window.sideflow?.setMonitorSettings) {
+        void window.sideflow
+          .setMonitorSettings(sanitized)
+          .then((state) => {
+            if (state) {
+              if (Array.isArray(state.displays) && state.displays.length > 0) {
+                setDisplays(state.displays);
+              }
+              if (typeof state.activeDisplayId === 'number') {
+                setActiveDisplayId(state.activeDisplayId);
+              }
+            }
+          })
+          .catch(() => {});
+      }
+      notify(toastTitle, 'monitor', toastSubtitle);
+    },
+    [setMonitorSettings, displays, activeDisplayId, notify]
+  );
+
+  const handleRefreshDisplays = useCallback(() => {
+    if (window.sideflow?.getDisplayState) {
+      void window.sideflow
+        .getDisplayState()
+        .then((state) => {
+          if (state && Array.isArray(state.displays) && state.displays.length > 0) {
+            setDisplays(state.displays);
+            if (typeof state.activeDisplayId === 'number') {
+              setActiveDisplayId(state.activeDisplayId);
+            }
+            notify(
+              'Refreshed Connected Displays',
+              'monitor',
+              `${state.displays.length} monitor${
+                state.displays.length === 1 ? '' : 's'
+              } detected`
+            );
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+    notify(
+      'Refreshed Connected Displays',
+      'monitor',
+      `${displays.length} simulated monitor${displays.length === 1 ? '' : 's'} active`
+    );
+  }, [displays.length, notify]);
+
+  const handleShortcutToggle = useCallback(() => {
+    const decision = resolveShortcutTargetDisplay({
+      displays,
+      settings: safeMonitorSettings,
+      cursorDisplayId: simulatedCursorDisplayId,
+      activeDisplayId: activeDisplay?.id ?? 1,
+      isPanelOpen,
+    });
+    if (decision.action === 'open' || decision.action === 'move') {
+      setActiveDisplayId(decision.targetDisplayId);
+      if (window.sideflow?.activateDisplay) {
+        void window.sideflow.activateDisplay(decision.targetDisplayId, true);
+      } else {
+        window.sideflow?.setPanelVisibility?.(true);
+      }
+      setIsPanelOpen(true);
+    } else {
+      togglePanel(false);
+    }
+  }, [
+    displays,
+    safeMonitorSettings,
+    simulatedCursorDisplayId,
+    activeDisplay?.id,
+    isPanelOpen,
+    togglePanel,
+  ]);
 
   // Global keyboard shortcut & recorder listener
   useEffect(() => {
@@ -351,13 +662,64 @@ export const App: React.FC = () => {
 
       if (matchAlt && matchCtrl && matchShift && matchKey) {
         e.preventDefault();
-        togglePanel();
+        handleShortcutToggle();
+        return;
+      }
+
+      // Panel navigation & contextual search shortcuts when panel is open and no modal is active
+      if (
+        isPanelOpen &&
+        !document.body.hasAttribute('data-sideflow-modal-open') &&
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey
+      ) {
+        const tabMap: Record<string, TabId> = {
+          '1': 'drawers',
+          '2': 'flowchart',
+          '3': 'notes',
+          '4': 'settings',
+        };
+        if (tabMap[e.key]) {
+          e.preventDefault();
+          setActiveTab(tabMap[e.key]);
+          return;
+        }
+        if (e.key.toLowerCase() === 'f') {
+          if (activeTab === 'drawers') {
+            const dockSearch = document.getElementById(
+              'app-search-input'
+            ) as HTMLInputElement | null;
+            if (dockSearch) {
+              e.preventDefault();
+              dockSearch.focus();
+              dockSearch.select();
+            }
+          } else if (activeTab === 'notes') {
+            const notesSearch = document.querySelector(
+              '[aria-label="Search notes"]'
+            ) as HTMLInputElement | null;
+            if (notesSearch) {
+              e.preventDefault();
+              notesSearch.focus();
+              notesSearch.select();
+            }
+          }
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isRecordingHotkey, shortcut, setShortcut, togglePanel, notify]);
+  }, [
+    isRecordingHotkey,
+    isPanelOpen,
+    activeTab,
+    shortcut,
+    setShortcut,
+    handleShortcutToggle,
+    notify,
+  ]);
 
   const handleResetHotkey = () => {
     setShortcut(defaultShortcut);
@@ -409,27 +771,28 @@ export const App: React.FC = () => {
       ) {
         const screenWidth = Math.max(
           320,
-          window.screen?.availWidth ||
+          activeDisplay?.workArea.width ||
+            window.screen?.availWidth ||
             window.screen?.width ||
             window.innerWidth ||
             1920
         );
         const deltaX = e.screenX - dragState.startScreenX;
-        const signedDelta = panelEdge === 'left' ? deltaX : -deltaX;
+        const signedDelta = activeEffectiveEdge === 'left' ? deltaX : -deltaX;
         const deltaPct = (signedDelta / screenWidth) * 100;
         nextPercent = clampPanelWidthPercent(dragState.startPercent + deltaPct);
       } else {
         const viewportWidth = Math.max(320, window.innerWidth || 1024);
         if (dragState.startX > 0 && e.clientX > 0) {
           const deltaX = e.clientX - dragState.startX;
-          const signedDelta = panelEdge === 'left' ? deltaX : -deltaX;
+          const signedDelta = activeEffectiveEdge === 'left' ? deltaX : -deltaX;
           const deltaPct = (signedDelta / viewportWidth) * 100;
           nextPercent = clampPanelWidthPercent(
             dragState.startPercent + deltaPct
           );
         } else {
           const widthPx =
-            panelEdge === 'left' ? e.clientX : viewportWidth - e.clientX;
+            activeEffectiveEdge === 'left' ? e.clientX : viewportWidth - e.clientX;
           nextPercent = clampPanelWidthPercent(
             (widthPx / viewportWidth) * 100
           );
@@ -465,23 +828,40 @@ export const App: React.FC = () => {
   }, [
     isResizingPanel,
     isElectronWindow,
-    panelEdge,
+    activeDisplay?.workArea.width,
+    activeEffectiveEdge,
     handleChangePanelWidthPercent,
     notify,
   ]);
 
   const handleExportBackup = () => {
+    let savedDiagrams: unknown = undefined;
+    try {
+      const rawDiagrams = window.localStorage.getItem('sideflow_flow_diagrams_v1');
+      if (rawDiagrams) {
+        const parsedDiagrams = JSON.parse(rawDiagrams);
+        if (Array.isArray(parsedDiagrams)) {
+          savedDiagrams = parsedDiagrams;
+        }
+      }
+    } catch {
+      // ignore
+    }
     const backup = {
       version: '1.0.0',
       exportedAt: new Date().toISOString(),
       drawers,
       flowData,
+      savedDiagrams,
       notes,
+      activeNoteId,
       shortcut,
       isPinned,
       showEdgeHandle,
+      openAtLogin,
       panelEdge,
       panelWidthPercent,
+      monitorSettings: safeMonitorSettings,
       dockEffect,
       dockIconSize,
       isDockLocked,
@@ -511,7 +891,17 @@ export const App: React.FC = () => {
         throw new Error('Invalid backup object');
       }
       let restoredAny = false;
-      if (Array.isArray(parsed.drawers) && parsed.drawers.length > 0) {
+      if (
+        Array.isArray(parsed.drawers) &&
+        parsed.drawers.length > 0 &&
+        parsed.drawers.every(
+          (d: unknown) =>
+            Boolean(d) &&
+            typeof d === 'object' &&
+            typeof (d as AppDrawer).id === 'string' &&
+            Array.isArray((d as AppDrawer).apps)
+        )
+      ) {
         setDrawers(parsed.drawers);
         restoredAny = true;
       }
@@ -523,8 +913,36 @@ export const App: React.FC = () => {
         setFlowData(parsed.flowData);
         restoredAny = true;
       }
-      if (Array.isArray(parsed.notes) && parsed.notes.length > 0) {
+      if (
+        Array.isArray(parsed.savedDiagrams) &&
+        parsed.savedDiagrams.length > 0
+      ) {
+        try {
+          window.localStorage.setItem(
+            'sideflow_flow_diagrams_v1',
+            JSON.stringify(parsed.savedDiagrams)
+          );
+          setWorkspaceResetEpoch((prev) => prev + 1);
+          restoredAny = true;
+        } catch {
+          // ignore
+        }
+      }
+      if (
+        Array.isArray(parsed.notes) &&
+        parsed.notes.length > 0 &&
+        parsed.notes.every(
+          (n: unknown) =>
+            Boolean(n) &&
+            typeof n === 'object' &&
+            typeof (n as NoteItem).id === 'string' &&
+            typeof (n as NoteItem).body === 'string'
+        )
+      ) {
         setNotes(parsed.notes);
+        if (typeof parsed.activeNoteId === 'string') {
+          setActiveNoteId(parsed.activeNoteId);
+        }
         restoredAny = true;
       }
       if (parsed.shortcut && typeof parsed.shortcut.label === 'string') {
@@ -552,6 +970,17 @@ export const App: React.FC = () => {
         setPanelWidthPercent(clampedPct);
         panelWidthPercentRef.current = clampedPct;
         window.sideflow?.setPanelWidthPercent?.(clampedPct);
+        restoredAny = true;
+      }
+      if (parsed.monitorSettings && typeof parsed.monitorSettings === 'object') {
+        userModifiedDisplayStateRef.current = true;
+        const restoredMonitors = sanitizeMonitorSettings(parsed.monitorSettings);
+        setMonitorSettings(restoredMonitors);
+        const restoredEnabled = resolveEnabledDisplays(displays, restoredMonitors);
+        if (restoredEnabled.length > 0) {
+          setActiveDisplayId(restoredEnabled[0].id);
+        }
+        void window.sideflow?.setMonitorSettings?.(restoredMonitors);
         restoredAny = true;
       }
       if (
@@ -655,14 +1084,18 @@ export const App: React.FC = () => {
 
   const handleInstallUpdate = async () => {
     if (window.sideflow?.installUpdateNow) {
-      const res = await window.sideflow.installUpdateNow();
-      if (res?.success) {
-        notify(
-          'Applying SideFlow Update...',
-          'rocket',
-          'Restarting application to complete update'
-        );
-        return;
+      try {
+        const res = await window.sideflow.installUpdateNow();
+        if (res?.success) {
+          notify(
+            'Applying SideFlow Update...',
+            'rocket',
+            'Restarting application to complete update'
+          );
+          return;
+        }
+      } catch {
+        // fall through to browser release page
       }
     }
     window.open(
@@ -673,24 +1106,57 @@ export const App: React.FC = () => {
   };
 
   const handleResetAllData = () => {
+    try {
+      window.localStorage.removeItem('sideflow_flow_diagrams_v1');
+      window.localStorage.removeItem('sideflow_active_diagram_id');
+      window.localStorage.removeItem('sideflow_show_docklets');
+      window.localStorage.removeItem('sideflow_notes_view_mode');
+    } catch {
+      // ignore storage errors
+    }
     setDrawers(defaultDrawers);
     setFlowData(defaultFlowData);
     setNotes(defaultNotes);
+    setActiveNoteId(defaultNotes[0]?.id || 'note-1');
+    setWorkspaceResetEpoch((prev) => prev + 1);
     setShortcut(defaultShortcut);
     setIsPinned(true);
     setShowEdgeHandle(true);
     setPanelEdge('right');
     setPanelWidthPercent(DEFAULT_PANEL_WIDTH_PERCENT);
     panelWidthPercentRef.current = DEFAULT_PANEL_WIDTH_PERCENT;
+    userModifiedDisplayStateRef.current = true;
+    setMonitorSettings(defaultMonitorSettings);
+    const primary = displays.find((d) => d.isPrimary) ?? displays[0];
+    if (primary) {
+      setActiveDisplayId(primary.id);
+      setSimulatedCursorDisplayId(primary.id);
+    }
     setDockEffect('zoom');
     setDockIconSize('normal');
     setIsDockLocked(false);
     setIsRecordingHotkey(false);
     window.sideflow?.setPanelEdge?.('right');
     window.sideflow?.setPanelWidthPercent?.(DEFAULT_PANEL_WIDTH_PERCENT);
+    void window.sideflow?.setMonitorSettings?.(defaultMonitorSettings);
     window.sideflow?.updateGlobalShortcut?.('Alt+Space');
     notify('Restored Default Workspace', 'check', 'All drawers, flows & notes reset');
   };
+
+  const savedDiagramCount = (() => {
+    try {
+      const raw = window.localStorage.getItem('sideflow_flow_diagrams_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed.length;
+      }
+    } catch {
+      // ignore
+    }
+    return 2;
+  })();
+
+  const totalAppCount = drawers.reduce((sum, d) => sum + d.apps.length, 0);
 
   return (
     <div
@@ -750,7 +1216,7 @@ export const App: React.FC = () => {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => togglePanel()}
+                onClick={() => handleShortcutToggle()}
                 className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition flex items-center gap-1.5 shadow-lg shadow-indigo-600/30"
               >
                 <PanelRightOpen className="w-4 h-4" aria-hidden="true" />
@@ -766,6 +1232,73 @@ export const App: React.FC = () => {
               </button>
             </div>
           </div>
+
+          {/* Multi-Monitor Simulation Bar & Companion Edge Tabs (Web Preview Mode) */}
+          {displays.length > 1 && safeMonitorSettings.mode !== 'primary' && (
+            <div
+              data-testid="simulated-multimonitor-bar"
+              className="flex flex-wrap items-center gap-3 max-w-4xl bg-slate-900/75 backdrop-blur-md border border-indigo-500/30 rounded-xl px-4 py-2 text-xs z-10"
+            >
+              <span className="flex items-center gap-1.5 text-indigo-300 font-medium">
+                <Monitor className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>
+                  Active Screen: Monitor {activeDisplay?.index ?? 1} (
+                  {activeEffectiveEdge === 'left' ? 'Left' : 'Right'} Edge)
+                </span>
+              </span>
+              <div
+                role="group"
+                aria-label="Simulated Mouse Monitor"
+                className="flex flex-wrap items-center gap-1.5"
+              >
+                <span className="text-[11px] text-slate-400">
+                  Mouse Cursor On:
+                </span>
+                {displays.map((d) => {
+                  const isCursorHere = simulatedCursorDisplayId === d.id;
+                  return (
+                    <button
+                      key={d.id}
+                      type="button"
+                      data-testid={`sim-cursor-monitor-${d.id}`}
+                      aria-pressed={isCursorHere}
+                      onClick={() => setSimulatedCursorDisplayId(d.id)}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] font-mono border transition ${
+                        isCursorHere
+                          ? 'bg-indigo-600 text-white border-indigo-400/60'
+                          : 'bg-slate-800/80 hover:bg-slate-700 text-slate-300 border-slate-700'
+                      }`}
+                    >
+                      Monitor {d.index}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {(showEdgeHandle || isDictating) &&
+                enabledDisplays
+                  .filter((d) => d.id !== activeDisplay?.id)
+                  .map((d) => {
+                    const compEdge = resolveEffectiveEdge(
+                      d.id,
+                      safeMonitorSettings,
+                      panelEdge
+                    );
+                    return (
+                      <button
+                        key={d.id}
+                        type="button"
+                        data-testid={`companion-edge-tab-${d.id}`}
+                        aria-label={`Open SideFlow on Monitor ${d.index} (${shortcut.label})`}
+                        onClick={() => handleActivateDisplay(d.id, true)}
+                        className="px-2.5 py-0.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/35 border border-indigo-400/40 text-[11px] text-indigo-200 font-medium transition"
+                      >
+                        Click Monitor {d.index} {compEdge === 'left' ? 'Left' : 'Right'} Edge Tab
+                      </button>
+                    );
+                  })}
+            </div>
+          )}
 
           {/* Desktop Mock Icons (Left side) */}
           <div className="grid grid-cols-1 gap-5 w-24 my-auto opacity-85">
@@ -943,7 +1476,7 @@ export const App: React.FC = () => {
                 className="px-2.5 py-1.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 flex items-center gap-2 text-indigo-300 transition"
               >
                 <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
+                  <span className="animate-ping motion-reduce:animate-none absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-400" />
                 </span>
                 <SideFlowIcon className="w-4 h-4" aria-hidden="true" />
@@ -965,40 +1498,126 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Active App Launch Toast Feedback */}
+      {/* Discrete Screen-Reader Background Dictation Status Announcer (Active across all tabs) */}
+      <div className="sr-only" role="status" aria-live="polite">
+        {isDictating ? 'Voice dictation active across SideFlow' : ''}
+      </div>
+
+      {/* Semantic Toast Feedback with Optional 1-Click Undo & Dismiss */}
       <div
         id="app-launch-toast"
+        data-variant={toast?.variant || 'info'}
         role="status"
         aria-live="polite"
+        aria-hidden={!toast}
+        onMouseEnter={() => {
+          toastHoverOrFocusRef.current = true;
+          if (toastTimerRef.current) {
+            window.clearTimeout(toastTimerRef.current);
+            toastTimerRef.current = null;
+          }
+        }}
+        onMouseLeave={() => {
+          toastHoverOrFocusRef.current = false;
+          if (toast) {
+            scheduleToastDismiss(toastDurationRef.current);
+          }
+        }}
+        onFocusCapture={() => {
+          toastHoverOrFocusRef.current = true;
+          if (toastTimerRef.current) {
+            window.clearTimeout(toastTimerRef.current);
+            toastTimerRef.current = null;
+          }
+        }}
+        onBlurCapture={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            toastHoverOrFocusRef.current = false;
+            if (toast) {
+              scheduleToastDismiss(toastDurationRef.current);
+            }
+          }
+        }}
         className={`fixed ${
           isElectronWindow ? 'bottom-16 right-4' : 'bottom-16 left-6'
-        } bg-slate-900/95 border border-indigo-500/40 text-white px-4 py-3 rounded-2xl shadow-2xl backdrop-blur-md flex items-center gap-3 transition-all duration-300 z-50 ${
+        } bg-slate-900/95 border ${
+          toast?.variant === 'error'
+            ? 'border-rose-500/60'
+            : toast?.variant === 'warning'
+            ? 'border-amber-500/60'
+            : toast?.variant === 'success'
+            ? 'border-emerald-500/50'
+            : 'border-indigo-500/40'
+        } text-white px-4 py-3 rounded-2xl shadow-2xl backdrop-blur-md flex items-center gap-3 transition-all duration-300 motion-reduce:transition-none z-50 max-w-md ${
           toast
             ? 'opacity-100 translate-y-0'
             : 'opacity-0 pointer-events-none translate-y-4'
         }`}
       >
-        <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
+        <div
+          className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${
+            toast?.variant === 'error'
+              ? 'bg-rose-500/20 border-rose-500/40 text-rose-400'
+              : toast?.variant === 'warning'
+              ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+              : toast?.variant === 'success'
+              ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+              : 'bg-indigo-500/20 border-indigo-500/40 text-indigo-400'
+          }`}
+        >
           <DynamicIcon
             name={toast?.icon || 'rocket'}
             className="w-5 h-5"
             aria-hidden="true"
           />
         </div>
-        <div>
+        <div className="min-w-0 flex-1">
           <div id="toast-title" className="text-xs font-semibold text-white">
             {toast?.title || 'Launching Application...'}
           </div>
           <div
             id="toast-cmd"
-            className="text-[11px] font-mono text-slate-400 max-w-xs truncate"
+            className="text-[11px] font-mono text-slate-300 max-w-xs truncate"
           >
             {toast?.subtitle || ''}
           </div>
         </div>
+        {toast?.onUndo && (
+          <button
+            type="button"
+            data-testid="toast-undo-btn"
+            tabIndex={toast ? 0 : -1}
+            onClick={() => {
+              const undoHandler = toast.onUndo;
+              if (toastTimerRef.current) {
+                window.clearTimeout(toastTimerRef.current);
+              }
+              setToast(null);
+              undoHandler?.();
+            }}
+            className="min-h-[28px] px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white flex items-center gap-1 shrink-0 transition"
+          >
+            <RotateCcw className="w-3 h-3" aria-hidden="true" />
+            <span>{toast.undoLabel || 'Undo'}</span>
+          </button>
+        )}
+        <button
+          type="button"
+          aria-label="Dismiss notification"
+          tabIndex={toast ? 0 : -1}
+          onClick={() => {
+            if (toastTimerRef.current) {
+              window.clearTimeout(toastTimerRef.current);
+            }
+            setToast(null);
+          }}
+          className="w-6 h-6 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 shrink-0 transition"
+        >
+          <X className="w-3.5 h-3.5" aria-hidden="true" />
+        </button>
       </div>
 
-      {/* Screen Edge Peek Handle (When Panel is Closed) */}
+      {/* Screen Edge Peek Handle (When Panel is Closed — Offset to 28% top to avoid OS scrollbar thumb collisions) */}
       <button
         type="button"
         id="edge-peek-handle"
@@ -1016,23 +1635,29 @@ export const App: React.FC = () => {
         onClick={() => togglePanel(true)}
         tabIndex={!isPanelOpen && (showEdgeHandle || isDictating) ? 0 : -1}
         aria-hidden={isPanelOpen || (!showEdgeHandle && !isDictating)}
-        aria-label={`Open SideFlow Panel (${shortcut.label})`}
+        aria-label={
+          isDictating
+            ? `Voice Dictation Active — Click to Open SideFlow (${shortcut.label})`
+            : `Open SideFlow Panel (${shortcut.label})`
+        }
         title={
           isDictating
             ? `Voice Dictation Active — Click to Open SideFlow (${shortcut.label})`
             : `Open SideFlow Panel (${shortcut.label})`
         }
         className={`fixed ${
-          panelEdge === 'left'
+          activeEffectiveEdge === 'left'
             ? 'left-0 rounded-r-xl border-y border-r'
             : 'right-0 rounded-l-xl border-y border-l'
-        } top-1/2 -translate-y-1/2 z-30 ${
+        } top-[28%] -translate-y-1/2 z-30 ${
           isDictating
-            ? 'bg-rose-600/90 hover:bg-rose-500 border-rose-300/60'
+            ? 'bg-rose-600/95 hover:bg-rose-500 border-rose-300/60'
             : 'bg-indigo-600/80 hover:bg-indigo-500 border-indigo-300/40'
-        } text-white py-6 px-1.5 shadow-lg transition-all duration-300 hover:px-2.5 group flex flex-col items-center gap-2 ${
+        } text-white py-5 px-1 shadow-lg transition-all duration-300 motion-reduce:transition-none hover:px-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white focus-visible:px-2.5 group flex flex-col items-center gap-2 ${
           !isPanelOpen && (showEdgeHandle || isDictating)
-            ? 'opacity-100'
+            ? isDictating
+              ? 'opacity-100'
+              : 'opacity-70 hover:opacity-100 focus-visible:opacity-100'
             : 'opacity-0 pointer-events-none invisible'
         }`}
       >
@@ -1041,18 +1666,18 @@ export const App: React.FC = () => {
             data-testid="collapsed-dictation-indicator"
             className="relative flex h-2.5 w-2.5"
           >
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
+            <span className="animate-ping motion-reduce:animate-none absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
             <Mic className="relative w-2.5 h-2.5 text-white" aria-hidden="true" />
           </span>
         )}
-        {panelEdge === 'left' ? (
+        {activeEffectiveEdge === 'left' ? (
           <ChevronRight
-            className="w-4 h-4 group-hover:translate-x-0.5 transition-transform"
+            className="w-4 h-4 group-hover:translate-x-0.5 transition-transform motion-reduce:transition-none"
             aria-hidden="true"
           />
         ) : (
           <ChevronLeft
-            className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform"
+            className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform motion-reduce:transition-none"
             aria-hidden="true"
           />
         )}
@@ -1063,6 +1688,8 @@ export const App: React.FC = () => {
         id="side-panel"
         data-testid="side-panel"
         data-width-percent={clampPanelWidthPercent(panelWidthPercent)}
+        data-active-display-id={activeDisplay?.id ?? 1}
+        data-effective-edge={activeEffectiveEdge}
         aria-label="SideFlow Utility Panel"
         aria-hidden={!isPanelOpen}
         style={
@@ -1075,7 +1702,7 @@ export const App: React.FC = () => {
               }
         }
         className={`fixed top-0 ${
-          panelEdge === 'left'
+          activeEffectiveEdge === 'left'
             ? 'left-0 border-r shadow-[20px_0_50px_rgba(0,0,0,0.65)]'
             : 'right-0 border-l shadow-[-20px_0_50px_rgba(0,0,0,0.65)]'
         } ${
@@ -1083,7 +1710,7 @@ export const App: React.FC = () => {
         } bg-slate-900/90 backdrop-blur-2xl border-slate-700/70 z-30 flex flex-col side-panel-transition ${
           isPanelOpen
             ? 'translate-x-0'
-            : panelEdge === 'left'
+            : activeEffectiveEdge === 'left'
             ? '-translate-x-full opacity-0 pointer-events-none invisible'
             : 'translate-x-full opacity-0 pointer-events-none invisible'
         }`}
@@ -1122,11 +1749,11 @@ export const App: React.FC = () => {
             const step = e.shiftKey ? 5 : 1;
             if (e.key === 'ArrowLeft') {
               e.preventDefault();
-              const delta = panelEdge === 'right' ? step : -step;
+              const delta = activeEffectiveEdge === 'right' ? step : -step;
               handleChangePanelWidthPercent(panelWidthPercent + delta, true);
             } else if (e.key === 'ArrowRight') {
               e.preventDefault();
-              const delta = panelEdge === 'left' ? step : -step;
+              const delta = activeEffectiveEdge === 'left' ? step : -step;
               handleChangePanelWidthPercent(panelWidthPercent + delta, true);
             } else if (e.key === 'Home') {
               e.preventDefault();
@@ -1137,7 +1764,7 @@ export const App: React.FC = () => {
             }
           }}
           className={`absolute top-0 bottom-0 ${
-            panelEdge === 'left'
+            activeEffectiveEdge === 'left'
               ? isElectronWindow
                 ? 'right-0'
                 : 'right-0 translate-x-1/2'
@@ -1166,7 +1793,7 @@ export const App: React.FC = () => {
             <div
               data-testid="panel-resize-hud"
               className={`absolute top-1/2 -translate-y-1/2 ${
-                panelEdge === 'left' ? 'left-4' : 'right-4'
+                activeEffectiveEdge === 'left' ? 'left-4' : 'right-4'
               } px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-mono text-xs font-semibold shadow-xl border border-indigo-300/60 whitespace-nowrap pointer-events-none`}
             >
               {clampPanelWidthPercent(panelWidthPercent)}%
@@ -1182,123 +1809,251 @@ export const App: React.FC = () => {
           onClosePanel={() => togglePanel(false)}
           shortcutLabel={shortcut.label}
           isDictating={isDictating}
+          effectiveEdge={activeEffectiveEdge}
         />
 
         {activeTab === 'drawers' && (
-          <DockView
-            drawers={drawers}
-            onChangeDrawers={setDrawers}
-            onNotify={notify}
-            isLocked={isDockLocked}
-            onToggleLock={() => setIsDockLocked((prev) => !prev)}
-            dockEffect={dockEffect}
-            dockIconSize={dockIconSize}
-          />
+          <div
+            role="tabpanel"
+            id="tabpanel-drawers"
+            aria-labelledby="tab-btn-drawers"
+            className="flex-1 flex flex-col overflow-hidden"
+          >
+            <DockView
+              drawers={drawers}
+              onChangeDrawers={setDrawers}
+              onNotify={notify}
+              isLocked={isDockLocked}
+              onToggleLock={() => setIsDockLocked((prev) => !prev)}
+              dockEffect={dockEffect}
+              dockIconSize={dockIconSize}
+            />
+          </div>
         )}
 
         {activeTab === 'flowchart' && (
-          <FlowCanvas
-            flowData={flowData}
-            onChangeFlowData={setFlowData}
-            onNotify={notify}
-            panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
-            onInsertMermaidToNote={(mermaidCode) => {
-              const fenced = `\n\`\`\`mermaid\n${mermaidCode.trim()}\n\`\`\`\n`;
-              setNotes((prev) => {
-                if (prev.length === 0) {
-                  return [
+          <div
+            role="tabpanel"
+            id="tabpanel-flowchart"
+            aria-labelledby="tab-btn-flowchart"
+            className="flex-1 flex flex-col overflow-hidden"
+          >
+            <FlowCanvas
+              key={workspaceResetEpoch}
+              flowData={flowData}
+              onChangeFlowData={setFlowData}
+              onNotify={notify}
+              panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
+              onInsertMermaidToNote={(mermaidCode) => {
+                const fenced = `\n\`\`\`mermaid\n${mermaidCode.trim()}\n\`\`\`\n`;
+                if (notes.length === 0) {
+                  const createdId = `note-${Date.now()}`;
+                  const createdTitle = 'Architecture Diagram';
+                  setActiveNoteId(createdId);
+                  setNotes([
                     {
-                      id: `note-${Date.now()}`,
-                      title: 'Architecture Diagram',
+                      id: createdId,
+                      title: createdTitle,
                       body: fenced.trimStart(),
                       updatedAt: Date.now(),
                     },
-                  ];
+                  ]);
+                  notify(
+                    'Inserted Mermaid into Note',
+                    'check',
+                    `Appended \`\`\`mermaid block to "${createdTitle}"`
+                  );
+                  return;
                 }
-                return prev.map((n, idx) =>
-                  idx === 0
-                    ? {
-                        ...n,
-                        body: `${n.body.replace(/\s+$/, '')}${
-                          n.body.trim() ? '\n' : ''
-                        }${fenced}`,
-                        updatedAt: Date.now(),
-                      }
-                    : n
+                const targetNote =
+                  notes.find((n) => n.id === activeNoteId) ?? notes[0];
+                const targetId = targetNote.id;
+                const targetTitle = targetNote.title || 'Scratchpad Note';
+                setNotes((prev) =>
+                  prev.map((n) =>
+                    n.id === targetId
+                      ? {
+                          ...n,
+                          body: `${n.body.replace(/\s+$/, '')}${
+                            n.body.trim() ? '\n' : ''
+                          }${fenced}`,
+                          updatedAt: Date.now(),
+                        }
+                      : n
+                  )
                 );
-              });
-              notify(
-                'Inserted Mermaid into Note',
-                'check',
-                'Appended ```mermaid block to Scratchpad Note'
-              );
-            }}
-          />
+                notify(
+                  'Inserted Mermaid into Note',
+                  'check',
+                  `Appended \`\`\`mermaid block to "${targetTitle}"`
+                );
+              }}
+            />
+          </div>
         )}
 
-        <NotesView
-          notes={notes}
-          onChangeNotes={setNotes}
-          isPanelOpen={isPanelOpen}
-          isActiveTab={activeTab === 'notes'}
-          onDictatingChange={setIsDictating}
-          onNotify={notify}
-          onOpenMermaidInFlow={(nextFlow) => {
-            setFlowData(nextFlow);
-            setActiveTab('flowchart');
-            notify(
-              'Opened Mermaid in Flow Tab',
-              'check',
-              `${nextFlow.nodes.length} nodes loaded onto canvas`
-            );
-          }}
-        />
-
-        {activeTab === 'settings' && (
-          <SettingsView
-            shortcut={shortcut}
-            isRecordingHotkey={isRecordingHotkey}
-            onStartRecordingHotkey={() => setIsRecordingHotkey((prev) => !prev)}
-            onResetHotkey={handleResetHotkey}
-            isPinned={isPinned}
-            onTogglePin={togglePin}
-            showEdgeHandle={showEdgeHandle}
-            onToggleEdgeHandle={setShowEdgeHandle}
-            openAtLogin={openAtLogin}
-            onToggleOpenAtLogin={handleToggleOpenAtLogin}
-            updateState={updateState}
-            onCheckForUpdates={handleCheckForUpdates}
-            onInstallUpdate={handleInstallUpdate}
-            panelEdge={panelEdge}
-            onChangePanelEdge={handleChangePanelEdge}
-            panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
-            onChangePanelWidthPercent={(nextPct) =>
-              handleChangePanelWidthPercent(nextPct, true)
-            }
-            dockEffect={dockEffect}
-            onChangeDockEffect={(effect) => {
-              setDockEffect(effect);
-              notify('Updated Dock Hover Effect', 'check', `Effect: ${effect.toUpperCase()}`);
-            }}
-            dockIconSize={dockIconSize}
-            onChangeDockIconSize={(size) => {
-              setDockIconSize(size);
-              notify('Updated Dock Tile Size', 'check', `Size: ${size.toUpperCase()}`);
-            }}
-            isDockLocked={isDockLocked}
-            onToggleDockLock={(locked) => {
-              setIsDockLocked(locked);
+        <div
+          role="tabpanel"
+          id="tabpanel-notes"
+          aria-labelledby="tab-btn-notes"
+          hidden={activeTab !== 'notes'}
+          className={
+            activeTab === 'notes'
+              ? 'flex-1 flex flex-col overflow-hidden'
+              : 'hidden'
+          }
+        >
+          <NotesView
+            key={isDictating ? 'dictating' : workspaceResetEpoch}
+            notes={notes}
+            onChangeNotes={setNotes}
+            activeNoteId={activeNoteId}
+            onChangeActiveNoteId={setActiveNoteId}
+            isPanelOpen={isPanelOpen}
+            isActiveTab={activeTab === 'notes'}
+            onDictatingChange={setIsDictating}
+            onNotify={notify}
+            onOpenMermaidInFlow={(nextFlow) => {
+              const previousFlow = JSON.parse(
+                JSON.stringify(flowData)
+              ) as FlowchartState;
+              const prevDiagramsRaw = (() => {
+                try {
+                  return window.localStorage.getItem('sideflow_flow_diagrams_v1');
+                } catch {
+                  return null;
+                }
+              })();
+              const prevActiveDiagramRaw = (() => {
+                try {
+                  return window.localStorage.getItem(
+                    'sideflow_active_diagram_id'
+                  );
+                } catch {
+                  return null;
+                }
+              })();
+              try {
+                const activeDiagId = prevActiveDiagramRaw
+                  ? JSON.parse(prevActiveDiagramRaw)
+                  : 'flow-1';
+                if (prevDiagramsRaw) {
+                  const parsedDiags = JSON.parse(prevDiagramsRaw);
+                  if (Array.isArray(parsedDiags)) {
+                    const updatedDiags = parsedDiags.map((d) =>
+                      d.id === activeDiagId
+                        ? { ...d, flowData: nextFlow, updatedAt: Date.now() }
+                        : d
+                    );
+                    window.localStorage.setItem(
+                      'sideflow_flow_diagrams_v1',
+                      JSON.stringify(updatedDiags)
+                    );
+                  }
+                }
+              } catch {
+                // ignore
+              }
+              setFlowData(nextFlow);
+              setActiveTab('flowchart');
               notify(
-                locked ? 'Dock Icons Locked' : 'Dock Icons Unlocked',
+                'Opened Mermaid in Flow Tab',
                 'check',
-                locked ? 'Reordering disabled' : 'Reordering enabled'
+                `${nextFlow.nodes.length} nodes loaded onto canvas`,
+                {
+                  variant: 'info',
+                  undoLabel: 'Undo',
+                  onUndo: () => {
+                    try {
+                      if (prevDiagramsRaw !== null) {
+                        window.localStorage.setItem(
+                          'sideflow_flow_diagrams_v1',
+                          prevDiagramsRaw
+                        );
+                      }
+                      if (prevActiveDiagramRaw !== null) {
+                        window.localStorage.setItem(
+                          'sideflow_active_diagram_id',
+                          prevActiveDiagramRaw
+                        );
+                      }
+                    } catch {
+                      // ignore
+                    }
+                    setFlowData(previousFlow);
+                    setWorkspaceResetEpoch((prev) => prev + 1);
+                  },
+                }
               );
             }}
-            onOpenElectronModal={() => setIsElectronModalOpen(true)}
-            onExportBackup={handleExportBackup}
-            onImportBackup={handleImportBackup}
-            onResetAllData={handleResetAllData}
           />
+        </div>
+
+        {activeTab === 'settings' && (
+          <div
+            role="tabpanel"
+            id="tabpanel-settings"
+            aria-labelledby="tab-btn-settings"
+            className="flex-1 flex flex-col overflow-hidden"
+          >
+            <SettingsView
+              shortcut={shortcut}
+              isRecordingHotkey={isRecordingHotkey}
+              onStartRecordingHotkey={() => setIsRecordingHotkey((prev) => !prev)}
+              onResetHotkey={handleResetHotkey}
+              isPinned={isPinned}
+              onTogglePin={togglePin}
+              showEdgeHandle={showEdgeHandle}
+              onToggleEdgeHandle={setShowEdgeHandle}
+              openAtLogin={openAtLogin}
+              onToggleOpenAtLogin={handleToggleOpenAtLogin}
+              updateState={updateState}
+              onCheckForUpdates={handleCheckForUpdates}
+              onInstallUpdate={handleInstallUpdate}
+              panelEdge={panelEdge}
+              onChangePanelEdge={handleChangePanelEdge}
+              panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
+              onChangePanelWidthPercent={(nextPct) =>
+                handleChangePanelWidthPercent(nextPct, true)
+              }
+              displays={displays}
+              activeDisplayId={activeDisplay?.id}
+              monitorSettings={safeMonitorSettings}
+              onChangeMonitorSettings={handleChangeMonitorSettings}
+              onActivateDisplay={(id) => handleActivateDisplay(id, true)}
+              onRefreshDisplays={handleRefreshDisplays}
+              dockEffect={dockEffect}
+              onChangeDockEffect={(effect) => {
+                setDockEffect(effect);
+                notify('Updated Dock Hover Effect', 'check', `Effect: ${effect.toUpperCase()}`);
+              }}
+              dockIconSize={dockIconSize}
+              onChangeDockIconSize={(size) => {
+                setDockIconSize(size);
+                notify('Updated Dock Tile Size', 'check', `Size: ${size.toUpperCase()}`);
+              }}
+              isDockLocked={isDockLocked}
+              onToggleDockLock={(locked) => {
+                setIsDockLocked(locked);
+                notify(
+                  locked ? 'Dock Icons Locked' : 'Dock Icons Unlocked',
+                  'check',
+                  locked ? 'Reordering disabled' : 'Reordering enabled'
+                );
+              }}
+              isElectron={isElectronWindow}
+              countsSummary={{
+                drawers: drawers.length,
+                apps: totalAppCount,
+                diagrams: savedDiagramCount,
+                notes: notes.length,
+              }}
+              onOpenElectronModal={() => setIsElectronModalOpen(true)}
+              onExportBackup={handleExportBackup}
+              onImportBackup={handleImportBackup}
+              onResetAllData={handleResetAllData}
+            />
+          </div>
         )}
       </aside>
 

@@ -62,12 +62,22 @@
       "dist/**/*",
       "dist-electron/**/*",
       "electron/icon.png",
+      "electron/edge-tab.html",
+      "electron/edge-tab.js",
       "electron/stt_worker.py"
     ],
     "extraResources": [
       {
         "from": "electron/icon.png",
         "to": "electron/icon.png"
+      },
+      {
+        "from": "electron/edge-tab.html",
+        "to": "electron/edge-tab.html"
+      },
+      {
+        "from": "electron/edge-tab.js",
+        "to": "electron/edge-tab.js"
       },
       {
         "from": "electron/stt_worker.py",

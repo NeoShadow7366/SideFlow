@@ -4,7 +4,7 @@ import {
   FolderOpen,
   FolderSync,
   ArrowUpDown,
-  Upload,
+  Plus,
   Trash2,
   Pencil,
   ChevronRight,
@@ -155,8 +155,7 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
   };
 
   const currentSort: DrawerSortMode = drawer.sortBy || 'manual';
-  const cycleSortMode = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const cycleSortMode = () => {
     if (!onChangeSort) return;
     const nextSort: DrawerSortMode =
       currentSort === 'manual'
@@ -169,10 +168,10 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
 
   const gridColsClass =
     dockIconSize === 'compact'
-      ? 'grid-cols-4 sm:grid-cols-5 gap-2'
+      ? 'cq-drawer-compact'
       : dockIconSize === 'large'
-      ? 'grid-cols-2 sm:grid-cols-3 gap-3'
-      : 'grid-cols-3 sm:grid-cols-4 gap-2.5';
+      ? 'cq-drawer-large'
+      : 'cq-drawer-normal';
 
   return (
     <div
@@ -182,97 +181,113 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`rounded-2xl bg-slate-950/60 border border-slate-800/90 overflow-hidden transition relative ${
+      className={`rounded-2xl bg-panel-card border border-slate-800/90 overflow-hidden transition relative ${
         isDragOver ? 'drawer-drop-active' : ''
       }`}
     >
-      <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={!drawer.collapsed}
-        aria-label={`${drawer.title} drawer (${filteredApps.length} apps)`}
-        onClick={() => onToggleCollapse(drawer.id)}
-        onKeyDown={(e) => {
-          if (e.target !== e.currentTarget) return;
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onToggleCollapse(drawer.id);
-          } else if (e.key === 'F2') {
-            e.preventDefault();
-            setTitleDraft(drawer.title);
-            setIsEditingTitle(true);
-          }
-        }}
-        className="px-4 py-2.5 bg-slate-900/60 border-b border-slate-800/60 flex items-center justify-between cursor-pointer hover:bg-slate-900 transition"
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          {drawer.collapsed ? (
-            <Folder className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
-          ) : (
-            <FolderOpen className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
-          )}
-
-          {isEditingTitle ? (
+      {/* Un-nested Drawer Header Row (WCAG 4.1.2) */}
+      <div className="px-3.5 py-2 bg-slate-900/60 border-b border-slate-800/60 flex items-center justify-between gap-2">
+        {isEditingTitle ? (
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {drawer.collapsed ? (
+              <Folder className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+            ) : (
+              <FolderOpen className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+            )}
             <input
               type="text"
               aria-label="Edit drawer title"
               value={titleDraft}
-              onClick={(e) => e.stopPropagation()}
               onChange={(e) => setTitleDraft(e.target.value)}
               onBlur={commitTitleRename}
               onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === 'Enter') commitTitleRename();
+                if (e.key === 'Enter') {
+                  commitTitleRename();
+                  window.requestAnimationFrame(() => {
+                    document
+                      .querySelector<HTMLElement>(
+                        `[data-testid="drawer-toggle-${drawer.id}"]`
+                      )
+                      ?.focus();
+                  });
+                }
                 if (e.key === 'Escape') {
+                  e.stopPropagation();
                   setTitleDraft(drawer.title);
                   setIsEditingTitle(false);
+                  window.requestAnimationFrame(() => {
+                    document
+                      .querySelector<HTMLElement>(
+                        `[data-testid="drawer-toggle-${drawer.id}"]`
+                      )
+                      ?.focus();
+                  });
                 }
               }}
               autoFocus
-              className="bg-slate-950 text-xs font-semibold text-white px-2 py-0.5 rounded border border-indigo-500 focus:outline-none"
+              className="flex-1 min-w-0 bg-slate-950 text-xs font-semibold text-white px-2 py-1 rounded-lg border border-indigo-500"
             />
-          ) : (
-            <span
-              onDoubleClick={(e) => {
-                e.stopPropagation();
+          </div>
+        ) : (
+          <button
+            type="button"
+            data-testid={`drawer-toggle-${drawer.id}`}
+            aria-expanded={!drawer.collapsed}
+            aria-label={`${drawer.title} drawer (${filteredApps.length} apps)`}
+            onClick={() => onToggleCollapse(drawer.id)}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setTitleDraft(drawer.title);
+              setIsEditingTitle(true);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'F2') {
+                e.preventDefault();
                 setTitleDraft(drawer.title);
                 setIsEditingTitle(true);
-              }}
-              title="Double-click to rename drawer"
-              className="text-xs font-semibold text-white truncate"
-            >
+              }
+            }}
+            title="Click to expand/collapse • Double-click or F2 to rename"
+            className="flex items-center gap-2 min-w-0 flex-1 text-left py-0.5 rounded-lg hover:text-white transition cursor-pointer"
+          >
+            {drawer.collapsed ? (
+              <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+            )}
+            {drawer.collapsed ? (
+              <Folder className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+            ) : (
+              <FolderOpen className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+            )}
+            <span className="text-xs font-semibold text-white truncate">
               {drawer.title}
             </span>
-          )}
-
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono shrink-0">
-            {filteredApps.length}
-          </span>
-
-          {drawer.folderPath && (
-            <span
-              title={`ObjectDock Folder-View synced to: ${drawer.folderPath}`}
-              className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono truncate max-w-[140px] hidden sm:inline-block"
-            >
-              Folder: {drawer.folderPath}
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono shrink-0">
+              {filteredApps.length}
             </span>
-          )}
-        </div>
+            {drawer.folderPath && (
+              <span
+                title={`ObjectDock Folder-View synced to: ${drawer.folderPath}`}
+                className="cq-show-440 text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono max-w-[130px]"
+              >
+                <span className="truncate">Folder: {drawer.folderPath}</span>
+              </span>
+            )}
+          </button>
+        )}
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 shrink-0">
           {drawer.folderPath && onSyncFolder && (
             <button
               type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onSyncFolder(drawer.id);
-              }}
+              onClick={() => onSyncFolder(drawer.id)}
               aria-label={`Sync folder for ${drawer.title}`}
               title={`Refresh Live Folder (${drawer.folderPath})`}
-              className="px-2 py-0.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/30 text-[10px] text-emerald-300 flex items-center gap-1 transition"
+              className="min-h-[24px] px-2 py-0.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/30 text-[10px] text-emerald-300 flex items-center gap-1 transition"
             >
               <FolderSync className="w-3 h-3" aria-hidden="true" />
-              <span>Sync</span>
+              <span className="cq-show-440">Sync</span>
             </button>
           )}
           {onChangeSort && (
@@ -281,7 +296,7 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
               onClick={cycleSortMode}
               aria-label={`Sort ${drawer.title} drawer`}
               title={`Sort order: ${currentSort.toUpperCase()} (Click to cycle Manual / Name / Type)`}
-              className={`px-2 py-0.5 rounded-lg border text-[10px] flex items-center gap-1 transition ${
+              className={`min-h-[24px] px-2 py-0.5 rounded-lg border text-[10px] flex items-center gap-1 transition ${
                 currentSort !== 'manual'
                   ? 'bg-indigo-600/25 border-indigo-500/40 text-indigo-200'
                   : 'bg-slate-800/90 border-slate-700 text-slate-300 hover:text-indigo-200'
@@ -293,36 +308,30 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
           )}
           <button
             type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onBrowseFiles(drawer.id);
-            }}
-            title="Browse & Add Local Files to this Drawer"
-            className="px-2 py-0.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/40 text-[10px] text-slate-300 hover:text-indigo-200 flex items-center gap-1 transition"
+            onClick={() => onBrowseFiles(drawer.id)}
+            aria-label={`Add files to ${drawer.title}`}
+            title="Browse & Add Local Files or Shortcuts to this Drawer"
+            className="min-h-[24px] px-2 py-0.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 hover:border-indigo-500/40 text-[10px] text-slate-200 hover:text-indigo-200 flex items-center gap-1 transition"
           >
-            <Upload className="w-3 h-3" aria-hidden="true" />
-            <span>Drop / Browse</span>
+            <Plus className="w-3 h-3" aria-hidden="true" />
+            <span className="cq-show-440">Add</span>
           </button>
           <button
             type="button"
-            onClick={(e) => {
-              e.stopPropagation();
+            onClick={() => {
               setTitleDraft(drawer.title);
               setIsEditingTitle(true);
             }}
             aria-label={`Rename ${drawer.title} drawer`}
-            title="Rename Drawer"
-            className="p-1 text-slate-400 hover:text-indigo-400 transition"
+            title="Rename Drawer (F2)"
+            className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:text-indigo-300 hover:bg-slate-800 transition"
           >
             <Pencil className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
           <button
             type="button"
             disabled={!canDeleteDrawer || isLocked}
-            onClick={(e) => {
-              e.stopPropagation();
-              onDeleteDrawer(drawer.id);
-            }}
+            onClick={() => onDeleteDrawer(drawer.id)}
             aria-label={`Delete ${drawer.title}`}
             title={
               isLocked
@@ -331,15 +340,10 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
                 ? 'Delete Drawer'
                 : 'Cannot delete the last remaining drawer'
             }
-            className="p-1 text-slate-400 hover:text-rose-400 disabled:opacity-30 disabled:pointer-events-none transition"
+            className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 disabled:opacity-30 disabled:pointer-events-none transition"
           >
             <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
-          {drawer.collapsed ? (
-            <ChevronRight className="w-4 h-4 text-slate-400" aria-hidden="true" />
-          ) : (
-            <ChevronDown className="w-4 h-4 text-slate-400" aria-hidden="true" />
-          )}
         </div>
       </div>
 
@@ -379,18 +383,11 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
               </p>
             </div>
           ) : (
-            <div
-              role="button"
-              tabIndex={0}
+            <button
+              type="button"
               aria-label={`Browse files to add to ${drawer.title}`}
               onClick={() => onBrowseFiles(drawer.id)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  onBrowseFiles(drawer.id);
-                }
-              }}
-              className="col-span-full border border-dashed border-slate-700/80 hover:border-indigo-500/60 rounded-xl py-5 px-3 text-center cursor-pointer transition bg-slate-900/30 hover:bg-indigo-950/20"
+              className="w-full col-span-full border border-dashed border-slate-700/80 hover:border-indigo-500/60 rounded-xl py-5 px-3 text-center cursor-pointer transition bg-slate-900/30 hover:bg-indigo-950/20"
             >
               <UploadCloud
                 className="w-5 h-5 text-indigo-400 mx-auto mb-1"
@@ -399,10 +396,10 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
               <p className="text-xs font-medium text-slate-300">
                 Drag &amp; drop local apps, shortcuts, or files here
               </p>
-              <p className="text-[10px] text-slate-400 mt-0.5">
+              <p className="text-[11px] text-slate-400 mt-0.5">
                 Or click to browse your computer
               </p>
-            </div>
+            </button>
           )}
         </div>
       )}

@@ -18,6 +18,7 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
   AlertTriangle,
+  Keyboard,
 } from 'lucide-react';
 import {
   AccentColor,
@@ -26,8 +27,13 @@ import {
   DockHoverEffect,
   DockIconSize,
   DrawerSortMode,
+  NotifyFn,
   SystemMetrics,
 } from '../../types/sideflow';
+import { useLocalStorage } from '../../hooks/useLocalStorage';
+import { DynamicIcon } from '../DynamicIcon';
+import { Modal } from '../Modal';
+import { colorMap } from './AppTile';
 import { DrawerCard } from './DrawerCard';
 import {
   buildFolderDrawerApps,
@@ -45,7 +51,7 @@ import {
 interface DockViewProps {
   drawers: AppDrawer[];
   onChangeDrawers: (updater: AppDrawer[] | ((prev: AppDrawer[]) => AppDrawer[])) => void;
-  onNotify: (title: string, icon?: string, subtitle?: string) => void;
+  onNotify: NotifyFn;
   isLocked?: boolean;
   onToggleLock?: () => void;
   dockEffect?: DockHoverEffect;
@@ -64,7 +70,11 @@ export const DockView: React.FC<DockViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<string>('all');
   const [internalLocked, setInternalLocked] = useState(false);
-  const [showDocklets, setShowDocklets] = useState(true);
+  const [showDocklets, setShowDocklets] = useLocalStorage<boolean>(
+    'sideflow_show_docklets',
+    true
+  );
+  const [isRecordingAppHotkey, setIsRecordingAppHotkey] = useState(false);
   const [isTrashDragOver, setIsTrashDragOver] = useState(false);
   const [pendingDeleteDrawerId, setPendingDeleteDrawerId] = useState<
     string | null
@@ -165,19 +175,7 @@ export const DockView: React.FC<DockViewProps> = ({
     return () => window.clearInterval(interval);
   }, [refreshSystemTelemetry]);
 
-  // Close open modals on Escape at window level
-  useEffect(() => {
-    if (!isAppModalOpen && !isDrawerModalOpen && !pendingDeleteDrawerId) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setIsAppModalOpen(false);
-        setIsDrawerModalOpen(false);
-        setPendingDeleteDrawerId(null);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAppModalOpen, isDrawerModalOpen, pendingDeleteDrawerId]);
+  const [isCustomIconOpen, setIsCustomIconOpen] = useState(false);
 
   const filterText = searchQuery.toLowerCase().trim();
 
@@ -462,7 +460,9 @@ export const DockView: React.FC<DockViewProps> = ({
       onNotify(`Launching ${app.name}...`, app.icon || 'rocket', app.cmd);
       const res = await executeAppCommand(app.cmd);
       if (res && !res.success && res.error) {
-        onNotify(`Unable to Launch ${app.name}`, 'zap', res.error);
+        onNotify(`Unable to Launch ${app.name}`, 'zap', res.error, {
+          variant: 'error',
+        });
       }
     },
     [onNotify]
@@ -543,14 +543,17 @@ export const DockView: React.FC<DockViewProps> = ({
     );
     const res = await executeAppCommand(app.cmd, [filePath]);
     if (res && !res.success && res.error) {
-      onNotify(`Unable to Open ${fileName}`, 'zap', res.error);
+      onNotify(`Unable to Open ${fileName}`, 'zap', res.error, {
+        variant: 'error',
+      });
     }
   };
 
   const handleDeleteApp = (drawerId: string, appId: string) => {
     if (isLocked) return;
     const drawer = drawers.find((d) => d.id === drawerId);
-    const app = drawer?.apps.find((a) => a.id === appId);
+    const appIndex = drawer?.apps.findIndex((a) => a.id === appId) ?? -1;
+    const app = appIndex >= 0 ? drawer?.apps[appIndex] : undefined;
     onChangeDrawers((prev) =>
       prev.map((d) =>
         d.id === drawerId
@@ -559,7 +562,28 @@ export const DockView: React.FC<DockViewProps> = ({
       )
     );
     if (app) {
-      onNotify(`Removed ${app.name}`, 'check', `From ${drawer?.title || 'Drawer'}`);
+      const snapshot = { ...app };
+      const restoreIdx = appIndex;
+      onNotify(
+        `Removed ${app.name}`,
+        'check',
+        `From ${drawer?.title || 'Drawer'}`,
+        {
+          variant: 'info',
+          undoLabel: 'Undo',
+          onUndo: () => {
+            onChangeDrawers((prev) =>
+              prev.map((d) => {
+                if (d.id !== drawerId) return d;
+                if (d.apps.some((a) => a.id === snapshot.id)) return d;
+                const nextApps = [...d.apps];
+                nextApps.splice(Math.min(restoreIdx, nextApps.length), 0, snapshot);
+                return { ...d, apps: nextApps };
+              })
+            );
+          },
+        }
+      );
     }
   };
 
@@ -568,7 +592,9 @@ export const DockView: React.FC<DockViewProps> = ({
     e.stopPropagation();
     setIsTrashDragOver(false);
     if (isLocked) {
-      onNotify('Dock Icons Locked', 'zap', 'Unlock dock icons before removing');
+      onNotify('Dock Icons Locked', 'zap', 'Unlock dock icons before removing', {
+        variant: 'warning',
+      });
       return;
     }
     const internalPayload = e.dataTransfer?.getData('application/x-sideflow-app');
@@ -579,20 +605,44 @@ export const DockView: React.FC<DockViewProps> = ({
         sourceDrawerId?: string;
       };
       if (parsed.appId && parsed.sourceDrawerId) {
-        const srcDrawer = drawers.find((d) => d.id === parsed.sourceDrawerId);
-        const app = srcDrawer?.apps.find((a) => a.id === parsed.appId);
+        const srcDrawerId = parsed.sourceDrawerId;
+        const srcDrawer = drawers.find((d) => d.id === srcDrawerId);
+        const appIndex =
+          srcDrawer?.apps.findIndex((a) => a.id === parsed.appId) ?? -1;
+        const app = appIndex >= 0 ? srcDrawer?.apps[appIndex] : undefined;
         onChangeDrawers((prev) =>
           prev.map((d) =>
-            d.id === parsed.sourceDrawerId
+            d.id === srcDrawerId
               ? { ...d, apps: d.apps.filter((a) => a.id !== parsed.appId) }
               : d
           )
         );
         if (app) {
+          const snapshot = { ...app };
+          const restoreIdx = appIndex;
           onNotify(
             `Moved "${app.name}" to Recycle Bin`,
             'check',
-            `Removed from ${srcDrawer?.title || 'Dock'}`
+            `Removed from ${srcDrawer?.title || 'Dock'}`,
+            {
+              variant: 'info',
+              undoLabel: 'Undo',
+              onUndo: () => {
+                onChangeDrawers((prev) =>
+                  prev.map((d) => {
+                    if (d.id !== srcDrawerId) return d;
+                    if (d.apps.some((a) => a.id === snapshot.id)) return d;
+                    const nextApps = [...d.apps];
+                    nextApps.splice(
+                      Math.min(restoreIdx, nextApps.length),
+                      0,
+                      snapshot
+                    );
+                    return { ...d, apps: nextApps };
+                  })
+                );
+              },
+            }
           );
         }
       }
@@ -701,6 +751,7 @@ export const DockView: React.FC<DockViewProps> = ({
     setAppColor('indigo');
     setAppCustomIconUrl('');
     setAppHotkey('');
+    setIsRecordingAppHotkey(false);
     setIsAppModalOpen(true);
   };
 
@@ -713,6 +764,7 @@ export const DockView: React.FC<DockViewProps> = ({
     setAppColor(app.color || 'indigo');
     setAppCustomIconUrl(app.customIconUrl || '');
     setAppHotkey(app.hotkey || '');
+    setIsRecordingAppHotkey(false);
     setIsAppModalOpen(true);
   };
 
@@ -1065,15 +1117,17 @@ export const DockView: React.FC<DockViewProps> = ({
         </button>
         <button
           type="button"
+          aria-label="New Drawer"
+          title="Create New App Drawer"
           onClick={() => {
             setNewDrawerTitle('');
             setNewDrawerFolder('');
             setIsDrawerModalOpen(true);
           }}
-          className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 transition shrink-0"
+          className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 transition shrink-0"
         >
           <FolderPlus className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
-          <span>New Drawer</span>
+          <span className="cq-show-440">New Drawer</span>
         </button>
         <button
           type="button"
@@ -1092,7 +1146,7 @@ export const DockView: React.FC<DockViewProps> = ({
           data-testid="objectdock-docklets-bar"
           role="region"
           aria-label="ObjectDock Mini Docklets"
-          className="grid grid-cols-2 sm:grid-cols-4 gap-2"
+          className="cq-docklets-grid"
         >
           {/* 1. CPU & RAM System Meter Docklet */}
           <button
@@ -1160,7 +1214,7 @@ export const DockView: React.FC<DockViewProps> = ({
               <div className="text-[10px] font-medium text-slate-200 truncate">
                 Recycle Bin
               </div>
-              <div className="text-[9px] text-slate-400 truncate">
+              <div className="text-[10px] text-slate-400 truncate">
                 {isTrashDragOver ? 'Drop tile to remove' : 'Open or drop tile'}
               </div>
             </div>
@@ -1189,7 +1243,7 @@ export const DockView: React.FC<DockViewProps> = ({
               <div className="text-[10px] font-mono font-semibold text-slate-200 truncate">
                 {dockletTime}
               </div>
-              <div className="text-[9px] text-slate-400 truncate">
+              <div className="text-[10px] text-slate-400 truncate">
                 Up {systemMetrics.uptimeHours}h • Copy
               </div>
             </div>
@@ -1217,7 +1271,7 @@ export const DockView: React.FC<DockViewProps> = ({
               <div className="text-[10px] font-medium text-slate-200 truncate">
                 Downloads
               </div>
-              <div className="text-[9px] text-slate-400 truncate">
+              <div className="text-[10px] text-slate-400 truncate">
                 Quick OS Folder
               </div>
             </div>
@@ -1414,401 +1468,498 @@ export const DockView: React.FC<DockViewProps> = ({
       />
 
       {/* Modal: Add / Edit App */}
-      {isAppModalOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={
-            editingAppInfo
-              ? 'Edit Application in Dock Drawer'
-              : 'Add Application to Dock Drawer'
+      <Modal
+        isOpen={isAppModalOpen}
+        onClose={() => {
+          setIsRecordingAppHotkey(false);
+          setIsCustomIconOpen(false);
+          setIsAppModalOpen(false);
+        }}
+        onEscapeIntercept={() => {
+          if (isRecordingAppHotkey) {
+            setIsRecordingAppHotkey(false);
+            return true;
           }
-          onClick={() => setIsAppModalOpen(false)}
-          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4"
+          return false;
+        }}
+        ariaLabel={
+          editingAppInfo
+            ? 'Edit Application in Dock Drawer'
+            : 'Add Application to Dock Drawer'
+        }
+        maxWidthClass="max-w-md"
+        panelClassName="border-slate-700 space-y-4 max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+            <AppWindow className="w-4 h-4 text-indigo-400" aria-hidden="true" />
+            <span>
+              {editingAppInfo
+                ? 'Edit Application in Dock Drawer'
+                : 'Add Application to Dock Drawer'}
+            </span>
+          </h3>
+          <button
+            type="button"
+            aria-label="Close modal"
+            onClick={() => {
+              setIsRecordingAppHotkey(false);
+              setIsCustomIconOpen(false);
+              setIsAppModalOpen(false);
+            }}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition"
           >
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                <AppWindow className="w-4 h-4 text-indigo-400" aria-hidden="true" />
-                <span>
-                  {editingAppInfo
-                    ? 'Edit Application in Dock Drawer'
-                    : 'Add Application to Dock Drawer'}
+            <X className="w-4 h-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        {/* Live Tile Visual Preview Strip */}
+        <div
+          data-testid="modal-app-tile-preview"
+          className="px-3 py-2.5 rounded-xl bg-slate-950/90 border border-slate-800 flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div
+              className={`w-10 h-10 rounded-xl border ${
+                colorMap[appColor] || colorMap.indigo
+              } flex items-center justify-center shrink-0 overflow-hidden shadow-inner`}
+            >
+              {appCustomIconUrl ? (
+                <img
+                  src={appCustomIconUrl}
+                  alt="Preview icon"
+                  className="w-5 h-5 object-contain"
+                />
+              ) : (
+                <DynamicIcon
+                  name={appIcon || 'terminal'}
+                  className="w-5 h-5"
+                  aria-hidden="true"
+                />
+              )}
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-white truncate">
+                {appName.trim() || 'Application Preview'}
+              </div>
+              <div className="text-[11px] font-mono text-slate-400 truncate">
+                {appCmd.trim() || 'Select path or URI below...'}
+              </div>
+            </div>
+          </div>
+          {appHotkey.trim() && (
+            <span className="px-2 py-0.5 rounded bg-slate-900 border border-indigo-500/40 text-[10px] font-mono text-indigo-300 shrink-0">
+              {appHotkey.trim()}
+            </span>
+          )}
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label
+              htmlFor="new-app-name"
+              className="text-[11px] text-slate-300 block mb-1"
+            >
+              Application Name
+            </label>
+            <input
+              id="new-app-name"
+              type="text"
+              autoFocus
+              value={appName}
+              onChange={(e) => setAppName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSaveAppModal();
+              }}
+              placeholder="e.g., Visual Studio Code, Spotify, Obsidian"
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="new-app-drawer"
+              className="text-[11px] text-slate-300 block mb-1"
+            >
+              Target Drawer Category
+            </label>
+            <select
+              id="new-app-drawer"
+              value={appDrawerId}
+              onChange={(e) => setAppDrawerId(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
+            >
+              {drawers.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.title}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label
+              htmlFor="new-app-cmd"
+              className="text-[11px] text-slate-300 block mb-1"
+            >
+              Executable Path / Custom URI Protocol / URL
+            </label>
+            <div className="flex gap-1.5">
+              <input
+                id="new-app-cmd"
+                type="text"
+                value={appCmd}
+                onChange={(e) => setAppCmd(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveAppModal();
+                }}
+                placeholder="vscode:// or C:\Program Files\App\app.exe or https://..."
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-indigo-300"
+              />
+              <button
+                type="button"
+                onClick={handleModalBrowseClick}
+                title="Browse Local File"
+                className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs text-slate-200 flex items-center gap-1 shrink-0"
+              >
+                <FolderSearch className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                <span>Browse</span>
+              </button>
+            </div>
+            <input
+              ref={modalFileInputRef}
+              type="file"
+              tabIndex={-1}
+              aria-hidden="true"
+              className="hidden"
+              onChange={handleModalFileInputChange}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label
+                htmlFor="new-app-icon"
+                className="text-[11px] text-slate-300 block mb-1"
+              >
+                Icon Style
+              </label>
+              <select
+                id="new-app-icon"
+                value={appIcon}
+                onChange={(e) => setAppIcon(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
+              >
+                <option value="terminal">Terminal / Code</option>
+                <option value="globe">Browser / Web</option>
+                <option value="music">Media / Audio</option>
+                <option value="message-square">Chat / Social</option>
+                <option value="figma">Design / Creative</option>
+                <option value="database">Database / Tool</option>
+                <option value="cpu">System Utility</option>
+                <option value="git-branch">Git / Version Control</option>
+                <option value="share-2">Diagram / Share</option>
+                <option value="file-text">Document / Note</option>
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="new-app-color"
+                className="text-[11px] text-slate-300 block mb-1"
+              >
+                Tile Accent
+              </label>
+              <select
+                id="new-app-color"
+                value={appColor}
+                onChange={(e) => setAppColor(e.target.value as AccentColor)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
+              >
+                <option value="indigo">Indigo</option>
+                <option value="cyan">Cyan</option>
+                <option value="emerald">Emerald</option>
+                <option value="amber">Amber</option>
+                <option value="rose">Rose</option>
+                <option value="purple">Purple</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Progressive Disclosure for Custom Icon Image / Auto-Detect */}
+          <details
+            open={isCustomIconOpen || Boolean(appCustomIconUrl || editingAppInfo)}
+            onToggle={(e) =>
+              setIsCustomIconOpen((e.currentTarget as HTMLDetailsElement).open)
+            }
+            className="rounded-xl bg-slate-950/60 border border-slate-800 px-3 py-2"
+          >
+            <summary className="text-[11px] font-medium text-slate-300 cursor-pointer select-none flex items-center justify-between">
+              <span>Custom Icon Image / Auto-Detect (Optional)</span>
+              {appCustomIconUrl && (
+                <span className="text-[10px] font-mono text-emerald-400">
+                  Custom active
                 </span>
-              </h3>
-              <button
-                type="button"
-                aria-label="Close modal"
-                onClick={() => setIsAppModalOpen(false)}
-                className="text-slate-400 hover:text-white"
+              )}
+            </summary>
+            <div className="pt-2 space-y-1.5">
+              <label
+                htmlFor="new-app-custom-icon"
+                className="sr-only"
               >
-                <X className="w-4 h-4" aria-hidden="true" />
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <label
-                  htmlFor="new-app-name"
-                  className="text-[11px] text-slate-400 block mb-1"
-                >
-                  Application Name
-                </label>
+                Custom Icon URL or Data URI (Optional)
+              </label>
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <input
-                  id="new-app-name"
+                  id="new-app-custom-icon"
                   type="text"
-                  autoFocus
-                  value={appName}
-                  onChange={(e) => setAppName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleSaveAppModal();
+                  value={appCustomIconUrl}
+                  onChange={(e) => setAppCustomIconUrl(e.target.value)}
+                  placeholder="https://.../icon.png or data:image/..."
+                  className="flex-1 min-w-[140px] bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-xs font-mono text-slate-300"
+                />
+                <button
+                  type="button"
+                  data-testid="populate-app-icon-btn"
+                  aria-label="Populate shortcut or application icon"
+                  onClick={handlePopulateModalIcon}
+                  title="Auto-populate shortcut or application icon image from path/name"
+                  className="px-2.5 py-1.5 rounded-xl bg-indigo-950/70 hover:bg-indigo-900/70 border border-indigo-500/40 text-xs text-indigo-200 flex items-center gap-1 shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
+                  <span>Auto Icon</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (customIconInputRef.current) {
+                      customIconInputRef.current.value = '';
+                      customIconInputRef.current.click();
+                    }
                   }}
-                  placeholder="e.g., Visual Studio Code, Spotify, Obsidian"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="new-app-drawer"
-                  className="text-[11px] text-slate-400 block mb-1"
+                  title="Upload Custom PNG/ICO/SVG Image"
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs text-slate-200 flex items-center gap-1 shrink-0"
                 >
-                  Target Drawer Category
-                </label>
-                <select
-                  id="new-app-drawer"
-                  value={appDrawerId}
-                  onChange={(e) => setAppDrawerId(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                >
-                  {drawers.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.title}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="new-app-cmd"
-                  className="text-[11px] text-slate-400 block mb-1"
-                >
-                  Executable Path / Custom URI Protocol / URL
-                </label>
-                <div className="flex gap-1.5">
-                  <input
-                    id="new-app-cmd"
-                    type="text"
-                    value={appCmd}
-                    onChange={(e) => setAppCmd(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleSaveAppModal();
-                    }}
-                    placeholder="vscode:// or C:\Program Files\App\app.exe or https://..."
-                    className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-indigo-300"
-                  />
+                  <ImageIcon className="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
+                  <span>Upload</span>
+                </button>
+                {appCustomIconUrl && (
                   <button
                     type="button"
-                    onClick={handleModalBrowseClick}
-                    title="Browse Local File"
-                    className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs text-slate-200 flex items-center gap-1 shrink-0"
+                    onClick={() => setAppCustomIconUrl('')}
+                    aria-label="Clear custom icon"
+                    className="px-2 py-1.5 rounded-xl bg-slate-800 hover:bg-rose-950/60 text-xs text-slate-300 hover:text-rose-300"
                   >
-                    <FolderSearch className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
-                    <span>Browse</span>
+                    Clear
                   </button>
-                </div>
-                <input
-                  ref={modalFileInputRef}
-                  type="file"
-                  tabIndex={-1}
-                  aria-hidden="true"
-                  className="hidden"
-                  onChange={handleModalFileInputChange}
-                />
-                <p className="text-[10px] text-slate-400 mt-1">
-                  Tip: You can also drag &amp; drop icons from the Taskbar, Start Menu,
-                  or Desktop directly onto any drawer card.
-                </p>
+                )}
               </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label
-                    htmlFor="new-app-icon"
-                    className="text-[11px] text-slate-400 block mb-1"
-                  >
-                    Icon Style
-                  </label>
-                  <select
-                    id="new-app-icon"
-                    value={appIcon}
-                    onChange={(e) => setAppIcon(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                  >
-                    <option value="terminal">Terminal / Code</option>
-                    <option value="globe">Browser / Web</option>
-                    <option value="music">Media / Audio</option>
-                    <option value="message-square">Chat / Social</option>
-                    <option value="figma">Design / Creative</option>
-                    <option value="database">Database / Tool</option>
-                    <option value="cpu">System Utility</option>
-                    <option value="git-branch">Git / Version Control</option>
-                    <option value="share-2">Diagram / Share</option>
-                    <option value="file-text">Document / Note</option>
-                  </select>
-                </div>
-                <div>
-                  <label
-                    htmlFor="new-app-color"
-                    className="text-[11px] text-slate-400 block mb-1"
-                  >
-                    Tile Accent
-                  </label>
-                  <select
-                    id="new-app-color"
-                    value={appColor}
-                    onChange={(e) => setAppColor(e.target.value as AccentColor)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                  >
-                    <option value="indigo">Indigo</option>
-                    <option value="cyan">Cyan</option>
-                    <option value="emerald">Emerald</option>
-                    <option value="amber">Amber</option>
-                    <option value="rose">Rose</option>
-                    <option value="purple">Purple</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="new-app-custom-icon"
-                  className="text-[11px] text-slate-400 block mb-1"
-                >
-                  Custom Icon URL or Data URI (Optional)
-                </label>
-                <div className="flex items-center gap-1.5">
-                  <input
-                    id="new-app-custom-icon"
-                    type="text"
-                    value={appCustomIconUrl}
-                    onChange={(e) => setAppCustomIconUrl(e.target.value)}
-                    placeholder="data:image/png;base64,... or https://.../icon.png"
-                    className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-slate-300"
-                  />
-                  <button
-                    type="button"
-                    data-testid="populate-app-icon-btn"
-                    aria-label="Populate shortcut or application icon"
-                    onClick={handlePopulateModalIcon}
-                    title="Auto-populate shortcut or application icon image from path/name"
-                    className="px-2.5 py-2 rounded-xl bg-indigo-950/70 hover:bg-indigo-900/70 border border-indigo-500/40 text-xs text-indigo-200 flex items-center gap-1 shrink-0"
-                  >
-                    <Sparkles className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
-                    <span>Auto Icon</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (customIconInputRef.current) {
-                        customIconInputRef.current.value = '';
-                        customIconInputRef.current.click();
-                      }
-                    }}
-                    title="Upload Custom PNG/ICO/SVG Image"
-                    className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs text-slate-200 flex items-center gap-1 shrink-0"
-                  >
-                    <ImageIcon className="w-3.5 h-3.5 text-cyan-400" aria-hidden="true" />
-                    <span>Icon</span>
-                  </button>
-                  {appCustomIconUrl && (
-                    <button
-                      type="button"
-                      onClick={() => setAppCustomIconUrl('')}
-                      aria-label="Clear custom icon"
-                      className="px-2 py-2 rounded-xl bg-slate-800 hover:bg-rose-950/60 text-xs text-slate-400 hover:text-rose-300"
-                    >
-                      Clear
-                    </button>
-                  )}
-                </div>
-                <input
-                  ref={customIconInputRef}
-                  type="file"
-                  accept=".png,.ico,.svg,.jpg,.jpeg,.webp,image/*"
-                  tabIndex={-1}
-                  aria-hidden="true"
-                  className="hidden"
-                  onChange={handleCustomIconFileChange}
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="new-app-hotkey"
-                  className="text-[11px] text-slate-400 block mb-1"
-                >
-                  Quick-Launch Hotkey (Optional)
-                </label>
-                <input
-                  id="new-app-hotkey"
-                  type="text"
-                  value={appHotkey}
-                  onChange={(e) => setAppHotkey(e.target.value)}
-                  placeholder="e.g., Alt+1 or Ctrl+Shift+V (Default: Alt+1..9 by slot)"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-indigo-300"
-                />
-              </div>
+              <input
+                ref={customIconInputRef}
+                type="file"
+                accept=".png,.ico,.svg,.jpg,.jpeg,.webp,image/*"
+                tabIndex={-1}
+                aria-hidden="true"
+                className="hidden"
+                onChange={handleCustomIconFileChange}
+              />
             </div>
+          </details>
 
-            <div className="flex justify-end gap-2 pt-2">
+          <div>
+            <label
+              htmlFor="new-app-hotkey"
+              className="text-[11px] text-slate-300 block mb-1"
+            >
+              Quick-Launch Hotkey (Optional)
+            </label>
+            <div className="flex items-center gap-1.5">
+              <input
+                id="new-app-hotkey"
+                type="text"
+                value={appHotkey}
+                onChange={(e) => setAppHotkey(e.target.value)}
+                onKeyDown={(e) => {
+                  if (!isRecordingAppHotkey) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (e.key === 'Escape') {
+                    setIsRecordingAppHotkey(false);
+                    return;
+                  }
+                  if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) {
+                    return;
+                  }
+                  if (!e.ctrlKey && !e.altKey && !e.shiftKey) return;
+                  const mods: string[] = [];
+                  if (e.ctrlKey) mods.push('Ctrl');
+                  if (e.altKey) mods.push('Alt');
+                  if (e.shiftKey) mods.push('Shift');
+                  const digitMatch = e.code.match(/^(?:Digit|Numpad)([0-9])$/);
+                  const keyPart = digitMatch
+                    ? digitMatch[1]
+                    : e.key.toUpperCase();
+                  setAppHotkey([...mods, keyPart].join('+'));
+                  setIsRecordingAppHotkey(false);
+                }}
+                placeholder="e.g., Alt+1 or Ctrl+Shift+V"
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-indigo-300"
+              />
               <button
                 type="button"
-                onClick={() => setIsAppModalOpen(false)}
-                className="px-3.5 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
+                aria-pressed={isRecordingAppHotkey}
+                onClick={() => {
+                  setIsRecordingAppHotkey((prev) => !prev);
+                  document.getElementById('new-app-hotkey')?.focus();
+                }}
+                title="Click then press a modifier + key combination"
+                className={`px-2.5 py-2 rounded-xl border text-xs flex items-center gap-1 shrink-0 transition ${
+                  isRecordingAppHotkey
+                    ? 'bg-rose-600 border-rose-400 text-white'
+                    : 'bg-slate-800 hover:bg-slate-700 border-slate-600 text-slate-200'
+                }`}
               >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!appName.trim()}
-                onClick={handleSaveAppModal}
-                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:pointer-events-none text-xs font-medium text-white transition"
-              >
-                {editingAppInfo ? 'Save Changes' : 'Add to Drawer'}
+                <Keyboard className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>{isRecordingAppHotkey ? 'Press Keys...' : 'Record'}</span>
               </button>
             </div>
           </div>
         </div>
-      )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button
+            type="button"
+            onClick={() => {
+              setIsRecordingAppHotkey(false);
+              setIsAppModalOpen(false);
+            }}
+            className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={!appName.trim()}
+            onClick={handleSaveAppModal}
+            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:pointer-events-none text-xs font-medium text-white transition"
+          >
+            {editingAppInfo ? 'Save Changes' : 'Add to Drawer'}
+          </button>
+        </div>
+      </Modal>
 
       {/* Modal: Create New Drawer */}
-      {isDrawerModalOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Create New App Drawer"
-          onClick={() => setIsDrawerModalOpen(false)}
-          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="bg-slate-900 border border-slate-700 rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4"
+      <Modal
+        isOpen={isDrawerModalOpen}
+        onClose={() => setIsDrawerModalOpen(false)}
+        ariaLabel="Create New App Drawer"
+        maxWidthClass="max-w-sm"
+        panelClassName="border-slate-700 space-y-4"
+      >
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+            <FolderPlus className="w-4 h-4 text-amber-400" aria-hidden="true" />
+            <span>Create New App Drawer</span>
+          </h3>
+          <button
+            type="button"
+            aria-label="Close modal"
+            onClick={() => setIsDrawerModalOpen(false)}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition"
           >
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                <FolderPlus className="w-4 h-4 text-amber-400" aria-hidden="true" />
-                <span>Create New App Drawer</span>
-              </h3>
+            <X className="w-4 h-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label
+              htmlFor="new-drawer-title"
+              className="text-[11px] text-slate-300 block mb-1"
+            >
+              Drawer Title
+            </label>
+            <input
+              id="new-drawer-title"
+              type="text"
+              autoFocus
+              value={newDrawerTitle}
+              onChange={(e) => setNewDrawerTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSaveNewDrawer();
+              }}
+              placeholder="e.g., Daily Dev, Creative Suite, Gaming"
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="new-drawer-folder"
+              className="text-[11px] text-slate-300 block mb-1"
+            >
+              Live Folder Path (Optional — ObjectDock Folder-View)
+            </label>
+            <div className="flex gap-1.5">
+              <input
+                id="new-drawer-folder"
+                type="text"
+                value={newDrawerFolder}
+                onChange={(e) => setNewDrawerFolder(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleSaveNewDrawer();
+                }}
+                placeholder="e.g., C:\Users\Dev\Projects"
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-emerald-300"
+              />
               <button
                 type="button"
-                aria-label="Close modal"
-                onClick={() => setIsDrawerModalOpen(false)}
-                className="text-slate-400 hover:text-white"
+                onClick={handleBrowseNewDrawerFolder}
+                title="Browse Local Directory"
+                className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs text-slate-200 flex items-center gap-1 shrink-0"
               >
-                <X className="w-4 h-4" aria-hidden="true" />
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <label
-                  htmlFor="new-drawer-title"
-                  className="text-[11px] text-slate-400 block mb-1"
-                >
-                  Drawer Title
-                </label>
-                <input
-                  id="new-drawer-title"
-                  type="text"
-                  autoFocus
-                  value={newDrawerTitle}
-                  onChange={(e) => setNewDrawerTitle(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleSaveNewDrawer();
-                  }}
-                  placeholder="e.g., Daily Dev, Creative Suite, Gaming"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                />
-              </div>
-
-              <div>
-                <label
-                  htmlFor="new-drawer-folder"
-                  className="text-[11px] text-slate-400 block mb-1"
-                >
-                  Live Folder Path (Optional — ObjectDock Folder-View)
-                </label>
-                <div className="flex gap-1.5">
-                  <input
-                    id="new-drawer-folder"
-                    type="text"
-                    value={newDrawerFolder}
-                    onChange={(e) => setNewDrawerFolder(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleSaveNewDrawer();
-                    }}
-                    placeholder="e.g., C:\Users\Dev\Projects"
-                    className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-emerald-300"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleBrowseNewDrawerFolder}
-                    title="Browse Local Directory"
-                    className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs text-slate-200 flex items-center gap-1 shrink-0"
-                  >
-                    <FolderSearch className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
-                    <span>Folder</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setIsDrawerModalOpen(false)}
-                className="px-3.5 py-2 rounded-xl bg-slate-800 text-xs text-slate-300"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={!newDrawerTitle.trim()}
-                onClick={handleSaveNewDrawer}
-                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:pointer-events-none text-xs font-medium text-white transition"
-              >
-                Create Drawer
+                <FolderSearch className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+                <span>Folder</span>
               </button>
             </div>
           </div>
         </div>
-      )}
+
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setIsDrawerModalOpen(false)}
+            className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={!newDrawerTitle.trim()}
+            onClick={handleSaveNewDrawer}
+            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:pointer-events-none text-xs font-medium text-white transition"
+          >
+            Create Drawer
+          </button>
+        </div>
+      </Modal>
 
       {/* Modal: Confirm Drawer Deletion */}
-      {pendingDeleteDrawerId &&
-        (() => {
-          const pendingDrawer = drawers.find(
-            (d) => d.id === pendingDeleteDrawerId
-          );
-          if (!pendingDrawer) return null;
-          return (
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-label="Confirm Drawer Deletion"
-              data-testid="confirm-delete-drawer-modal"
-              onClick={() => setPendingDeleteDrawerId(null)}
-              className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-            >
-              <div
-                onClick={(e) => e.stopPropagation()}
-                className="bg-slate-900 border border-rose-500/40 rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-4"
-              >
+      {(() => {
+        const pendingDrawer = pendingDeleteDrawerId
+          ? drawers.find((d) => d.id === pendingDeleteDrawerId)
+          : undefined;
+        return (
+          <Modal
+            isOpen={Boolean(pendingDrawer)}
+            onClose={() => setPendingDeleteDrawerId(null)}
+            role="alertdialog"
+            ariaLabel="Confirm Drawer Deletion"
+            dataTestId="confirm-delete-drawer-modal"
+            maxWidthClass="max-w-sm"
+            panelClassName="border-rose-500/40 space-y-4"
+          >
+            {pendingDrawer && (
+              <>
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-white flex items-center gap-2">
                     <AlertTriangle
@@ -1821,7 +1972,7 @@ export const DockView: React.FC<DockViewProps> = ({
                     type="button"
                     aria-label="Close confirmation modal"
                     onClick={() => setPendingDeleteDrawerId(null)}
-                    className="text-slate-400 hover:text-white"
+                    className="w-7 h-7 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition"
                   >
                     <X className="w-4 h-4" aria-hidden="true" />
                   </button>
@@ -1830,7 +1981,7 @@ export const DockView: React.FC<DockViewProps> = ({
                 <p className="text-xs text-slate-300 leading-relaxed">
                   Are you sure you want to delete the drawer{' '}
                   <span className="font-semibold text-white">
-                    "{pendingDrawer.title}"
+                    &quot;{pendingDrawer.title}&quot;
                   </span>{' '}
                   and remove its{' '}
                   <span className="font-mono text-rose-300">
@@ -1858,10 +2009,11 @@ export const DockView: React.FC<DockViewProps> = ({
                     Delete Drawer
                   </button>
                 </div>
-              </div>
-            </div>
-          );
-        })()}
+              </>
+            )}
+          </Modal>
+        );
+      })()}
     </section>
   );
 };

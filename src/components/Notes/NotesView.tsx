@@ -23,8 +23,15 @@ import {
   ChevronDown,
   ChevronUp,
   FolderOpen,
+  Copy,
+  Download,
 } from 'lucide-react';
-import { AccentColor, FlowchartState, NoteItem } from '../../types/sideflow';
+import {
+  AccentColor,
+  FlowchartState,
+  NoteItem,
+  NotifyFn,
+} from '../../types/sideflow';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import {
   computeDagLayout,
@@ -38,10 +45,12 @@ interface NotesViewProps {
   onChangeNotes: (
     updater: NoteItem[] | ((prev: NoteItem[]) => NoteItem[])
   ) => void;
+  activeNoteId?: string;
+  onChangeActiveNoteId?: (id: string) => void;
   isPanelOpen?: boolean;
   isActiveTab?: boolean;
   onDictatingChange?: (isDictating: boolean) => void;
-  onNotify: (title: string, icon?: string, subtitle?: string) => void;
+  onNotify: NotifyFn;
   onOpenMermaidInFlow?: (flowState: FlowchartState) => void;
 }
 
@@ -54,9 +63,9 @@ interface NoteHistoryEntry {
 
 const ACCENT_COLORS: { id: AccentColor; dotClass: string; activeTabClass: string }[] = [
   { id: 'indigo', dotClass: 'bg-indigo-400', activeTabClass: 'bg-indigo-600 text-white' },
-  { id: 'cyan', dotClass: 'bg-cyan-400', activeTabClass: 'bg-cyan-600 text-white' },
-  { id: 'emerald', dotClass: 'bg-emerald-400', activeTabClass: 'bg-emerald-600 text-white' },
-  { id: 'amber', dotClass: 'bg-amber-400', activeTabClass: 'bg-amber-600 text-white' },
+  { id: 'cyan', dotClass: 'bg-cyan-400', activeTabClass: 'bg-cyan-500 text-slate-950 font-semibold' },
+  { id: 'emerald', dotClass: 'bg-emerald-400', activeTabClass: 'bg-emerald-500 text-slate-950 font-semibold' },
+  { id: 'amber', dotClass: 'bg-amber-400', activeTabClass: 'bg-amber-400 text-slate-950 font-semibold' },
   { id: 'rose', dotClass: 'bg-rose-400', activeTabClass: 'bg-rose-600 text-white' },
   { id: 'purple', dotClass: 'bg-purple-400', activeTabClass: 'bg-purple-600 text-white' },
 ];
@@ -64,16 +73,20 @@ const ACCENT_COLORS: { id: AccentColor; dotClass: string; activeTabClass: string
 export const NotesView: React.FC<NotesViewProps> = ({
   notes,
   onChangeNotes,
+  activeNoteId: controlledActiveNoteId,
+  onChangeActiveNoteId,
   isPanelOpen = true,
   isActiveTab = true,
   onDictatingChange,
   onNotify,
   onOpenMermaidInFlow,
 }) => {
-  const [activeNoteId, setActiveNoteId] = useLocalStorage<string>(
+  const [internalActiveNoteId, setInternalActiveNoteId] = useLocalStorage<string>(
     'sideflow_active_note_id',
     notes[0]?.id || 'note-1'
   );
+  const activeNoteId = controlledActiveNoteId ?? internalActiveNoteId;
+  const setActiveNoteId = onChangeActiveNoteId ?? setInternalActiveNoteId;
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [viewMode, setViewMode] = useLocalStorage<EditorViewMode>(
     'sideflow_notes_view_mode',
@@ -292,6 +305,9 @@ export const NotesView: React.FC<NotesViewProps> = ({
       | 'code'
       | 'mermaid'
   ) => {
+    if (viewMode === 'preview') {
+      setViewMode('split');
+    }
     const el = editorRef.current;
     const body = currentNote.body;
     const start = el ? el.selectionStart ?? body.length : body.length;
@@ -393,30 +409,57 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
   const handleDeleteCurrentNote = () => {
     if (notes.length <= 1) return;
-    const deletedTitle = currentNote.title || 'Untitled';
+    const deletedNote = currentNote;
+    const deletedIndex = notes.findIndex((n) => n.id === currentNote.id);
+    const deletedTitle = deletedNote.title || 'Untitled';
     const remaining = notes.filter((n) => n.id !== currentNote.id);
     onChangeNotes(remaining);
     if (remaining[0]) {
       setActiveNoteId(remaining[0].id);
     }
-    onNotify(`Deleted "${deletedTitle}"`, 'check', 'Note removed from scratchpad');
+    onNotify(`Deleted "${deletedTitle}"`, 'check', 'Note removed from scratchpad', {
+      variant: 'info',
+      undoLabel: 'Undo',
+      onUndo: () => {
+        onChangeNotes((prev) => {
+          if (prev.some((n) => n.id === deletedNote.id)) return prev;
+          const next = [...prev];
+          const idx =
+            deletedIndex >= 0 ? Math.min(deletedIndex, next.length) : next.length;
+          next.splice(idx, 0, deletedNote);
+          return next;
+        });
+        setActiveNoteId(deletedNote.id);
+      },
+    });
   };
 
   const handleClearCurrentNote = () => {
     if (!currentNote.body) return;
+    const clearedNoteId = currentNote.id;
+    const previousBody = currentNote.body;
+    const clearedTitle = currentNote.title || 'Untitled';
     handleUpdateCurrentNote({ body: '' }, true);
     lastInsertPosMapRef.current[currentNote.id] = 0;
-    onNotify('Cleared Note Content', 'check', currentNote.title || 'Untitled');
+    onNotify('Cleared Note Content', 'check', clearedTitle, {
+      variant: 'info',
+      undoLabel: 'Undo',
+      onUndo: () => {
+        onChangeNotes((prev) =>
+          prev.map((n) =>
+            n.id === clearedNoteId
+              ? { ...n, body: previousBody, updatedAt: Date.now() }
+              : n
+          )
+        );
+        setActiveNoteId(clearedNoteId);
+      },
+    });
   };
 
   const handleTogglePinCurrentNote = () => {
     const nextPinned = !currentNote.pinned;
     handleUpdateCurrentNote({ pinned: nextPinned }, false);
-    onNotify(
-      nextPinned ? 'Pinned Note' : 'Unpinned Note',
-      'check',
-      currentNote.title || 'Untitled'
-    );
   };
 
   const handleTogglePinNoteById = (noteId: string, e: React.MouseEvent) => {
@@ -428,11 +471,6 @@ export const NotesView: React.FC<NotesViewProps> = ({
       prev.map((n) =>
         n.id === noteId ? { ...n, pinned: nextPinned, updatedAt: Date.now() } : n
       )
-    );
-    onNotify(
-      nextPinned ? 'Pinned Note' : 'Unpinned Note',
-      'check',
-      target.title || 'Untitled'
     );
   };
 
@@ -619,12 +657,17 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
       const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       if (linkMatch) {
+        const rawHref = linkMatch[2].trim();
+        const isSafeHref = /^(https?:\/\/|mailto:)/i.test(rawHref);
+        if (!isSafeHref) {
+          return <React.Fragment key={key}>{part}</React.Fragment>;
+        }
         return (
           <a
             key={key}
-            href={linkMatch[2]}
+            href={rawHref}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="text-cyan-400 underline decoration-cyan-500/50 hover:text-cyan-300"
           >
             {linkMatch[1]}
@@ -1002,13 +1045,13 @@ export const NotesView: React.FC<NotesViewProps> = ({
                 type="button"
                 aria-label="Collapse Note Switcher"
                 onClick={() => setIsNoteSwitcherOpen(false)}
-                className="text-[10px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800"
+                className="min-h-[24px] text-[10px] text-slate-300 hover:text-white px-2 py-0.5 rounded bg-slate-900 border border-slate-800"
               >
                 Collapse
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="cq-notes-switcher-grid">
               {sortedAndFilteredNotes.map((n) => {
                 const accent =
                   ACCENT_COLORS.find((c) => c.id === n.color) || ACCENT_COLORS[0];
@@ -1024,17 +1067,8 @@ export const NotesView: React.FC<NotesViewProps> = ({
                   <div
                     key={`switcher-card-${n.id}`}
                     data-testid={`note-switcher-card-${n.id}`}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={isActive}
                     onClick={() => {
                       setActiveNoteId(n.id);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        setActiveNoteId(n.id);
-                      }
                     }}
                     className={`text-left p-2.5 rounded-xl border transition cursor-pointer flex flex-col justify-between gap-1.5 ${
                       isActive
@@ -1043,21 +1077,29 @@ export const NotesView: React.FC<NotesViewProps> = ({
                     }`}
                   >
                     <div className="flex items-center justify-between gap-1.5">
-                      <div className="flex items-center gap-1.5 min-w-0">
+                      <button
+                        type="button"
+                        aria-pressed={isActive}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveNoteId(n.id);
+                        }}
+                        className="flex items-center gap-1.5 min-w-0 flex-1 text-left rounded px-0.5 py-0.5"
+                      >
                         <span
                           className={`w-2 h-2 rounded-full shrink-0 ${accent.dotClass}`}
                         />
                         <span className="text-xs font-semibold text-white truncate">
                           {n.title || 'Untitled'}
                         </span>
-                      </div>
+                      </button>
                       <div className="flex items-center gap-1 shrink-0">
                         <button
                           type="button"
                           aria-label={`${n.pinned ? 'Unpin' : 'Pin'} ${n.title || 'Untitled'}`}
                           onClick={(e) => handleTogglePinNoteById(n.id, e)}
-                          className={`p-1 rounded hover:bg-slate-800 transition ${
-                            n.pinned ? 'text-indigo-400' : 'text-slate-500 hover:text-slate-300'
+                          className={`w-6 h-6 flex items-center justify-center rounded hover:bg-slate-800 transition ${
+                            n.pinned ? 'text-indigo-400' : 'text-slate-400 hover:text-slate-200'
                           }`}
                         >
                           <Pin className="w-3 h-3" aria-hidden="true" />
@@ -1065,11 +1107,11 @@ export const NotesView: React.FC<NotesViewProps> = ({
                       </div>
                     </div>
 
-                    <p className="text-[11px] text-slate-400 line-clamp-2 leading-snug">
+                    <p className="text-[11px] text-slate-300 line-clamp-2 leading-snug">
                       {snippet}
                     </p>
 
-                    <div className="flex items-center justify-between text-[10px] text-slate-500 pt-0.5 border-t border-slate-800/60">
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 pt-0.5 border-t border-slate-800/60">
                       <span>{noteWords} words</span>
                       {(n.tags || []).length > 0 && (
                         <span className="text-indigo-300 truncate max-w-[110px]">
@@ -1085,12 +1127,10 @@ export const NotesView: React.FC<NotesViewProps> = ({
         )}
       </div>
 
-      {/* Voice Dictation Bar */}
+      {/* Voice Dictation Bar (Scoped to Voice & STT Controls) */}
       <VoiceBar
         onTranscript={handleVoiceTranscript}
         onInsertTimestamp={handleInsertTimestamp}
-        onCopyNote={handleCopyNoteContent}
-        onExportNote={handleExportNote}
         isPanelOpen={isPanelOpen}
         onDictatingChange={onDictatingChange}
         promptContext={currentNote.body.slice(-240)}
@@ -1099,8 +1139,8 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
       {/* Note Title, Organization Tags & Markdown Editor */}
       <div className="flex-1 flex flex-col bg-slate-950/60 border border-slate-800/90 rounded-2xl overflow-hidden">
-        {/* Note Header: Title + Pin + Color Accent + Undo/Redo + Clear/Delete */}
-        <div className="px-4 py-2 border-b border-slate-800/80 flex items-center justify-between gap-2">
+        {/* Note Header: Title + Pin + Color Accent + Copy/Export + Undo/Redo + Clear/Delete */}
+        <div className="px-3.5 py-2 border-b border-slate-800/80 flex items-center justify-between gap-2">
           <input
             id="note-title-input"
             type="text"
@@ -1110,13 +1150,13 @@ export const NotesView: React.FC<NotesViewProps> = ({
               handleUpdateCurrentNote({ title: e.target.value }, false)
             }
             placeholder="Note Title..."
-            className="bg-transparent text-sm font-semibold text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 rounded px-1 -mx-1 w-full"
+            className="bg-transparent text-sm font-semibold text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 rounded px-1 -mx-1 min-w-0 flex-1"
           />
 
-          <div className="flex items-center gap-1 shrink-0">
-            {/* Color Accent Dots */}
+          <div className="flex items-center gap-0.5 shrink-0">
+            {/* Color Accent Dots (24x24px hit targets, container-query responsive) */}
             <div
-              className="hidden sm:flex items-center gap-1 mr-1 px-1.5 py-1 rounded-lg bg-slate-900/80 border border-slate-800"
+              className="cq-show-440 items-center gap-0.5 mr-1 px-1 py-0.5 rounded-lg bg-slate-900/80 border border-slate-800"
               role="group"
               aria-label="Note Color Tag"
             >
@@ -1127,12 +1167,16 @@ export const NotesView: React.FC<NotesViewProps> = ({
                   aria-label={`Set note color ${c.id}`}
                   aria-pressed={(currentNote.color || 'indigo') === c.id}
                   onClick={() => handleUpdateCurrentNote({ color: c.id }, false)}
-                  className={`w-2.5 h-2.5 rounded-full transition ${c.dotClass} ${
-                    (currentNote.color || 'indigo') === c.id
-                      ? 'ring-2 ring-white scale-110'
-                      : 'opacity-50 hover:opacity-100'
-                  }`}
-                />
+                  className="w-6 h-6 flex items-center justify-center rounded-md hover:bg-slate-800 transition"
+                >
+                  <span
+                    className={`w-2.5 h-2.5 rounded-full transition ${c.dotClass} ${
+                      (currentNote.color || 'indigo') === c.id
+                        ? 'ring-2 ring-white scale-110'
+                        : 'opacity-60 hover:opacity-100'
+                    }`}
+                  />
+                </button>
               ))}
             </div>
 
@@ -1142,13 +1186,33 @@ export const NotesView: React.FC<NotesViewProps> = ({
               aria-label={currentNote.pinned ? 'Unpin Note' : 'Pin Note'}
               aria-pressed={Boolean(currentNote.pinned)}
               title={currentNote.pinned ? 'Unpin Note' : 'Pin Note to Front'}
-              className={`p-1 rounded transition ${
+              className={`w-7 h-7 flex items-center justify-center rounded-lg transition ${
                 currentNote.pinned
                   ? 'text-indigo-400 bg-indigo-500/15'
-                  : 'text-slate-400 hover:text-indigo-300'
+                  : 'text-slate-400 hover:text-indigo-300 hover:bg-slate-900'
               }`}
             >
               <Pin className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              onClick={handleCopyNoteContent}
+              aria-label="Copy Note"
+              title="Copy Note Markdown"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-900 transition"
+            >
+              <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              onClick={handleExportNote}
+              aria-label="Export Note"
+              title="Download Note as Markdown (.md)"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-900 transition"
+            >
+              <Download className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
 
             <button
@@ -1157,7 +1221,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               disabled={!canUndo}
               aria-label="Undo Note Edit"
               title="Undo (Ctrl+Z)"
-              className="text-slate-400 hover:text-white disabled:opacity-30 disabled:pointer-events-none p-1 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-900 disabled:opacity-30 disabled:pointer-events-none transition"
             >
               <Undo2 className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1168,7 +1232,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               disabled={!canRedo}
               aria-label="Redo Note Edit"
               title="Redo (Ctrl+Y)"
-              className="text-slate-400 hover:text-white disabled:opacity-30 disabled:pointer-events-none p-1 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-900 disabled:opacity-30 disabled:pointer-events-none transition"
             >
               <Redo2 className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1179,7 +1243,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               aria-label="Clear Note Text"
               title="Clear Note Text"
               disabled={!currentNote.body}
-              className="text-slate-400 hover:text-amber-300 disabled:opacity-30 disabled:pointer-events-none p-1 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-amber-300 hover:bg-slate-900 disabled:opacity-30 disabled:pointer-events-none transition"
             >
               <Eraser className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1194,7 +1258,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
                   : 'Delete Note'
               }
               disabled={notes.length <= 1}
-              className="text-slate-400 hover:text-rose-400 disabled:opacity-40 disabled:pointer-events-none p-1 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-900 disabled:opacity-40 disabled:pointer-events-none transition"
             >
               <Trash className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1203,13 +1267,13 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
         {/* Markdown Formatting Toolbar + Tags + View Mode Switcher */}
         <div className="px-3 py-1.5 bg-slate-900/50 border-b border-slate-800/70 flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-0.5">
+          <div className="flex items-center gap-0.5 flex-wrap">
             <button
               type="button"
               onClick={() => handleFormatMarkdown('bold')}
               aria-label="Format Bold"
               title="Bold (**text**)"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
             >
               <Bold className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1218,7 +1282,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               onClick={() => handleFormatMarkdown('italic')}
               aria-label="Format Italic"
               title="Italic (*text*)"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
             >
               <Italic className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1227,7 +1291,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               onClick={() => handleFormatMarkdown('heading')}
               aria-label="Format Heading"
               title="Heading (###)"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
             >
               <Heading2 className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1236,7 +1300,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               onClick={() => handleFormatMarkdown('bullet')}
               aria-label="Insert Bullet List"
               title="Bullet List (- item)"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
             >
               <List className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1245,7 +1309,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               onClick={() => handleFormatMarkdown('task')}
               aria-label="Insert Task Checkbox"
               title="Task Checklist (- [ ] item)"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-300 hover:bg-slate-800 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-indigo-300 hover:bg-slate-800 transition"
             >
               <CheckSquare className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1254,7 +1318,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               onClick={() => handleFormatMarkdown('code')}
               aria-label="Format Inline Code"
               title="Inline Code (`code`)"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
             >
               <Code className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1263,7 +1327,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               onClick={() => handleFormatMarkdown('mermaid')}
               aria-label="Insert Mermaid Diagram"
               title="Insert Mermaid Diagram Block (```mermaid)"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-300 hover:bg-slate-800 transition"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-emerald-300 hover:bg-slate-800 transition"
             >
               <GitBranch className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
@@ -1275,14 +1339,14 @@ export const NotesView: React.FC<NotesViewProps> = ({
               {(currentNote.tags || []).map((tag) => (
                 <span
                   key={tag}
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 text-[10px]"
+                  className="inline-flex items-center gap-0.5 pl-1.5 pr-0.5 py-0.5 rounded-md bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 text-[10px]"
                 >
                   #{tag}
                   <button
                     type="button"
                     aria-label={`Remove tag ${tag}`}
                     onClick={() => handleRemoveTag(tag)}
-                    className="hover:text-white"
+                    className="w-5 h-5 inline-flex items-center justify-center rounded hover:bg-indigo-500/20 hover:text-white transition"
                   >
                     <X className="w-2.5 h-2.5" aria-hidden="true" />
                   </button>
@@ -1298,7 +1362,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
                     onBlur={() => setShowTagInput(false)}
                     placeholder="tag..."
                     autoFocus
-                    className="w-16 px-1.5 py-0.5 rounded bg-slate-900 border border-indigo-500/50 text-[10px] text-white focus:outline-none"
+                    className="w-16 min-h-[24px] px-1.5 py-0.5 rounded bg-slate-900 border border-indigo-500/50 text-[10px] text-white focus:outline-none"
                   />
                 </form>
               ) : (
@@ -1307,7 +1371,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
                   onClick={() => setShowTagInput(true)}
                   aria-label="Add Tag"
                   title="Add Category Tag"
-                  className="px-1.5 py-0.5 rounded-md text-[10px] text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center gap-0.5"
+                  className="min-h-[24px] px-2 py-0.5 rounded-md text-[10px] text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1"
                 >
                   <Tag className="w-2.5 h-2.5" aria-hidden="true" /> Tag
                 </button>
@@ -1325,7 +1389,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               type="button"
               onClick={() => setViewMode('edit')}
               aria-pressed={viewMode === 'edit'}
-              className={`px-2 py-0.5 rounded-md flex items-center gap-1 transition ${
+              className={`min-h-[24px] px-2 py-0.5 rounded-md flex items-center gap-1 transition ${
                 viewMode === 'edit'
                   ? 'bg-indigo-600 text-white'
                   : 'text-slate-400 hover:text-white'
@@ -1337,7 +1401,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               type="button"
               onClick={() => setViewMode('split')}
               aria-pressed={viewMode === 'split'}
-              className={`px-2 py-0.5 rounded-md flex items-center gap-1 transition ${
+              className={`min-h-[24px] px-2 py-0.5 rounded-md flex items-center gap-1 transition ${
                 viewMode === 'split'
                   ? 'bg-indigo-600 text-white'
                   : 'text-slate-400 hover:text-white'
@@ -1349,7 +1413,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               type="button"
               onClick={() => setViewMode('preview')}
               aria-pressed={viewMode === 'preview'}
-              className={`px-2 py-0.5 rounded-md flex items-center gap-1 transition ${
+              className={`min-h-[24px] px-2 py-0.5 rounded-md flex items-center gap-1 transition ${
                 viewMode === 'preview'
                   ? 'bg-indigo-600 text-white'
                   : 'text-slate-400 hover:text-white'
@@ -1360,10 +1424,10 @@ export const NotesView: React.FC<NotesViewProps> = ({
           </div>
         </div>
 
-        {/* Editor & Interactive Markdown Preview Area */}
+        {/* Editor & Interactive Markdown Preview Area (Container-responsive Split stack) */}
         <div
-          className={`flex-1 flex overflow-hidden ${
-            viewMode === 'split' ? 'divide-x divide-slate-800/80' : ''
+          className={`flex-1 overflow-hidden ${
+            viewMode === 'split' ? 'cq-split-editor' : 'flex'
           }`}
         >
           {viewMode !== 'preview' && (
@@ -1400,8 +1464,8 @@ export const NotesView: React.FC<NotesViewProps> = ({
               }}
               placeholder="Start typing or click the microphone above for real-time local voice dictation at your cursor..."
               className={`${
-                viewMode === 'split' ? 'w-1/2' : 'w-full'
-              } h-full bg-transparent p-4 text-xs sm:text-sm text-slate-200 placeholder-slate-400 leading-relaxed focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500/40 resize-none select-text overflow-y-auto`}
+                viewMode === 'split' ? 'cq-split-pane' : 'w-full h-full'
+              } bg-transparent p-4 text-xs sm:text-sm text-slate-200 placeholder-slate-400 leading-relaxed focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500/40 resize-none select-text overflow-y-auto`}
             />
           )}
 
@@ -1410,13 +1474,13 @@ export const NotesView: React.FC<NotesViewProps> = ({
               data-testid="note-markdown-preview"
               aria-label="Markdown & Task Checklist Preview"
               className={`${
-                viewMode === 'split' ? 'w-1/2' : 'w-full'
-              } h-full p-4 overflow-y-auto bg-slate-950/30`}
+                viewMode === 'split' ? 'cq-split-pane' : 'w-full h-full'
+              } p-4 overflow-y-auto bg-slate-950/30`}
             >
               {viewMode === 'split' && (
                 <div className="mb-2 pb-1 border-b border-slate-800/80 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-indigo-400">
                   <span>Live Markdown Preview</span>
-                  <span className="text-slate-500 font-normal normal-case">
+                  <span className="text-slate-400 font-normal normal-case">
                     Rendered Output
                   </span>
                 </div>

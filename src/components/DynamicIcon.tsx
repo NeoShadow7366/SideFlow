@@ -19,6 +19,7 @@ import {
   Mic,
   Code,
   Layers,
+  Monitor,
   Zap,
   LucideProps,
 } from 'lucide-react';
@@ -45,6 +46,7 @@ const iconMap: Record<string, React.ComponentType<LucideProps>> = {
   mic: Mic,
   code: Code,
   layers: Layers,
+  monitor: Monitor,
   zap: Zap,
 };
 

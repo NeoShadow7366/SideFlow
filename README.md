@@ -1,6 +1,6 @@
 # SideFlow — Background Slide-Out Desktop Utility Panel
 
-**SideFlow** is a cross-platform, always-available desktop background utility built with **Electron**, **React 18**, **TypeScript**, **Tailwind CSS**, and **Lucide Icons**. Designed for developers, architects, and power users, SideFlow lives quietly in the OS system tray (`skipTaskbar: true`) and slides out smoothly from the right edge of the primary monitor via a configurable global keyboard shortcut (default: `Alt + Space`), system tray menu, or a subtle screen-edge peek handle.
+**SideFlow** is a cross-platform, always-available desktop background utility built with **Electron**, **React 18**, **TypeScript**, **Tailwind CSS**, and **Lucide Icons**. Designed for developers, architects, and power users, SideFlow lives quietly in the OS system tray (`skipTaskbar: true`) and slides out smoothly from the left or right edge of your primary or multi-monitor setup via a configurable global keyboard shortcut (default: `Alt + Space`), system tray menu, or subtle screen-edge peek handles.
 
 It unifies three high-frequency daily workflows into a single zero-context-switching glassmorphic panel—and includes an interactive **Desktop Simulation Mode** when run in a standard web browser.
 
@@ -68,13 +68,21 @@ Capture meeting notes, sprint tasks, and voice memos with zero friction:
 - **Quick Note Utilities:** One-click **Insert Timestamp** (`[HH:MM AM/PM]`), one-click **Copy Note** to clipboard, and a live word/character counter with automatic local save indicator.
 
 ### 1.4 Configurable Global Hotkey Recorder & Window Management
-Customize how SideFlow integrates with your desktop environment:
+Customize how SideFlow integrates with your desktop and multi-monitor environment:
 - **Interactive Keybinding Recorder:** In the **Settings** tab, click *"Click & Press New Shortcut Combo"* and press any modifier + key combination (e.g., `Alt + Space`, `Ctrl + Shift + Space`, `Alt + Q`). SideFlow updates the UI state and dynamically re-binds Electron's `globalShortcut.register()` via IPC, updating the System Tray tooltip and context menu label in real time.
 - **Pin vs. Auto-Hide Mode:**
   - **Pinned:** Keeps the panel open alongside other desktop windows.
   - **Auto-Hide (Unpinned):** Automatically retracts the panel when the window loses focus (`window-blur` event in Electron or clicking the desktop background in Web Simulation mode).
-- **Screen-Edge Peek Handle:** When retracted, an optional subtle handle remains docked on the right monitor edge (`#edge-peek-handle`) for instant mouse-click activation.
-- **Workspace Backup & Reset:** Export all drawers, flowcharts, notes, and shortcut settings as a portable `sideflow-backup.json` file or restore factory defaults with one click.
+- **Multi-Monitor Display & Screen Routing:** Configure how SideFlow spans connected displays from **Settings** or the System Tray **Monitor Display** submenu:
+  - **Primary Only (`primary`):** Docks SideFlow exclusively on the OS primary display.
+  - **Single Monitor (`single`):** Pins SideFlow to any specific connected display (`targetDisplayId`).
+  - **All Monitors (`all`):** Follow-mouse mode—pressing the global shortcut opens or moves SideFlow onto the monitor currently holding the mouse cursor, while secondary monitors display companion edge tabs.
+  - **Selected Monitors (`custom`):** Enables follow-mouse routing and companion edge tabs across a user-selected subset of monitors (`enabledDisplayIds`), ensuring at least one monitor always stays active.
+  - **Per-Monitor Bezel Edge Overrides:** Override global Left/Right docking per monitor (`Default`, `Left`, `Right`) or click **Use Outer Bezels** to automatically dock on the leftmost display's left bezel and rightmost display's right bezel.
+- **Screen-Edge Peek Handle & Companion Edge-Tab Windows:** When retracted, an optional click-through-aware peek handle (`#edge-peek-handle`) remains docked on the active monitor's configured edge (displaying a pulsing indicator whenever voice dictation is active). When multiple monitors are enabled (`all` or `custom`), lightweight frameless **Companion Edge-Tab** windows (`40×96px`, `electron/edge-tab.html`) appear on secondary enabled monitors for one-click cross-monitor summoning—paired with an interactive multi-monitor simulation bar in Web Preview Mode.
+- **Left / Right Panel Edge & Custom Width:** Dock the panel to either the **Left** or **Right** screen edge (`sideflow_panel_edge`) and adjust extended panel width from **15% to 90%** of the active display's work area (`sideflow_panel_width_percent`, default `35%`, minimum `320px`) via Settings presets/slider or by dragging/keyboard-adjusting (`ArrowLeft`/`ArrowRight`, `Home`/`End`) the panel's inner resize border.
+- **GitHub Auto-Updates & Login Startup:** Built-in `electron-updater` checks GitHub Releases automatically on launch and every 4 hours, providing live download progress, one-click **Restart & Install Update**, and a **Start SideFlow at Login** toggle (`sideflow_open_at_login`) in Settings and the System Tray menu.
+- **Workspace Backup, Import & Reset:** Export or import all drawers, flowcharts, notes, shortcut bindings, panel dimensions, and multi-monitor routing settings as a portable `sideflow-backup.json` file, or restore factory defaults with one click.
 
 ---
 
@@ -85,16 +93,18 @@ SideFlow uses a strict process-isolated Electron architecture paired with a dual
 ```mermaid
 flowchart TB
     subgraph OS["Operating System Layer (Windows / macOS)"]
-        Tray["System Tray Icon & Context Menu"]
+        Tray["System Tray Icon & Monitor Submenu"]
         Hotkey["Global Shortcut Listener (Alt+Space)"]
         Shell["Native OS Shell (openExternal / openPath / exec)"]
         FS["AppData JSON Store (sideflow-config.json)"]
     end
 
     subgraph Main["Electron Main Process (electron/main.ts)"]
-        WinMgr["Frameless Transparent BrowserWindow (560px Right-Docked)"]
-        IPCMain["ipcMain Handlers & Event Emitters"]
-        Dialog["Native File Picker (dialog.showOpenDialog)"]
+        WinMgr["Frameless Transparent BrowserWindow (Left/Right & Multi-Monitor)"]
+        EdgeTabs["Companion Edge-Tab Windows (electron/edge-tab.html)"]
+        IPCMain["ipcMain Handlers & Sender-Validated Event Emitters"]
+        Dialog["Native File & Directory Pickers (dialog.showOpenDialog)"]
+        Updater["GitHub Auto-Updater (electron-updater)"]
     end
 
     subgraph Preload["Isolated Preload Bridge (electron/preload.ts)"]
@@ -106,17 +116,19 @@ flowchart TB
         App["App.tsx (Slide-Out Container, Hotkey Recorder, Tray Simulator)"]
         Dock["DockView / DrawerCard / AppTile"]
         Flow["FlowCanvas / LucidModal (Mermaid & SVG Engine)"]
-        Notes["NotesView / VoiceBar (Web Speech API)"]
+        Notes["NotesView / VoiceBar (Hybrid Local & Web STT)"]
         Settings["SettingsView / ElectronModal"]
         Storage["useLocalStorage Hook (localStorage + IPC Store Sync)"]
     end
 
-    Hotkey -->|"Triggers Toggle"| WinMgr
-    Tray -->|"Menu Navigation & Toggle"| WinMgr
-    WinMgr <-->|"set-panel-visibility / switch-tab / window-blur"| Bridge
+    Hotkey -->|"Triggers Cursor/Display Toggle"| WinMgr
+    Tray -->|"Menu Navigation, Monitor Select & Toggle"| WinMgr
+    WinMgr <-->|"syncEdgeTabWindows / edge-tab-clicked"| EdgeTabs
+    WinMgr <-->|"set-panel-visibility / switch-tab / window-blur / display-state-changed"| Bridge
     Bridge <-->|"IPC Invoke & Send"| IPCMain
     IPCMain -->|"launch-native-app"| Shell
-    IPCMain -->|"open-file-dialog"| Dialog
+    IPCMain -->|"open-file-dialog / open-directory-dialog"| Dialog
+    IPCMain <-->|"check-for-updates / update-status-changed"| Updater
     IPCMain <-->|"store-get-all / store-set"| FS
     App --> Dock
     App --> Flow
@@ -126,14 +138,14 @@ flowchart TB
     Storage <-->|"Hydrate & Persist"| Bridge
     Dock -->|"Native Drag & Drop"| WebUtils
     Dock -->|"Execute App / URI"| Bridge
-    Settings -->|"update-global-shortcut"| Bridge
+    Settings -->|"update-global-shortcut / set-monitor-settings"| Bridge
 ```
 
 ### Technology Stack Summary
 
 | Layer | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Desktop Shell** | **Electron 33** (`electron`, `electron-builder`) | Frameless transparent always-on-top window, System Tray, `globalShortcut`, native file & URI execution |
+| **Desktop Shell** | **Electron 33** (`electron`, `electron-builder`, `electron-updater`) | Sandboxed frameless always-on-top overlay, multi-monitor companion edge tabs, System Tray, `globalShortcut`, GitHub auto-updates, native file & URI execution |
 | **Frontend UI** | **React 18.3** + **TypeScript 5.7** | Component architecture, strongly typed state, custom hooks |
 | **Build Tooling** | **Vite 6** + `concurrently` + `wait-on` | Instant HMR for web and synchronized Electron development |
 | **Styling** | **Tailwind CSS 3.4** + Custom CSS3 Physics | Dark glassmorphism (`backdrop-blur-2xl`), cubic-bezier slide transitions, ObjectDock hover scaling |
@@ -148,8 +160,11 @@ flowchart TB
 ```text
 SideFlow/
 ├── electron/
-│   ├── main.ts                         # Electron Main Process: BrowserWindow, Tray, globalShortcut, IPC, JSON store
+│   ├── main.ts                         # Electron Main Process: BrowserWindow, multi-monitor companion windows, Tray, auto-updater, IPC, JSON store
 │   ├── preload.ts                      # ContextBridge exposing safe window.sideflow API & webUtils.getPathForFile
+│   ├── edge-tab.html                   # Lightweight frameless companion edge-tab window shell for secondary monitors
+│   ├── edge-tab.js                     # Companion edge-tab renderer logic (hover click-through toggle, dictation badge, click-to-summon)
+│   ├── stt_worker.py                   # Optional local Python faster-whisper / CUDA / CPU speech-to-text worker
 │   └── icon.png                        # System tray & application icon asset
 ├── src/
 │   ├── components/
@@ -162,25 +177,30 @@ SideFlow/
 │   │   │   └── LucidModal.tsx          # Bi-directional Mermaid.js generator/parser & Lucidchart launcher
 │   │   ├── Notes/
 │   │   │   ├── NotesView.tsx           # Multi-note tab bar, title/body editor, word/char counter
-│   │   │   └── VoiceBar.tsx            # Web Speech API continuous dictation controller & timestamp/copy tools
+│   │   │   └── VoiceBar.tsx            # Web Speech API & local Whisper continuous dictation controller & tools
 │   │   ├── Settings/
-│   │   │   └── SettingsView.tsx        # Global hotkey recorder, Pin/Auto-Hide, Edge Handle, JSON backup/reset
+│   │   │   └── SettingsView.tsx        # Hotkey recorder, multi-monitor routing, panel edge/width, auto-updates, JSON backup/import/reset
 │   │   ├── DynamicIcon.tsx             # Maps icon identifier strings to Lucide React components
 │   │   ├── ElectronModal.tsx           # Reference modal displaying native Electron wrapper setup & code
-│   │   └── Header.tsx                  # Panel header with Pin/Auto-Hide badge, tab switcher, and collapse controls
+│   │   ├── Header.tsx                  # Panel header with Pin/Auto-Hide toggle button, tab switcher, and collapse controls
+│   │   ├── Modal.tsx                   # Accessible WCAG 2.2 AA dialog/alertdialog wrapper (focus trap, Escape, focus restore)
+│   │   └── SideFlowIcon.tsx            # Branded SVG application emblem component
 │   ├── hooks/
 │   │   └── useLocalStorage.ts          # Persistent state hook synced with localStorage and Electron userData store
 │   ├── test/
 │   │   └── setup.ts                    # Vitest + @testing-library/jest-dom test environment setup
 │   ├── types/
-│   │   └── sideflow.ts                 # Core TypeScript interfaces (AppDrawer, AppItem, FlowNode, NoteItem, etc.)
+│   │   └── sideflow.ts                 # Core TypeScript interfaces (AppDrawer, FlowNode, MonitorSettings, AppUpdateState, etc.)
 │   ├── utils/
-│   │   ├── defaults.ts                 # Default drawers, starter flowchart, sample notes, and default shortcut
+│   │   ├── defaults.ts                 # Default drawers, starter flowchart, sample notes, shortcut, and multi-monitor routing helpers
 │   │   ├── fileMeta.ts                 # File path extraction, extension-based icon/color inference, app execution
-│   │   └── mermaid.ts                  # Flowchart-to-Mermaid compiler, Mermaid-to-Flowchart parser, standalone SVG exporter
-│   ├── App.tsx                         # Root slide-out container, global key listener, and Web Desktop Simulation view
+│   │   ├── localSttEngine.ts           # Hybrid local/WebGPU/native speech-to-text audio capture & dispatch engine
+│   │   ├── mermaid.ts                  # Flowchart-to-Mermaid compiler, Mermaid-to-Flowchart parser, standalone SVG exporter
+│   │   └── whisperWorker.ts            # WebGPU / WASM Transformers.js Whisper & Moonshine worker
+│   ├── App.tsx                         # Root slide-out container, resize handle, global key listener, and Web Desktop Simulation view
 │   ├── index.css                       # Tailwind directives, cubic-bezier transitions, ObjectDock hover & pulse animations
 │   └── main.tsx                        # React 18 DOM entry point
+├── CHANGELOG.md                        # Versioned release notes (Keep a Changelog)
 ├── index.html                          # HTML shell
 ├── package.json                        # Scripts, dependencies, and electron-builder packaging configuration
 ├── postcss.config.js                   # PostCSS configuration for Tailwind CSS
@@ -208,7 +228,7 @@ npm install
 
 ### 4.2 Development Web Mode
 
-Run SideFlow in a standard web browser with Vite's Hot Module Replacement (HMR). When opened outside Electron, SideFlow automatically enables **Desktop Simulation Mode**, providing an interactive desktop background, top helper banner, and simulated OS taskbar/system tray menu:
+Run SideFlow in a standard web browser with Vite's Hot Module Replacement (HMR). When opened outside Electron, SideFlow automatically enables **Desktop Simulation Mode**, providing an interactive desktop background, top helper banner, multi-monitor cursor/edge-tab simulator, and simulated OS taskbar/system tray menu:
 
 ```bash
 # Start Vite dev server at http://localhost:5173
@@ -220,7 +240,7 @@ npm run preview
 
 ### 4.3 Native Electron Tray Mode
 
-Launch SideFlow as a frameless, right-docked native desktop overlay with live HMR, OS-level `Alt + Space` shortcut registration, System Tray icon, and native `.exe` / `.app` / URI launching:
+Launch SideFlow as a frameless, edge-docked native desktop overlay with live HMR, OS-level `Alt + Space` shortcut registration, System Tray icon, multi-monitor companion edge tabs, and native `.exe` / `.app` / URI launching:
 
 ```bash
 # Run Vite dev server + compile Electron TypeScript + launch Electron concurrently
@@ -243,6 +263,9 @@ npm run electron:pack
 
 # Build distributable installers (NSIS & Portable .exe on Windows, .dmg on macOS) into release/
 npm run electron:dist
+
+# Build Windows NSIS installer and publish update artifacts to GitHub Releases
+npm run electron:publish
 ```
 
 ### 4.5 Running Automated Tests
@@ -263,38 +286,109 @@ npm run test:watch
 
 ### 5.1 Electron IPC Channels
 
-Implemented in [`electron/main.ts`](file:///g:/SideFlow/electron/main.ts) and bridged in [`electron/preload.ts`](file:///g:/SideFlow/electron/preload.ts):
+Implemented in [`electron/main.ts`](electron/main.ts) (with `isMainSender` and `isCompanionSender` origin verification on IPC handlers) and bridged in [`electron/preload.ts`](electron/preload.ts):
 
 | IPC Channel | Direction | Transport | Payload | Behavior |
 | :--- | :--- | :--- | :--- | :--- |
-| `launch-native-app` | Renderer $\rightarrow$ Main | `invoke` / `send` | `command: string` | Launches `http(s)://` URLs and custom URI schemes (`vscode://`, `spotify://`, etc.) via `shell.openExternal(command)`. Launches local file paths, scripts, and executables via `shell.openPath(command)` with a `child_process.exec` fallback. Returns `{ success: boolean; error?: string }`. |
-| `update-global-shortcut` | Renderer $\rightarrow$ Main | `invoke` / `send` | `accelerator: string` | Calls `globalShortcut.unregisterAll()`, normalizes and registers the new Electron accelerator (e.g., `Alt+Space`), and refreshes the System Tray menu and tooltip. Returns `boolean`. |
-| `set-panel-visibility` | Bidirectional | `send` | `visible: boolean` | **Renderer $\rightarrow$ Main:** Updates `isPanelVisible` state in main process and calls `mainWindow.show()` / `mainWindow.focus()` when opening.<br>**Main $\rightarrow$ Renderer:** Triggered by the global hotkey or System Tray toggle to animate the slide-out panel open or closed. |
-| `open-file-dialog` | Renderer $\rightarrow$ Main | `invoke` | `void` | Opens the native OS file chooser (`dialog.showOpenDialog` with `['openFile', 'multiSelections']`) and returns `Promise<string[]>` of selected file paths. |
-| `store-get-all` | Renderer $\rightarrow$ Main | `invoke` | `void` | Reads and parses `sideflow-config.json` from `app.getPath('userData')`, returning `Promise<Record<string, unknown>>`. |
-| `store-set` | Renderer $\rightarrow$ Main | `send` | `{ key: string; value: unknown }` | Persists a key-value pair to `sideflow-config.json` in `app.getPath('userData')`. |
-| `switch-tab` | Main $\rightarrow$ Renderer | `webContents.send` | `tab: TabId` | Dispatched when the user selects *Open App Drawers*, *Quick Flowchart*, *Voice Dictation Notes*, or *Configure Hotkey & Settings* from the native System Tray menu. |
-| `window-blur` | Main $\rightarrow$ Renderer | `webContents.send` | `void` | Emitted when `mainWindow` loses OS focus (`blur` event), allowing the renderer to auto-retract the panel when in **Auto-Hide** (unpinned) mode. |
+| `launch-native-app` | Renderer → Main | `invoke` | `command: string, args?: string[]` | Launches `http(s)://` URLs and custom URI schemes (`vscode://`, `spotify://`, etc.) via `shell.openExternal(command)`. Launches local file paths, scripts, and executables via `shell.openPath()` / `child_process`. Returns `{ success: boolean; error?: string }`. |
+| `update-global-shortcut` | Renderer → Main | `invoke` | `accelerator: string` | Calls `globalShortcut.unregisterAll()`, normalizes and registers the new Electron accelerator (e.g., `Alt+Space`), and refreshes the System Tray menu and tooltip. Returns `boolean`. |
+| `set-panel-visibility` | Bidirectional | `send` | `visible: boolean` | **Renderer → Main:** Updates `isPanelVisible`, toggles `mainWindow` click-through forwarding, focuses `mainWindow` when opening, and syncs companion edge-tab windows.<br>**Main → Renderer:** Triggered by the global hotkey, companion edge tab, or System Tray toggle to animate the panel open or closed. |
+| `set-panel-edge` | Renderer → Main | `send` | `edge: 'left' \| 'right'` | Sets the global default screen edge, repositions `mainWindow` (cross-DPI safe), persists `sideflow_panel_edge`, and updates companion edge-tab windows. |
+| `set-panel-width-percent` | Renderer → Main | `send` | `widthPercent: number` | Clamps panel width to `15`–`90`% of the active monitor's work area (`min 320px`), updates `mainWindow` bounds, and persists `sideflow_panel_width_percent`. |
+| `set-ignore-mouse-events` | Renderer → Main | `send` | `ignore: boolean` | Enables or disables OS mouse click-through (`{ forward: true }`) on `mainWindow` when retracted so underlying desktop windows stay interactive while `#edge-peek-handle` remains hoverable. |
+| `get-display-state` | Renderer → Main | `invoke` | `void` | Enumerates connected monitors via Electron `screen`, resolves active display and effective bezel edge, and returns `Promise<DisplayStatePayload>`. |
+| `set-monitor-settings` | Renderer → Main | `invoke` | `settings: MonitorSettings` | Sanitizes and persists `sideflow_monitor_settings`, updates `mainWindow` bounds, refreshes the System Tray **Monitor Display** submenu, syncs companion edge-tab windows, and returns `Promise<DisplayStatePayload>`. |
+| `activate-display` | Renderer → Main | `invoke` | `{ displayId: number; openPanel?: boolean } \| number` | Moves `mainWindow` onto the target enabled display (cross-DPI safe) and optionally opens/focuses the panel, returning `Promise<DisplayStatePayload>`. |
+| `display-state-changed` | Main → Renderer | `webContents.send` | `DisplayStatePayload` | Broadcast when monitors are connected/disconnected/rescaled (`display-added`, `display-removed`, `display-metrics-changed`) or when monitor routing changes from the System Tray or Settings. |
+| `set-edge-handle-state` | Renderer → Main | `send` | `{ showEdgeHandle: boolean; isDictating: boolean; shortcutLabel: string }` | Synchronizes peek-handle visibility, active voice-dictation status indicator, and shortcut tooltip text to secondary companion edge-tab windows. |
+| `prepare-edge-tab-click` | Companion → Main | `send` | `void` | Temporarily suppresses `mainWindow` blur auto-retraction while interacting with a secondary monitor's companion edge tab. |
+| `edge-tab-clicked` | Companion → Main | `send` | `displayId: number` | Summons and focuses the main SideFlow panel onto the clicked companion edge tab's monitor. |
+| `set-companion-ignore-mouse` | Companion → Main | `send` | `{ displayId: number; ignore: boolean }` | Toggles OS click-through forwarding on a specific secondary companion `BrowserWindow` when hovering its visible tab button. |
+| `edge-tab-update` | Main → Companion | `webContents.send` | `{ displayId, edge, isDictating, shortcutLabel, displayName?, isOpenElsewhere? }` | Pushes live bezel side, voice-dictation badge state, and tooltip updates to secondary companion edge-tab windows. |
+| `open-file-dialog` | Renderer → Main | `invoke` | `void` | Opens the native OS file chooser (`['openFile', 'multiSelections']`) and returns `Promise<string[]>`. |
+| `open-directory-dialog` | Renderer → Main | `invoke` | `void` | Opens the native OS folder picker (`['openDirectory']`) for live folder-synced drawers and returns `Promise<string \| null>`. |
+| `read-directory-items` | Renderer → Main | `invoke` | `dirPath: string` | Reads directory entries and extracted native file icons for live folder-synced drawers, returning `Promise<DirectoryEntryItem[]>`. |
+| `extract-file-icon` / `resolve-shortcut-item` | Renderer → Main | `invoke` | `filePath: string` | Resolves `.lnk`/executable targets and extracts native OS icons as `data:image/png;base64` URLs. |
+| `get-system-metrics` / `get-running-processes` | Renderer → Main | `invoke` | `void` | Returns live CPU, RAM, uptime metrics (`SystemMetrics`) and active process names for dock running indicators. |
+| `get-local-stt-status` / `transcribe-audio-local` | Renderer → Main | `invoke` | `void` / PCM16 audio payload | Detects local `faster-whisper` (CUDA/CPU) and Windows SAPI availability (`LocalSttStatus`) and transcribes recorded audio buffers offline (`LocalTranscriptionResult`). |
+| `get-auto-launch` / `set-auto-launch` | Renderer → Main | `invoke` | `void` / `enabled: boolean` | Queries or updates OS login startup registration (`app.setLoginItemSettings`) and `sideflow_open_at_login`, returning `Promise<AutoLaunchState>`. |
+| `get-update-status` / `check-for-updates` / `install-update-now` | Renderer → Main | `invoke` | `void` | Reads current `AppUpdateState`, triggers a GitHub Releases check via `electron-updater`, or invokes `autoUpdater.quitAndInstall()`. |
+| `update-status-changed` | Main → Renderer | `webContents.send` | `AppUpdateState` | Streams auto-updater lifecycle transitions (`checking`, `available`, `downloading`, `downloaded`, `not-available`, `error`) and download progress to Settings. |
+| `store-get-all` | Renderer → Main | `invoke` | `void` | Reads and parses `sideflow-config.json` from `app.getPath('userData')`, returning `Promise<Record<string, unknown>>`. |
+| `store-set` | Renderer → Main | `send` | `{ key: string; value: unknown }` | Persists a key-value pair to `sideflow-config.json` in `app.getPath('userData')` and synchronizes main-process handle/monitor/shortcut state. |
+| `switch-tab` | Main → Renderer | `webContents.send` | `tab: TabId` | Dispatched when the user selects *Open App Drawers*, *Quick Flowchart*, *Voice Dictation Notes*, or *Configure Hotkey & Settings* from the native System Tray menu. |
+| `window-blur` | Main → Renderer | `webContents.send` | `void` | Emitted when `mainWindow` loses OS focus (`blur` event), allowing the renderer to auto-retract the panel when in **Auto-Hide** (unpinned) mode. |
 
 ---
 
 ### 5.2 Preload ContextBridge API (`window.sideflow`)
 
-[`electron/preload.ts`](file:///g:/SideFlow/electron/preload.ts) exposes a strongly typed `window.sideflow` object via `contextBridge.exposeInMainWorld('sideflow', sideflowAPI)` with `contextIsolation: true` and `nodeIntegration: false`:
+[`electron/preload.ts`](electron/preload.ts) exposes a strongly typed `window.sideflow` object via `contextBridge.exposeInMainWorld('sideflow', sideflowAPI)` with `contextIsolation: true`, `nodeIntegration: false`, and `sandbox: true`:
 
 ```typescript
 export interface SideFlowElectronBridge {
   isElectron: boolean;
-  launchNativeApp: (command: string) => Promise<{ success: boolean; error?: string }>;
+  launchNativeApp: (command: string, args?: string[]) => Promise<{ success: boolean; error?: string }>;
   updateGlobalShortcut: (accelerator: string) => Promise<boolean>;
   setPanelVisibility: (visible: boolean) => void;
+  setPanelEdge?: (edge: PanelEdge) => void;
+  setPanelWidthPercent?: (widthPercent: number) => void;
+  setIgnoreMouseEvents?: (ignore: boolean) => void;
+  getDisplayState?: () => Promise<DisplayStatePayload>;
+  setMonitorSettings?: (settings: MonitorSettings) => Promise<DisplayStatePayload>;
+  activateDisplay?: (displayId: number, openPanel?: boolean) => Promise<DisplayStatePayload>;
+  setEdgeHandleState?: (state: {
+    showEdgeHandle: boolean;
+    isDictating: boolean;
+    shortcutLabel: string;
+  }) => void;
+  onDisplayStateChanged?: (callback: (state: DisplayStatePayload) => void) => () => void;
+  clickEdgeTab?: (displayId: number) => void;
+  prepareEdgeTabClick?: () => void;
+  setCompanionIgnoreMouse?: (displayId: number, ignore: boolean) => void;
+  onEdgeTabUpdate?: (
+    callback: (payload: {
+      displayId: number;
+      edge: PanelEdge;
+      isDictating: boolean;
+      shortcutLabel: string;
+      displayName?: string;
+      isOpenElsewhere?: boolean;
+    }) => void
+  ) => () => void;
   openFileDialog: () => Promise<string[]>;
+  openDirectoryDialog?: () => Promise<string | null>;
+  readDirectoryItems?: (dirPath: string) => Promise<DirectoryEntryItem[]>;
+  extractFileIcon?: (filePath: string) => Promise<string | null>;
+  resolveShortcutItem?: (rawPathOrName: string) => Promise<{
+    name: string;
+    cmd: string;
+    args?: string;
+    iconDataUrl: string | null;
+  } | null>;
+  getSystemMetrics?: () => Promise<SystemMetrics>;
+  getRunningProcesses?: () => Promise<string[]>;
   getPathForFile: (file: File) => string;
   onSetPanelVisibility: (callback: (visible: boolean) => void) => () => void;
   onSwitchTab: (callback: (tab: TabId) => void) => () => void;
   onWindowBlur: (callback: () => void) => () => void;
   storeGetAll: () => Promise<Record<string, unknown>>;
   storeSet: (key: string, value: unknown) => void;
+  getLocalSttStatus?: () => Promise<LocalSttStatus>;
+  transcribeAudioLocal?: (payload: {
+    pcm16Base64: string;
+    sampleRate: number;
+    lang: string;
+    modelSize?: WhisperModelId;
+    preferEngine?: SttEngineMode;
+    promptContext?: string;
+  }) => Promise<LocalTranscriptionResult>;
+  getAutoLaunch?: () => Promise<AutoLaunchState>;
+  setAutoLaunch?: (enabled: boolean) => Promise<AutoLaunchState>;
+  getUpdateStatus?: () => Promise<AppUpdateState>;
+  checkForUpdates?: () => Promise<AppUpdateState>;
+  installUpdateNow?: () => Promise<{ success: boolean; error?: string }>;
+  onUpdateStatus?: (callback: (state: AppUpdateState) => void) => () => void;
 }
 ```
 
@@ -302,19 +396,49 @@ export interface SideFlowElectronBridge {
 
 ### 5.3 Core TypeScript Data Models (`src/types/sideflow.ts`)
 
-Defined in [`src/types/sideflow.ts`](file:///g:/SideFlow/src/types/sideflow.ts):
+Defined in [`src/types/sideflow.ts`](src/types/sideflow.ts):
 
 ```typescript
 export type AccentColor = 'indigo' | 'cyan' | 'emerald' | 'amber' | 'rose' | 'purple';
 
 export type TabId = 'drawers' | 'flowchart' | 'notes' | 'settings';
 
+export type PanelEdge = 'left' | 'right';
+
+export type MonitorMode = 'primary' | 'single' | 'all' | 'custom';
+
+export interface MonitorDisplayInfo {
+  id: number;
+  index: number;
+  label: string;
+  isPrimary: boolean;
+  bounds: { x: number; y: number; width: number; height: number };
+  workArea: { x: number; y: number; width: number; height: number };
+  scaleFactor: number;
+}
+
+export interface MonitorSettings {
+  mode: MonitorMode;
+  targetDisplayId?: number | null;             // Selected display ID when mode === 'single'
+  enabledDisplayIds?: number[];                // Enabled display IDs when mode === 'custom'
+  edgeOverrides?: Record<string, PanelEdge>;   // Optional per-monitor edge overrides keyed by String(displayId)
+}
+
+export interface DisplayStatePayload {
+  displays: MonitorDisplayInfo[];
+  activeDisplayId: number;
+  effectiveEdge: PanelEdge;
+  monitorSettings: MonitorSettings;
+}
+
 export interface AppItem {
   id: string;
   name: string;
-  cmd: string;       // Full OS file path (C:\...\app.exe) or URI (vscode://)
-  icon: string;      // Lucide icon identifier
+  cmd: string;               // Full OS file path (C:\...\app.exe) or URI (vscode://)
+  icon: string;              // Lucide icon identifier
   color: AccentColor;
+  customIconUrl?: string;
+  hotkey?: string;           // Optional per-app shortcut (e.g., "Alt+1")
 }
 
 export interface AppDrawer {
@@ -322,9 +446,20 @@ export interface AppDrawer {
   title: string;
   collapsed: boolean;
   apps: AppItem[];
+  folderPath?: string;       // Optional synced local folder path
+  sortBy?: 'manual' | 'name' | 'type';
 }
 
-export type FlowNodeType = 'process' | 'decision' | 'start';
+export type FlowNodeType =
+  | 'process'
+  | 'decision'
+  | 'start'
+  | 'database'
+  | 'subroutine'
+  | 'io'
+  | 'circle'
+  | 'hexagon'
+  | 'asymmetric';
 
 export interface FlowNode {
   id: string;
@@ -332,17 +467,28 @@ export interface FlowNode {
   text: string;
   x: number;
   y: number;
+  color?: AccentColor;
+  stereotype?: string;
+  members?: string[];
 }
 
 export interface FlowEdge {
   from: string;
   to: string;
   label?: string;
+  style?: 'solid' | 'dotted' | 'thick';
+  arrow?: 'arrow' | 'none' | 'bidirectional' | 'circle' | 'cross';
+  cardinality?: string;
+  curve?: 'bezier' | 'orthogonal' | 'straight';
 }
 
 export interface FlowchartState {
   nodes: FlowNode[];
   edges: FlowEdge[];
+  direction?: 'TD' | 'BT' | 'LR' | 'RL';
+  subgraphs?: Array<{ id: string; title: string; nodeIds: string[] }>;
+  diagramType?: 'flowchart' | 'stateDiagram-v2' | 'sequenceDiagram' | 'classDiagram' | 'erDiagram';
+  edgeCurve?: 'bezier' | 'orthogonal' | 'straight';
 }
 
 export interface NoteItem {
@@ -350,6 +496,9 @@ export interface NoteItem {
   title: string;
   body: string;
   updatedAt?: number;
+  pinned?: boolean;
+  color?: AccentColor;
+  tags?: string[];
 }
 
 export interface ShortcutConfig {
@@ -358,7 +507,33 @@ export interface ShortcutConfig {
   shift: boolean;
   code?: string;
   key: string;
-  label: string;     // e.g., "Alt + Space"
+  label: string;             // e.g., "Alt + Space"
+}
+
+export type AppUpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error';
+
+export interface AppUpdateState {
+  status: AppUpdateStatus;
+  currentVersion: string;
+  latestVersion?: string;
+  releaseNotes?: string;
+  releaseUrl?: string;
+  downloadPercent?: number;
+  error?: string;
+  lastCheckedAt?: number;
+  canQuitAndInstall?: boolean;
+}
+
+export interface AutoLaunchState {
+  enabled: boolean;
+  isPackaged: boolean;
 }
 
 export interface ToastMessage {
@@ -373,13 +548,20 @@ export interface ToastMessage {
 
 ### 5.4 Workspace Persistence Keys
 
-Managed via [`useLocalStorage`](file:///g:/SideFlow/src/hooks/useLocalStorage.ts) in `localStorage` and mirrored to `sideflow-config.json` in Electron's `userData` directory:
+Managed via [`useLocalStorage`](src/hooks/useLocalStorage.ts) in `localStorage` and mirrored to `sideflow-config.json` in Electron's `userData` directory:
 
 | Key | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `sideflow_drawers` | `AppDrawer[]` | `defaultDrawers` (3 categories, 10 apps) | Categorized ObjectDock drawers and application tiles |
 | `sideflow_flow` | `FlowchartState` | `defaultFlowData` (4 nodes, 3 edges) | Flowchart canvas nodes, coordinates, and directed edges |
-| `sideflow_notes` | `NoteItem[]` | `defaultNotes` (2 starter notes) | Multi-note scratchpad titles, bodies, and timestamps |
+| `sideflow_notes` | `NoteItem[]` | `defaultNotes` (2 starter notes) | Multi-note scratchpad titles, bodies, tags, and timestamps |
 | `sideflow_shortcut` | `ShortcutConfig` | `Alt + Space` | Active global keyboard shortcut configuration |
 | `sideflow_pinned` | `boolean` | `true` | Whether the panel stays pinned (`true`) or auto-hides on outside click/blur (`false`) |
-| `sideflow_edge_handle` | `boolean` | `true` | Whether the right-edge peek handle is visible when the panel is retracted |
+| `sideflow_edge_handle` | `boolean` | `true` | Whether screen-edge peek handles and companion edge tabs are visible when retracted |
+| `sideflow_panel_edge` | `PanelEdge` | `'right'` | Global default screen edge (`'left'` or `'right'`) where SideFlow docks |
+| `sideflow_panel_width_percent` | `number` | `35` | Extended panel width as a percentage (`15`–`90`%) of the active monitor's work area |
+| `sideflow_monitor_settings` | `MonitorSettings` | `{ mode: 'primary', ... }` | Multi-monitor routing mode (`primary`, `single`, `all`, `custom`), target/enabled display IDs, and per-monitor left/right bezel overrides |
+| `sideflow_open_at_login` | `boolean` | `true` | Whether SideFlow launches automatically in the OS system tray at login |
+| `sideflow_dock_effect` | `DockHoverEffect` | `'zoom'` | App tile hover magnification style (`'zoom'`, `'swing'`, `'glow'`, `'none'`) |
+| `sideflow_dock_size` | `DockIconSize` | `'normal'` | App tile icon density (`'compact'`, `'normal'`, `'large'`) |
+| `sideflow_lock_icons` | `boolean` | `false` | Locks app tiles against accidental drag, edit, or removal |

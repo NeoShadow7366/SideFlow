@@ -8,14 +8,17 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+        mono: ['JetBrains Mono', 'Fira Code', 'Cascadia Mono', 'Consolas', 'monospace'],
       },
       colors: {
         panel: {
-          bg: 'rgba(17, 24, 39, 0.88)',
-          border: 'rgba(255, 255, 255, 0.12)',
-          card: 'rgba(31, 41, 55, 0.75)',
+          bg: 'rgba(15, 23, 42, 0.92)',
+          elevated: 'rgba(15, 23, 42, 0.96)',
+          card: 'rgba(2, 6, 23, 0.72)',
+          inset: 'rgba(2, 6, 23, 0.88)',
+          border: 'rgba(148, 163, 184, 0.16)',
+          borderStrong: 'rgba(148, 163, 184, 0.28)',
         },
       },
     },
