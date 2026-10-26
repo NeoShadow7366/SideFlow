@@ -1,6 +1,6 @@
 {
   "name": "sideflow-desktop",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "NeoShadow7366",
   "description": "SideFlow — Background Slide-Out Desktop Utility Panel (ObjectDock App Drawers, Flowchart Scratchpad with Lucidchart Mermaid Bridge, Voice-Dictated Notes)",
   "main": "dist-electron/main.js",
