@@ -445,6 +445,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
       variant: 'info',
       undoLabel: 'Undo',
       onUndo: () => {
+        lastInsertPosMapRef.current[clearedNoteId] = previousBody.length;
         onChangeNotes((prev) =>
           prev.map((n) =>
             n.id === clearedNoteId
@@ -749,10 +750,17 @@ export const NotesView: React.FC<NotesViewProps> = ({
               )}
             </div>
             {svgMarkup ? (
-              <div
-                className="p-2 overflow-x-auto [&_svg]:w-full [&_svg]:h-auto [&_svg]:max-h-56"
-                dangerouslySetInnerHTML={{ __html: svgMarkup }}
-              />
+              <div className="p-2 overflow-x-auto">
+                <img
+                  src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+                    svgMarkup
+                  )}`}
+                  alt={`Rendered ${
+                    laidOut?.diagramType || 'flowchart'
+                  } Mermaid diagram`}
+                  className="w-full h-auto max-h-56 object-contain"
+                />
+              </div>
             ) : (
               <pre className="p-3 text-[11px] font-mono text-amber-300 overflow-x-auto">
                 {rawMermaid}
@@ -912,7 +920,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
     }
 
     return (
-      <div className="space-y-1.5 text-xs sm:text-sm text-slate-200 leading-relaxed select-text">
+      <div className="space-y-1.5 cq-note-prose text-slate-200 leading-relaxed select-text">
         {elements}
       </div>
     );
@@ -1010,7 +1018,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search..."
-                className="w-24 sm:w-28 pl-7 pr-2 py-1 rounded-xl bg-slate-900 border border-slate-800 text-[11px] text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="cq-note-search pl-7 pr-2 py-1 rounded-xl bg-slate-900 border border-slate-800 text-[11px] text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
 
@@ -1346,7 +1354,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
                     type="button"
                     aria-label={`Remove tag ${tag}`}
                     onClick={() => handleRemoveTag(tag)}
-                    className="w-5 h-5 inline-flex items-center justify-center rounded hover:bg-indigo-500/20 hover:text-white transition"
+                    className="w-6 h-6 inline-flex items-center justify-center rounded hover:bg-indigo-500/20 hover:text-white transition"
                   >
                     <X className="w-2.5 h-2.5" aria-hidden="true" />
                   </button>
@@ -1465,7 +1473,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
               placeholder="Start typing or click the microphone above for real-time local voice dictation at your cursor..."
               className={`${
                 viewMode === 'split' ? 'cq-split-pane' : 'w-full h-full'
-              } bg-transparent p-4 text-xs sm:text-sm text-slate-200 placeholder-slate-400 leading-relaxed focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500/40 resize-none select-text overflow-y-auto`}
+              } bg-transparent p-4 cq-note-prose text-slate-200 placeholder-slate-400 leading-relaxed focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500/40 resize-none select-text overflow-y-auto`}
             />
           )}
 

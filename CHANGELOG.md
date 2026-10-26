@@ -5,6 +5,18 @@ All notable changes to **SideFlow** (`sideflow-desktop`) will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-10-26
+
+### Changed
+- **Panel-Intrinsic Container Queries for Notes & Flowchart Status:** Replaced remaining viewport `sm:` responsive utilities inside resizable side-panel views with `@container sf-panel` rules (`.cq-note-prose`, `.cq-note-search`, and `.cq-flow-status` in `src/index.css`) so typography, note search width, and flowchart status truncation adapt directly to the panel's actual width.
+- **WCAG 2.2 AA 2.5.8 Minimum Hit Targets & Subgraph Keyboard Rename:** Enforced `24×24px` minimum interactive target dimensions on flowchart connector `+` label badges, flow direction pills, and note tag removal buttons, and converted subgraph headers into keyboard-accessible buttons supporting `F2` inline rename with focus restoration on `Enter` / `Escape`.
+
+### Fixed
+- **Cursor Offset Restoration on Note Clear `[Undo]`:** Restored `lastInsertPosMapRef` cursor insertion offset to the recovered note length when clicking `[Undo]` after **Clear Note**, ensuring subsequent voice dictation or timestamp insertions append at the end rather than index `0`.
+
+### Security
+- **Sandboxed SVG Image Rendering in Notes Preview:** Replaced inline `dangerouslySetInnerHTML` SVG injection in `NotesView` Markdown preview with encoded `data:image/svg+xml` `<img>` rendering (eliminating all `dangerouslySetInnerHTML` sinks across `src/`).
+
 ## [1.2.0] - 2026-10-26
 
 ### Added
@@ -45,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Voice-Dictated Multi-Note Scratchpad:** Multi-note editor with continuous speech-to-text dictation, language selection, one-click timestamps, clipboard copy, and JSON workspace backup/reset.
 - **Cross-Platform Build & Test Tooling:** Configured Windows NSIS/Portable and macOS DMG packaging via `electron-builder` with 256×256 application icons, WCAG accessibility support, and automated Vitest + React Testing Library suites.
 
+[1.2.1]: https://github.com/NeoShadow7366/SideFlow/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/NeoShadow7366/SideFlow/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/NeoShadow7366/SideFlow/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/NeoShadow7366/SideFlow/releases/tag/v1.0.0

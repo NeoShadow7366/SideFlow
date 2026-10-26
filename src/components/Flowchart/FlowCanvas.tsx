@@ -2714,7 +2714,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 aria-pressed={currentDirection === dir}
                 onClick={() => handleSetDirection(dir)}
                 title={`Set Mermaid flow direction to ${dir}`}
-                className={`min-h-[22px] min-w-[24px] px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold transition ${
+                className={`min-h-[24px] min-w-[24px] px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold transition ${
                   currentDirection === dir
                     ? 'bg-indigo-600 text-white shadow'
                     : 'text-slate-400 hover:text-slate-200'
@@ -2737,7 +2737,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             id="flow-status-msg"
             role="status"
             aria-live="polite"
-            className="truncate max-w-[260px] sm:max-w-md"
+            className="truncate cq-flow-status"
           >
             {statusMessage}
           </span>
@@ -3261,25 +3261,53 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         }
                         onBlur={() => commitEditingSubgraph(bounds.id)}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter')
+                          if (e.key === 'Enter') {
                             commitEditingSubgraph(bounds.id);
-                          if (e.key === 'Escape') setEditingSubgraphId(null);
+                            window.requestAnimationFrame(() => {
+                              document
+                                .querySelector<HTMLElement>(
+                                  `[data-testid="subgraph-title-${bounds.id}"]`
+                                )
+                                ?.focus();
+                            });
+                          }
+                          if (e.key === 'Escape') {
+                            setEditingSubgraphId(null);
+                            window.requestAnimationFrame(() => {
+                              document
+                                .querySelector<HTMLElement>(
+                                  `[data-testid="subgraph-title-${bounds.id}"]`
+                                )
+                                ?.focus();
+                            });
+                          }
                         }}
                         autoFocus
                         className="bg-slate-950 text-indigo-200 text-[10px] px-1.5 py-0.5 rounded border border-indigo-400 focus:outline-none"
                       />
                     ) : (
-                      <span
+                      <button
+                        type="button"
+                        data-testid={`subgraph-title-${bounds.id}`}
+                        aria-label={`Subgraph ${bounds.title} (press F2 or double-click to rename)`}
                         onDoubleClick={(e) => {
                           e.stopPropagation();
                           setEditingSubgraphId(bounds.id);
                           setEditingSubgraphTitle(bounds.title);
                         }}
-                        title="Double-click to rename subgraph • Drag to move group"
-                        className="text-[10px] font-semibold uppercase tracking-wider text-indigo-300/90 truncate"
+                        onKeyDown={(e) => {
+                          if (e.key === 'F2') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setEditingSubgraphId(bounds.id);
+                            setEditingSubgraphTitle(bounds.title);
+                          }
+                        }}
+                        title="Double-click or press F2 to rename subgraph • Drag header to move group"
+                        className="min-h-[24px] px-1 rounded text-left text-[10px] font-semibold uppercase tracking-wider text-indigo-300/90 hover:text-indigo-200 truncate"
                       >
                         {bounds.title}
-                      </span>
+                      </button>
                     )}
                     <button
                       type="button"
@@ -3553,8 +3581,8 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                       style={{ left: `${midX}px`, top: `${midY}px` }}
                       className={`pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 z-10 rounded-full transition ${
                         edge.label || edge.cardinality
-                          ? 'px-2 py-0.5 bg-slate-900/95 border border-indigo-500/50 text-[10px] font-medium text-indigo-200 hover:border-indigo-400 shadow'
-                          : 'w-4 h-4 bg-slate-900/80 border border-slate-700 text-[9px] text-slate-400 opacity-0 hover:opacity-100 focus:opacity-100 flex items-center justify-center'
+                          ? 'min-h-[24px] px-2 py-0.5 bg-slate-900/95 border border-indigo-500/50 text-[10px] font-medium text-indigo-200 hover:border-indigo-400 shadow inline-flex items-center'
+                          : 'w-6 h-6 bg-slate-900/85 border border-slate-700 text-[10px] text-slate-300 opacity-0 hover:opacity-100 focus:opacity-100 flex items-center justify-center'
                       }`}
                     >
                       {badgeText}

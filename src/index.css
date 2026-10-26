@@ -71,6 +71,19 @@ body {
   display: none;
 }
 
+.cq-note-prose {
+  font-size: 0.75rem;
+  line-height: 1.625;
+}
+
+.cq-note-search {
+  width: 6rem;
+}
+
+.cq-flow-status {
+  max-width: 220px;
+}
+
 @container sf-header (max-width: 430px) {
   .cq-inactive-tab-label {
     display: none;
@@ -90,9 +103,18 @@ body {
   .cq-show-440 {
     display: inline-flex;
   }
+  .cq-note-prose {
+    font-size: 0.875rem;
+  }
+  .cq-note-search {
+    width: 7.5rem;
+  }
 }
 
 @container sf-panel (min-width: 500px) {
+  .cq-flow-status {
+    max-width: 28rem;
+  }
   .cq-docklets-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
