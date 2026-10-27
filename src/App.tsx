@@ -20,10 +20,12 @@ import {
 } from 'lucide-react';
 import {
   AppDrawer,
+  AppItem,
   AppUpdateState,
   DockHoverEffect,
   DockIconSize,
   FlowchartState,
+  FlowDiagramItem,
   MonitorDisplayInfo,
   MonitorSettings,
   NoteItem,
@@ -52,12 +54,15 @@ import {
   sanitizeMonitorSettings,
   simulatedDisplays,
 } from './utils/defaults';
+import { executeAppCommand } from './utils/fileMeta';
+import { computeDagLayout, getMermaidTemplatePreset } from './utils/mermaid';
 import { Header } from './components/Header';
 import { DockView } from './components/DockDrawers/DockView';
 import { FlowCanvas } from './components/Flowchart/FlowCanvas';
 import { NotesView } from './components/Notes/NotesView';
 import { SettingsView } from './components/Settings/SettingsView';
 import { ElectronModal } from './components/ElectronModal';
+import { CommandPalette } from './components/CommandPalette';
 import { DynamicIcon } from './components/DynamicIcon';
 import { SideFlowIcon } from './components/SideFlowIcon';
 
@@ -79,6 +84,7 @@ export const App: React.FC = () => {
     defaultNotes[0]?.id || 'note-1'
   );
   const [workspaceResetEpoch, setWorkspaceResetEpoch] = useState<number>(0);
+  const [flowDiagramSyncEpoch, setFlowDiagramSyncEpoch] = useState<number>(0);
   const [shortcut, setShortcut] = useLocalStorage<ShortcutConfig>(
     'sideflow_shortcut',
     defaultShortcut
@@ -140,6 +146,7 @@ export const App: React.FC = () => {
   const [isRecordingHotkey, setIsRecordingHotkey] = useState<boolean>(false);
   const [isTrayMenuOpen, setIsTrayMenuOpen] = useState<boolean>(false);
   const [isElectronModalOpen, setIsElectronModalOpen] = useState<boolean>(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [clockTime, setClockTime] = useState<string>(() =>
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -372,6 +379,9 @@ export const App: React.FC = () => {
   const togglePanel = useCallback((forceState?: boolean) => {
     setIsPanelOpen((prev) => {
       const next = typeof forceState === 'boolean' ? forceState : !prev;
+      if (!next) {
+        setIsCommandPaletteOpen(false);
+      }
       window.sideflow?.setPanelVisibility?.(next);
       return next;
     });
@@ -398,6 +408,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     const unsubVisibility = window.sideflow?.onSetPanelVisibility?.((visible) => {
       setIsPanelOpen(visible);
+      if (!visible) {
+        setIsCommandPaletteOpen(false);
+      }
     });
     const unsubSwitchTab = window.sideflow?.onSwitchTab?.((tab) => {
       setActiveTab(tab);
@@ -583,6 +596,21 @@ export const App: React.FC = () => {
         }
         if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
 
+        // Reserve Ctrl+K / Cmd+K for the Command Palette so it cannot be shadowed
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          !e.altKey &&
+          !e.shiftKey &&
+          e.key.toLowerCase() === 'k'
+        ) {
+          notify(
+            'Reserved Shortcut',
+            'zap',
+            'Ctrl + K is reserved for the Command Palette'
+          );
+          return;
+        }
+
         // Require at least one modifier key so single character keys don't hijack typing
         if (!e.ctrlKey && !e.altKey && !e.shiftKey) {
           notify(
@@ -638,7 +666,30 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Guard against intercepting normal typing inside inputs/textareas when Alt/Ctrl are not held
+      // Global Command Palette Shortcut (Ctrl+K / Cmd+K) — works from anywhere, including inputs
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === 'k'
+      ) {
+        if (
+          document.body.hasAttribute('data-sideflow-modal-open') &&
+          !isCommandPaletteOpen
+        ) {
+          return;
+        }
+        e.preventDefault();
+        if (!isPanelOpen) {
+          togglePanel(true);
+          setIsCommandPaletteOpen(true);
+        } else {
+          setIsCommandPaletteOpen((prev) => !prev);
+        }
+        return;
+      }
+
+      // Guard against intercepting normal typing inside inputs/textareas when Alt/Ctrl/Meta are not held
       const target = e.target as HTMLElement | null;
       const isEditableTarget =
         target &&
@@ -646,7 +697,7 @@ export const App: React.FC = () => {
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT' ||
           target.isContentEditable);
-      if (isEditableTarget && !e.altKey && !e.ctrlKey) {
+      if (isEditableTarget && !e.altKey && !e.ctrlKey && !e.metaKey) {
         return;
       }
 
@@ -713,11 +764,13 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     isRecordingHotkey,
+    isCommandPaletteOpen,
     isPanelOpen,
     activeTab,
     shortcut,
     setShortcut,
     handleShortcutToggle,
+    togglePanel,
     notify,
   ]);
 
@@ -1109,6 +1162,7 @@ export const App: React.FC = () => {
     try {
       window.localStorage.removeItem('sideflow_flow_diagrams_v1');
       window.localStorage.removeItem('sideflow_active_diagram_id');
+      window.localStorage.removeItem('sideflow_flow_minimap');
       window.localStorage.removeItem('sideflow_show_docklets');
       window.localStorage.removeItem('sideflow_notes_view_mode');
     } catch {
@@ -1807,6 +1861,10 @@ export const App: React.FC = () => {
           isPinned={isPinned}
           onTogglePin={() => togglePin()}
           onClosePanel={() => togglePanel(false)}
+          onOpenCommandPalette={() => {
+            setIsRecordingHotkey(false);
+            setIsCommandPaletteOpen(true);
+          }}
           shortcutLabel={shortcut.label}
           isDictating={isDictating}
           effectiveEdge={activeEffectiveEdge}
@@ -1839,7 +1897,7 @@ export const App: React.FC = () => {
             className="flex-1 flex flex-col overflow-hidden"
           >
             <FlowCanvas
-              key={workspaceResetEpoch}
+              key={`${workspaceResetEpoch}-${flowDiagramSyncEpoch}`}
               flowData={flowData}
               onChangeFlowData={setFlowData}
               onNotify={notify}
@@ -2056,6 +2114,231 @@ export const App: React.FC = () => {
           </div>
         )}
       </aside>
+
+      {/* Global Ctrl+K Command Palette */}
+      <CommandPalette
+        isOpen={isCommandPaletteOpen}
+        onClose={() => setIsCommandPaletteOpen(false)}
+        drawers={drawers}
+        notes={notes}
+        activeNoteId={activeNoteId}
+        flowData={flowData}
+        activeTab={activeTab}
+        isPinned={isPinned}
+        panelEdge={panelEdge}
+        isDockLocked={isDockLocked}
+        shortcutLabel={shortcut.label}
+        onLaunchApp={(app: AppItem) => {
+          notify(`Launching ${app.name}...`, app.icon || 'rocket', app.cmd);
+          void executeAppCommand(app.cmd).then((res) => {
+            if (res && !res.success && res.error) {
+              notify(`Unable to Launch ${app.name}`, 'zap', res.error, {
+                variant: 'error',
+              });
+            }
+          });
+        }}
+        onSelectDiagram={(diagram: FlowDiagramItem) => {
+          try {
+            const rawDiags = window.localStorage.getItem(
+              'sideflow_flow_diagrams_v1'
+            );
+            if (!rawDiags) {
+              const seeded: FlowDiagramItem[] = [
+                {
+                  id: 'flow-1',
+                  title: 'Hotkey Launch Flow',
+                  flowData: JSON.parse(JSON.stringify(flowData)),
+                  updatedAt: Date.now(),
+                },
+                {
+                  id: 'flow-2',
+                  title: 'CI/CD Deployment Pipeline',
+                  flowData:
+                    getMermaidTemplatePreset('ci-cd') ||
+                    JSON.parse(JSON.stringify(defaultFlowData)),
+                  updatedAt: Date.now() - 60000,
+                },
+              ];
+              window.localStorage.setItem(
+                'sideflow_flow_diagrams_v1',
+                JSON.stringify(seeded)
+              );
+            }
+            window.localStorage.setItem(
+              'sideflow_active_diagram_id',
+              JSON.stringify(diagram.id)
+            );
+          } catch {
+            // ignore storage errors
+          }
+          setFlowData(JSON.parse(JSON.stringify(diagram.flowData)));
+          setFlowDiagramSyncEpoch((prev) => prev + 1);
+          setActiveTab('flowchart');
+          window.requestAnimationFrame(() => {
+            document.getElementById('tab-btn-flowchart')?.focus();
+          });
+          notify(
+            `Switched to "${diagram.title}"`,
+            'check',
+            `${diagram.flowData.nodes.length} nodes loaded`
+          );
+        }}
+        onCreateDiagram={() => {
+          let existing: FlowDiagramItem[] = [];
+          try {
+            const raw = window.localStorage.getItem('sideflow_flow_diagrams_v1');
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) existing = parsed;
+            }
+          } catch {
+            // ignore
+          }
+          if (existing.length === 0) {
+            existing = [
+              {
+                id: 'flow-1',
+                title: 'Hotkey Launch Flow',
+                flowData: JSON.parse(JSON.stringify(flowData)),
+                updatedAt: Date.now() - 1000,
+              },
+              {
+                id: 'flow-2',
+                title: 'CI/CD Deployment Pipeline',
+                flowData:
+                  getMermaidTemplatePreset('ci-cd') ||
+                  JSON.parse(JSON.stringify(defaultFlowData)),
+                updatedAt: Date.now() - 60000,
+              },
+            ];
+          }
+          const nextFlow: FlowchartState = {
+            nodes: [
+              {
+                id: 'n1',
+                type: 'start',
+                text: 'Start',
+                x: 180,
+                y: 80,
+              },
+            ],
+            edges: [],
+            direction: 'TD',
+            diagramType: 'flowchart',
+          };
+          const newDiag: FlowDiagramItem = {
+            id: `flow-${Date.now()}`,
+            title: `Flowchart ${existing.length + 1}`,
+            flowData: nextFlow,
+            updatedAt: Date.now(),
+          };
+          try {
+            window.localStorage.setItem(
+              'sideflow_flow_diagrams_v1',
+              JSON.stringify([...existing, newDiag])
+            );
+            window.localStorage.setItem(
+              'sideflow_active_diagram_id',
+              JSON.stringify(newDiag.id)
+            );
+          } catch {
+            // ignore
+          }
+          setFlowData(nextFlow);
+          setFlowDiagramSyncEpoch((prev) => prev + 1);
+          setActiveTab('flowchart');
+          window.requestAnimationFrame(() => {
+            document.getElementById('tab-btn-flowchart')?.focus();
+          });
+          notify('Created New Flowchart', 'check', newDiag.title);
+        }}
+        onAutoLayoutFlow={() => {
+          const arrangedNodes = computeDagLayout(flowData);
+          const nextFlow: FlowchartState = {
+            ...flowData,
+            nodes: arrangedNodes,
+          };
+          try {
+            const rawActive = window.localStorage.getItem(
+              'sideflow_active_diagram_id'
+            );
+            const activeDiagId = rawActive ? JSON.parse(rawActive) : 'flow-1';
+            const rawDiags = window.localStorage.getItem(
+              'sideflow_flow_diagrams_v1'
+            );
+            if (rawDiags) {
+              const parsed = JSON.parse(rawDiags);
+              if (Array.isArray(parsed)) {
+                window.localStorage.setItem(
+                  'sideflow_flow_diagrams_v1',
+                  JSON.stringify(
+                    parsed.map((d: FlowDiagramItem) =>
+                      d.id === activeDiagId
+                        ? { ...d, flowData: nextFlow, updatedAt: Date.now() }
+                        : d
+                    )
+                  )
+                );
+              }
+            }
+          } catch {
+            // ignore
+          }
+          setFlowData(nextFlow);
+          setActiveTab('flowchart');
+          window.requestAnimationFrame(() => {
+            document.getElementById('tab-btn-flowchart')?.focus();
+          });
+          notify(
+            'Auto-Arranged Flowchart (DAG)',
+            'check',
+            `Tidied ${arrangedNodes.length} nodes`
+          );
+        }}
+        onSelectNote={(noteId: string) => {
+          setActiveNoteId(noteId);
+          setActiveTab('notes');
+          window.requestAnimationFrame(() => {
+            document.getElementById('tab-btn-notes')?.focus();
+          });
+        }}
+        onCreateNote={() => {
+          const newNote: NoteItem = {
+            id: `note-${Date.now()}`,
+            title: `Quick Note ${notes.length + 1}`,
+            body: '',
+            updatedAt: Date.now(),
+          };
+          setNotes((prev) => [newNote, ...prev]);
+          setActiveNoteId(newNote.id);
+          setActiveTab('notes');
+          window.requestAnimationFrame(() => {
+            document.getElementById('tab-btn-notes')?.focus();
+          });
+          notify('Created New Scratchpad Note', 'check', newNote.title);
+        }}
+        onSelectTab={(tab: TabId) => {
+          setActiveTab(tab);
+          window.requestAnimationFrame(() => {
+            document.getElementById(`tab-btn-${tab}`)?.focus();
+          });
+        }}
+        onTogglePin={() => togglePin()}
+        onChangePanelEdge={handleChangePanelEdge}
+        onToggleDockLock={() => {
+          const nextLocked = !isDockLocked;
+          setIsDockLocked(nextLocked);
+          notify(
+            nextLocked ? 'Dock Icons Locked' : 'Dock Icons Unlocked',
+            'check',
+            nextLocked ? 'Reordering disabled' : 'Reordering enabled'
+          );
+        }}
+        onExportBackup={handleExportBackup}
+        onCheckForUpdates={handleCheckForUpdates}
+        onClosePanel={() => togglePanel(false)}
+      />
 
       {/* Electron Wrapper Modal */}
       <ElectronModal

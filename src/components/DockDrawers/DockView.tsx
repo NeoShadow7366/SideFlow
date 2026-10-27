@@ -473,6 +473,7 @@ export const DockView: React.FC<DockViewProps> = ({
     if (isAppModalOpen || isDrawerModalOpen) return;
 
     const handleQuickHotkey = (e: KeyboardEvent) => {
+      if (document.body.hasAttribute('data-sideflow-modal-open')) return;
       const target = e.target as HTMLElement | null;
       const isEditable =
         target &&

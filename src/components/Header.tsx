@@ -5,6 +5,7 @@ import {
   Mic,
   Sliders,
   Pin,
+  Search,
   PanelLeftClose,
   PanelRightClose,
 } from 'lucide-react';
@@ -17,6 +18,7 @@ interface HeaderProps {
   isPinned: boolean;
   onTogglePin: () => void;
   onClosePanel: () => void;
+  onOpenCommandPalette?: () => void;
   shortcutLabel: string;
   isDictating?: boolean;
   effectiveEdge?: PanelEdge;
@@ -28,6 +30,7 @@ export const Header: React.FC<HeaderProps> = ({
   isPinned,
   onTogglePin,
   onClosePanel,
+  onOpenCommandPalette,
   shortcutLabel,
   isDictating = false,
   effectiveEdge = 'right',
@@ -89,12 +92,12 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="panel-cq-header px-3.5 py-2.5 border-b border-slate-800/80 flex items-center justify-between gap-2 bg-slate-950/50">
       <div className="flex items-center gap-2 min-w-0">
-        <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-600 via-blue-500 to-cyan-400 border border-cyan-300/30 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0">
+        <div className="cq-brand-logo w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-600 via-blue-500 to-cyan-400 border border-cyan-300/30 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0">
           <SideFlowIcon className="w-5 h-5" aria-hidden="true" />
         </div>
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <h2 className="text-sm font-bold tracking-tight text-white truncate">
+            <h2 className="cq-brand-title text-sm font-bold tracking-tight text-white truncate">
               SideFlow
             </h2>
             <button
@@ -122,7 +125,7 @@ export const Header: React.FC<HeaderProps> = ({
                 className={`w-2.5 h-2.5 ${isPinned ? 'fill-current' : ''}`}
                 aria-hidden="true"
               />
-              <span>{isPinned ? 'Pinned' : 'Auto-Hide'}</span>
+              <span className="cq-pin-label">{isPinned ? 'Pinned' : 'Auto-Hide'}</span>
             </button>
           </div>
           <p className="cq-hotkey-subtitle text-[11px] text-slate-400 truncate">
@@ -152,6 +155,8 @@ export const Header: React.FC<HeaderProps> = ({
               aria-label={
                 tab.id === 'settings'
                   ? 'Config — Shortcut & Tray Settings'
+                  : tab.id === 'notes' && isDictating
+                  ? `${tab.label} (Voice Dictation Active)`
                   : tab.label
               }
               title={tab.title}
@@ -182,8 +187,25 @@ export const Header: React.FC<HeaderProps> = ({
         })}
       </nav>
 
-      {/* Collapse Control (Direction-Aware Left vs Right Bezel) */}
-      <div className="flex items-center shrink-0">
+      {/* Command Palette Trigger & Collapse Control (Direction-Aware Left vs Right Bezel) */}
+      <div className="flex items-center gap-1 shrink-0">
+        {onOpenCommandPalette && (
+          <button
+            type="button"
+            data-testid="open-command-palette-btn"
+            onClick={onOpenCommandPalette}
+            aria-label="Open Command Palette (Ctrl+K)"
+            aria-haspopup="dialog"
+            aria-keyshortcuts="Control+K"
+            title="Search Apps, Flows, Notes & Commands (Ctrl+K)"
+            className="min-h-[32px] min-w-[32px] px-2 rounded-xl flex items-center justify-center gap-1.5 bg-slate-900/80 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/40 text-slate-300 hover:text-white transition"
+          >
+            <Search className="w-3.5 h-3.5 text-indigo-400 shrink-0" aria-hidden="true" />
+            <kbd className="cq-header-cmdk font-mono text-[10px] text-slate-300 bg-slate-950/90 border border-slate-700/80 px-1.5 py-0.5 rounded-md">
+              Ctrl+K
+            </kbd>
+          </button>
+        )}
         <button
           type="button"
           onClick={onClosePanel}

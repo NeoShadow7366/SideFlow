@@ -34,6 +34,7 @@ import {
   PanelLeftOpen,
   Image as ImageIcon,
   Layers,
+  Map as MapIcon,
 } from 'lucide-react';
 import {
   AccentColor,
@@ -74,6 +75,7 @@ import {
   spliceExistingNodeOnEdge,
 } from '../../utils/mermaid';
 import { LucidModal } from './LucidModal';
+import { FlowMinimap } from './FlowMinimap';
 
 interface FlowCanvasProps {
   flowData: FlowchartState;
@@ -325,8 +327,16 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   const [liveMermaidInput, setLiveMermaidInput] = useState('');
   const [liveParseError, setLiveParseError] = useState<string | null>(null);
 
-  // Snap-to-grid & alignment guides state
+  // Snap-to-grid, minimap & alignment guides state
   const [snapToGrid, setSnapToGrid] = useState<boolean>(true);
+  const [showMinimap, setShowMinimap] = useLocalStorage<boolean>(
+    'sideflow_flow_minimap',
+    true
+  );
+  const [viewportSize, setViewportSize] = useState<{
+    width: number;
+    height: number;
+  }>({ width: 640, height: 420 });
   const [snapGuides, setSnapGuides] = useState<{
     x?: number;
     y?: number;
@@ -605,6 +615,31 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       setLiveParseError(null);
     }
   }, [flowData, isLiveCodeOpen, dragNodePositions]);
+
+  // Measure Flowchart viewport dimensions for accurate Minimap camera frame
+  useEffect(() => {
+    const el = canvasWrapperRef.current;
+    if (!el) return;
+
+    const syncSize = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (w > 0 && h > 0) {
+        setViewportSize((prev) =>
+          prev.width === w && prev.height === h ? prev : { width: w, height: h }
+        );
+      }
+    };
+
+    syncSize();
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(syncSize);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+    window.addEventListener('resize', syncSize);
+    return () => window.removeEventListener('resize', syncSize);
+  }, []);
 
   const allocateUniqueNodeId = (existingNodes: FlowNode[]): string => {
     const existingIds = new Set(existingNodes.map((n) => n.id));
@@ -3070,7 +3105,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             <button
               type="button"
               data-testid="snap-grid-toggle-btn"
-              aria-label="Toggle Grid & Smart Alignment Snap"
+              aria-label="Grid & Smart Alignment Snap"
               aria-pressed={snapToGrid}
               onClick={() => setSnapToGrid((prev) => !prev)}
               title="Toggle 8px Grid & Center Alignment Snap Guides"
@@ -3082,7 +3117,55 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             >
               <Magnet className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
+
+            <button
+              type="button"
+              data-testid="toggle-flow-minimap-btn"
+              aria-label="Flowchart Minimap"
+              aria-pressed={showMinimap}
+              onClick={() => setShowMinimap((prev) => !prev)}
+              title="Toggle Interactive Flowchart Minimap Radar"
+              className={`w-6 h-6 flex items-center justify-center rounded-lg transition ${
+                showMinimap
+                  ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-300'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              <MapIcon className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
           </div>
+
+          {/* Interactive Bird's-Eye Flowchart Minimap Radar */}
+          {showMinimap &&
+            effectiveNodes.length > 0 &&
+            viewportSize.height >= 190 && (
+              <FlowMinimap
+                nodes={effectiveNodes}
+                edges={flowData.edges}
+                subgraphs={subgraphBoundsList}
+                selectedNodeIds={selectedNodeIds}
+                selectedNodeId={selectedNodeId}
+                panOffset={panOffset}
+                zoomLevel={zoomLevel}
+                viewportWidth={viewportSize.width}
+                viewportHeight={viewportSize.height}
+                compact={layoutMode === 'compact' || viewportSize.height < 340}
+                dimmedForPopover={
+                  compartmentNodeId !== null || editingEdgeIdx !== null
+                }
+                onPanToOffset={(nextOffset) => setPanOffset(nextOffset)}
+                onClose={() => {
+                  setShowMinimap(false);
+                  window.requestAnimationFrame(() => {
+                    document
+                      .querySelector<HTMLButtonElement>(
+                        '[data-testid="toggle-flow-minimap-btn"]'
+                      )
+                      ?.focus();
+                  });
+                }}
+              />
+            )}
           {/* Floating Multi-Select Action Bar */}
           {selectedNodeIds.length > 1 && (
             <div
@@ -3192,7 +3275,11 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomLevel})`,
               transformOrigin: '0 0',
             }}
-            className="absolute inset-0 w-full h-full pointer-events-none"
+            className={`absolute inset-0 w-full h-full pointer-events-none ${
+              compartmentNodeId !== null || editingEdgeIdx !== null
+                ? 'z-40'
+                : ''
+            }`}
           >
             {/* Live Marquee Box Selection Overlay */}
             {marqueeBox && (
