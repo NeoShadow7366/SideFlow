@@ -149,10 +149,282 @@ export interface FlowDiagramItem {
   updatedAt: number;
 }
 
+export type NoteFormatMode = 'markdown' | 'adf';
+
+export type AdfStatusColor =
+  | 'neutral'
+  | 'purple'
+  | 'blue'
+  | 'red'
+  | 'yellow'
+  | 'green';
+
+export type AdfPanelType =
+  | 'info'
+  | 'note'
+  | 'warning'
+  | 'success'
+  | 'error'
+  | 'custom';
+
+export type AdfMark =
+  | { type: 'strong' }
+  | { type: 'em' }
+  | { type: 'underline' }
+  | { type: 'strike' }
+  | { type: 'code' }
+  | { type: 'subsup'; attrs: { type: 'sub' | 'sup' } }
+  | { type: 'link'; attrs: { href: string; title?: string } }
+  | { type: 'textColor'; attrs: { color: string } }
+  | { type: 'backgroundColor'; attrs: { color: string } };
+
+export type AdfBlockMark =
+  | { type: 'alignment'; attrs: { align: 'center' | 'end' } }
+  | { type: 'indentation'; attrs: { level: 1 | 2 | 3 | 4 | 5 | 6 } };
+
+export interface AdfTextNode {
+  type: 'text';
+  text: string;
+  marks?: AdfMark[];
+}
+
+export interface AdfHardBreakNode {
+  type: 'hardBreak';
+  attrs?: { text?: '\n' };
+}
+
+export interface AdfStatusNode {
+  type: 'status';
+  attrs: {
+    text: string;
+    color: AdfStatusColor;
+    localId?: string;
+    style?: string;
+  };
+}
+
+export interface AdfMentionNode {
+  type: 'mention';
+  attrs: {
+    id: string;
+    text?: string;
+    accessLevel?: string;
+    userType?: 'DEFAULT' | 'SPECIAL' | 'APP';
+  };
+}
+
+export interface AdfEmojiNode {
+  type: 'emoji';
+  attrs: {
+    shortName: string;
+    id?: string;
+    text?: string;
+  };
+}
+
+export interface AdfDateNode {
+  type: 'date';
+  attrs: {
+    timestamp: string;
+  };
+}
+
+export interface AdfInlineCardNode {
+  type: 'inlineCard';
+  attrs: {
+    url: string;
+  };
+}
+
+export type AdfInlineNode =
+  | AdfTextNode
+  | AdfHardBreakNode
+  | AdfStatusNode
+  | AdfMentionNode
+  | AdfEmojiNode
+  | AdfDateNode
+  | AdfInlineCardNode;
+
+export interface AdfParagraphNode {
+  type: 'paragraph';
+  attrs?: { localId?: string };
+  marks?: AdfBlockMark[];
+  content?: AdfInlineNode[];
+}
+
+export interface AdfHeadingNode {
+  type: 'heading';
+  attrs: { level: 1 | 2 | 3 | 4 | 5 | 6; localId?: string };
+  marks?: AdfBlockMark[];
+  content?: AdfInlineNode[];
+}
+
+export interface AdfCodeBlockNode {
+  type: 'codeBlock';
+  attrs?: { language?: string; uniqueId?: string };
+  content?: AdfTextNode[];
+}
+
+export interface AdfListItemNode {
+  type: 'listItem';
+  content: Array<
+    AdfParagraphNode | AdfBulletListNode | AdfOrderedListNode | AdfCodeBlockNode
+  >;
+}
+
+export interface AdfBulletListNode {
+  type: 'bulletList';
+  content: AdfListItemNode[];
+}
+
+export interface AdfOrderedListNode {
+  type: 'orderedList';
+  attrs?: { order?: number };
+  content: AdfListItemNode[];
+}
+
+export interface AdfTaskItemNode {
+  type: 'taskItem';
+  attrs: { localId: string; state: 'TODO' | 'DONE' };
+  content?: AdfInlineNode[];
+}
+
+export interface AdfTaskListNode {
+  type: 'taskList';
+  attrs: { localId: string };
+  content: Array<AdfTaskItemNode | AdfTaskListNode>;
+}
+
+export interface AdfDecisionItemNode {
+  type: 'decisionItem';
+  attrs: { localId: string; state: 'DECIDED' | 'UNDECIDED' };
+  content?: AdfInlineNode[];
+}
+
+export interface AdfDecisionListNode {
+  type: 'decisionList';
+  attrs: { localId: string };
+  content: AdfDecisionItemNode[];
+}
+
+export interface AdfPanelNode {
+  type: 'panel';
+  attrs: {
+    panelType: AdfPanelType;
+    panelIcon?: string;
+    panelColor?: string;
+  };
+  content: AdfBlockNode[];
+}
+
+export interface AdfBlockquoteNode {
+  type: 'blockquote';
+  content: AdfBlockNode[];
+}
+
+export interface AdfRuleNode {
+  type: 'rule';
+}
+
+export interface AdfExpandNode {
+  type: 'expand' | 'nestedExpand';
+  attrs: { title?: string };
+  content: AdfBlockNode[];
+}
+
+export interface AdfTableCellNode {
+  type: 'tableCell' | 'tableHeader';
+  attrs?: {
+    colspan?: number;
+    rowspan?: number;
+    colwidth?: number[];
+    background?: string;
+  };
+  content: AdfBlockNode[];
+}
+
+export interface AdfTableRowNode {
+  type: 'tableRow';
+  content: AdfTableCellNode[];
+}
+
+export interface AdfTableNode {
+  type: 'table';
+  attrs?: {
+    isNumberColumnEnabled?: boolean;
+    layout?: 'default' | 'wide' | 'full-width';
+    localId?: string;
+  };
+  content: AdfTableRowNode[];
+}
+
+export interface AdfLayoutColumnNode {
+  type: 'layoutColumn';
+  attrs: { width: number };
+  content: AdfBlockNode[];
+}
+
+export interface AdfLayoutSectionNode {
+  type: 'layoutSection';
+  content: AdfLayoutColumnNode[];
+}
+
+export interface AdfMediaNode {
+  type: 'media';
+  attrs: {
+    type: 'external' | 'file' | 'link';
+    url?: string;
+    id?: string;
+    collection?: string;
+    alt?: string;
+    width?: number;
+    height?: number;
+  };
+}
+
+export interface AdfMediaSingleNode {
+  type: 'mediaSingle';
+  attrs?: {
+    layout?: 'center' | 'align-start' | 'align-end' | 'wide' | 'full-width';
+    width?: number;
+  };
+  content: [AdfMediaNode];
+}
+
+export interface AdfBlockCardNode {
+  type: 'blockCard';
+  attrs: { url: string };
+}
+
+export type AdfBlockNode =
+  | AdfParagraphNode
+  | AdfHeadingNode
+  | AdfBulletListNode
+  | AdfOrderedListNode
+  | AdfTaskListNode
+  | AdfDecisionListNode
+  | AdfPanelNode
+  | AdfBlockquoteNode
+  | AdfCodeBlockNode
+  | AdfRuleNode
+  | AdfExpandNode
+  | AdfTableNode
+  | AdfLayoutSectionNode
+  | AdfMediaSingleNode
+  | AdfBlockCardNode;
+
+export interface AdfDocNode {
+  version: 1;
+  type: 'doc';
+  content: AdfBlockNode[];
+}
+
 export interface NoteItem {
   id: string;
   title: string;
   body: string;
+  format?: NoteFormatMode;
+  adfDoc?: AdfDocNode;
   updatedAt?: number;
   pinned?: boolean;
   color?: AccentColor;
@@ -181,6 +453,7 @@ export interface SttSettings {
   engineMode: SttEngineMode;
   modelSize: WhisperModelId;
   selectedMicId: string;
+  instantMode?: boolean;
 }
 
 export interface LocalSttStatus {
@@ -314,6 +587,16 @@ export interface SideFlowElectronBridge {
   storeGetAll: () => Promise<Record<string, unknown>>;
   storeSet: (key: string, value: unknown) => void;
   getLocalSttStatus?: () => Promise<LocalSttStatus>;
+  warmupLocalStt?: (payload?: {
+    lang?: string;
+    modelSize?: WhisperModelId;
+    preferEngine?: SttEngineMode;
+  }) => Promise<{
+    success: boolean;
+    engineUsed?: string;
+    durationMs?: number;
+    error?: string;
+  }>;
   transcribeAudioLocal?: (payload: {
     pcm16Base64: string;
     sampleRate: number;
@@ -321,6 +604,10 @@ export interface SideFlowElectronBridge {
     modelSize?: WhisperModelId;
     preferEngine?: SttEngineMode;
     promptContext?: string;
+    lowLatency?: boolean;
+    isPartial?: boolean;
+    preTrimmed?: boolean;
+    preNormalized?: boolean;
   }) => Promise<LocalTranscriptionResult>;
   getAutoLaunch?: () => Promise<AutoLaunchState>;
   setAutoLaunch?: (enabled: boolean) => Promise<AutoLaunchState>;

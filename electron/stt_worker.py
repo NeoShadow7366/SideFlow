@@ -2,9 +2,9 @@
 """
 SideFlow Persistent Local Speech-to-Text Worker
 Optimized for:
-- High-end Desktop CUDA GPUs (FP16)
-- 4GB VRAM Discrete Laptop GPUs (INT8_FLOAT16 hybrid quantization)
-- Multi-Core Laptop CPUs like Intel Core i9-11950H 8C/16T + 32GB RAM (AVX-512 VNNI INT8 + Beam Search)
+- Instant low-latency laptop dictation (greedy INT8 decoding + pre-warmed GEMM buffers)
+- High-end Desktop CUDA GPUs (FP16) & 4GB VRAM Laptop GPUs (INT8_FLOAT16)
+- Multi-Core Laptop CPUs (P-core bounded INT8 execution without PyTorch cold-import stalls)
 """
 import os
 import sys
@@ -12,15 +12,27 @@ import json
 import time
 import base64
 import subprocess
+from collections import OrderedDict
 import numpy as np
 
-models_cache = {}
+MAX_CACHED_MODELS = 2
+ALLOWED_CT2_MODELS = {
+    "tiny",
+    "tiny.en",
+    "base",
+    "base.en",
+    "small",
+    "small.en",
+    "distil-small.en",
+    "distil-medium.en",
+}
+
+models_cache = OrderedDict()
+warmed_models = set()
 cuda_available = False
 gpu_name = None
 gpu_vram_mb = 0
 faster_whisper_available = False
-# For an 8C/16T CPU like Core i9-11950H, 8 physical threads is optimal for CTranslate2 GEMM
-CPU_THREADS = max(4, min(12, (os.cpu_count() or 8) // 2))
 
 try:
     import ctranslate2
@@ -29,14 +41,12 @@ try:
 except Exception:
     pass
 
-if not cuda_available:
-    try:
-        import torch
-        if torch.cuda.is_available():
-            cuda_available = True
-            gpu_name = torch.cuda.get_device_name(0)
-    except Exception:
-        pass
+# Bound CPU threads to fast physical P-cores on hybrid Windows laptops (avoids E-core OpenMP stalls)
+CPU_THREADS = (
+    max(4, min(8, (os.cpu_count() or 8) // 2))
+    if cuda_available
+    else max(2, min(6, (os.cpu_count() or 8) // 2))
+)
 
 if cuda_available:
     try:
@@ -68,17 +78,40 @@ except Exception:
     WhisperModel = None
 
 
-def normalize_ct2_model_name(model_size: str, lang_code: str) -> str:
-    m = (model_size or "distil-small.en").strip()
+def normalize_ct2_model_name(
+    model_size: str,
+    lang_code: str,
+    prefer_engine: str = "auto",
+    low_latency: bool = True,
+    is_partial: bool = False,
+    use_cuda: bool = False,
+) -> str:
+    m = (model_size or "base.en").strip()
     if m == "moonshine-tiny":
-        m = "base.en"
+        m = "tiny.en"
     elif m == "moonshine-base":
-        m = "distil-small.en"
+        m = "base.en"
+
+    # For live partial previews on non-CUDA laptops, use tiny model for <120ms turnaround
+    if is_partial and not use_cuda:
+        m = "tiny.en" if lang_code == "en" else "tiny"
+    # In auto + low-latency mode on non-CUDA laptop CPUs, step down heavy Whisper models to base.en
+    elif (
+        low_latency
+        and not use_cuda
+        and prefer_engine == "auto"
+        and m in ("distil-small.en", "distil-medium.en", "small.en")
+    ):
+        m = "base.en"
 
     if m.endswith(".en") and lang_code != "en":
         if m.startswith("distil-"):
-            return "small"
-        return m[:-3]
+            m = "base" if (low_latency and not use_cuda) else "small"
+        else:
+            m = m[:-3]
+
+    if m not in ALLOWED_CT2_MODELS:
+        m = "base.en" if lang_code == "en" else "base"
     return m
 
 
@@ -103,11 +136,19 @@ def get_or_load_model(model_size: str, force_cpu: bool = False):
     if not faster_whisper_available or WhisperModel is None:
         raise RuntimeError("faster-whisper is not installed")
 
-    normalized = model_size or "distil-small.en"
+    normalized = model_size or ("distil-small.en" if cuda_available else "base.en")
     use_cuda = cuda_available and not force_cpu
     cache_key = f"{normalized}::{'cuda' if use_cuda else 'cpu'}"
     if cache_key in models_cache:
-        return models_cache[cache_key]
+        models_cache.move_to_end(cache_key)
+        return cache_key, models_cache[cache_key][0], models_cache[cache_key][1]
+
+    def store_loaded_model(loaded_model, loaded_label: str):
+        models_cache[cache_key] = (loaded_model, loaded_label)
+        models_cache.move_to_end(cache_key)
+        while len(models_cache) > MAX_CACHED_MODELS:
+            evicted_key, _ = models_cache.popitem(last=False)
+            warmed_models.discard(evicted_key)
 
     if use_cuda:
         # On 4GB-6GB VRAM laptop GPUs, int8_float16 cuts VRAM usage in half while keeping GPU tensor speedup
@@ -119,27 +160,43 @@ def get_or_load_model(model_size: str, force_cpu: bool = False):
                 model = WhisperModel(
                     normalized, device="cuda", compute_type=compute_candidate
                 )
-                models_cache[cache_key] = (
-                    model,
-                    f"faster-whisper CUDA {compute_candidate.upper()} ({gpu_name or 'GPU'})",
-                )
-                return models_cache[cache_key]
+                label = f"faster-whisper CUDA {compute_candidate.upper()} ({gpu_name or 'GPU'})"
+                store_loaded_model(model, label)
+                return cache_key, model, label
             except Exception:
                 continue
 
-    # Multi-threaded INT8 CPU execution (optimized for Core i9-11950H 8C/16T AVX-512 VNNI)
+    # Multi-threaded INT8 CPU execution bounded to physical cores
     model = WhisperModel(
         normalized,
         device="cpu",
         compute_type="int8",
         cpu_threads=CPU_THREADS,
-        num_workers=2,
+        num_workers=1,
     )
-    models_cache[cache_key] = (
-        model,
-        f"faster-whisper CPU INT8 ({CPU_THREADS}T - {normalized})",
-    )
-    return models_cache[cache_key]
+    label = f"faster-whisper CPU INT8 ({CPU_THREADS}T - {normalized})"
+    store_loaded_model(model, label)
+    return cache_key, model, label
+
+
+def warmup_model(model_size: str, lang_code: str, force_cpu: bool = False):
+    cache_key, model, label = get_or_load_model(model_size, force_cpu=force_cpu)
+    if cache_key not in warmed_models:
+        dummy_audio = np.zeros(8000, dtype=np.float32)
+        segments, _ = model.transcribe(
+            dummy_audio,
+            language=lang_code if not model_size.endswith(".en") else "en",
+            beam_size=1,
+            best_of=1,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+            vad_filter=False,
+        )
+        for _ in segments:
+            pass
+        warmed_models.add(cache_key)
+    return label
 
 
 def handle_request(req: dict) -> dict:
@@ -155,16 +212,45 @@ def handle_request(req: dict) -> dict:
             "gpuName": gpu_name,
             "gpuVramMb": gpu_vram_mb,
             "cpuThreads": CPU_THREADS,
-            "activeModel": "distil-small.en",
+            "activeModel": "distil-small.en" if cuda_available else "base.en",
+        }
+
+    if cmd == "warmup":
+        t0 = time.time()
+        raw_model_size = req.get("modelSize", "distil-small.en" if cuda_available else "base.en")
+        prefer_engine = req.get("preferEngine", "auto")
+        force_cpu = prefer_engine == "native-cpu"
+        use_cuda = cuda_available and not force_cpu
+        lang = req.get("lang", "en-US")
+        lang_code = lang.split("-")[0].lower() if lang else "en"
+        model_size = normalize_ct2_model_name(
+            raw_model_size,
+            lang_code,
+            prefer_engine=prefer_engine,
+            low_latency=True,
+            is_partial=False,
+            use_cuda=use_cuda,
+        )
+        label = warmup_model(model_size, lang_code, force_cpu=force_cpu)
+        return {
+            "id": req_id,
+            "success": True,
+            "engineUsed": label,
+            "durationMs": int((time.time() - t0) * 1000),
         }
 
     if cmd == "transcribe":
         t0 = time.time()
         pcm16_b64 = req.get("pcm16Base64", "")
-        raw_model_size = req.get("modelSize", "distil-small.en")
+        raw_model_size = req.get("modelSize", "distil-small.en" if cuda_available else "base.en")
         prefer_engine = req.get("preferEngine", "auto")
         prompt_context = (req.get("promptContext") or "").strip()
         force_cpu = prefer_engine == "native-cpu"
+        use_cuda = cuda_available and not force_cpu
+        low_latency = bool(req.get("lowLatency", not use_cuda))
+        is_partial = bool(req.get("isPartial", False))
+        pre_trimmed = bool(req.get("preTrimmed", False))
+        pre_normalized = bool(req.get("preNormalized", False))
         lang = req.get("lang", "en-US")
         lang_code = lang.split("-")[0].lower() if lang else "en"
 
@@ -176,39 +262,50 @@ def handle_request(req: dict) -> dict:
         if pcm_int16.size < 800:
             return {"id": req_id, "success": True, "text": "", "durationMs": 0}
 
-        audio_float32 = normalize_audio_gain(
-            pcm_int16.astype(np.float32) / 32768.0
+        raw_f32 = pcm_int16.astype(np.float32) / 32768.0
+        audio_float32 = raw_f32 if pre_normalized else normalize_audio_gain(raw_f32)
+        model_size = normalize_ct2_model_name(
+            raw_model_size,
+            lang_code,
+            prefer_engine=prefer_engine,
+            low_latency=low_latency,
+            is_partial=is_partial,
+            use_cuda=use_cuda,
         )
-        model_size = normalize_ct2_model_name(raw_model_size, lang_code)
 
-        model, engine_label = get_or_load_model(model_size, force_cpu=force_cpu)
+        cache_key, model, engine_label = get_or_load_model(model_size, force_cpu=force_cpu)
+        warmed_models.add(cache_key)
 
-        # Build context prompt from recent note text so homophones & technical terms resolve accurately
         initial_prompt = (
-            prompt_context[-220:]
+            prompt_context[-160:]
             if prompt_context
             else "Clear, accurately punctuated technical and professional notes."
         )
 
-        # Beam size 3 significantly improves word accuracy over greedy (beam=1) on both CPU & GPU
-        segments, _info = model.transcribe(
-            audio_float32,
+        use_greedy = low_latency or is_partial
+        beam_size = 1 if use_greedy else (3 if use_cuda else 2)
+        use_vad = not (is_partial or (pre_trimmed and audio_float32.size <= 96000))
+
+        transcribe_kwargs = dict(
             language=lang_code if not model_size.endswith(".en") else "en",
-            beam_size=3,
-            best_of=3,
-            temperature=[0.0, 0.2],
-            repetition_penalty=1.08,
+            beam_size=beam_size,
+            best_of=1 if use_greedy else 2,
+            temperature=0.0,
+            repetition_penalty=1.05,
             initial_prompt=initial_prompt,
-            condition_on_previous_text=True,
+            condition_on_previous_text=not use_greedy,
             without_timestamps=True,
-            vad_filter=True,
-            vad_parameters=dict(
-                threshold=0.35,
-                min_speech_duration_ms=150,
-                min_silence_duration_ms=350,
-                speech_pad_ms=250,
-            ),
+            vad_filter=use_vad,
         )
+        if use_vad:
+            transcribe_kwargs["vad_parameters"] = dict(
+                threshold=0.35,
+                min_speech_duration_ms=140,
+                min_silence_duration_ms=280,
+                speech_pad_ms=200,
+            )
+
+        segments, _info = model.transcribe(audio_float32, **transcribe_kwargs)
         text = " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
         duration_ms = int((time.time() - t0) * 1000)
         return {
@@ -243,6 +340,7 @@ def main():
         line = line.strip()
         if not line:
             continue
+        req = None
         try:
             req = json.loads(line)
             resp = handle_request(req)

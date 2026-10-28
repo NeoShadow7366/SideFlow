@@ -19,6 +19,8 @@ import {
   X,
 } from 'lucide-react';
 import {
+  AdfBlockNode,
+  AdfDocNode,
   AppDrawer,
   AppItem,
   AppUpdateState,
@@ -37,6 +39,11 @@ import {
   ToastMessage,
   ToastVariant,
 } from './types/sideflow';
+import {
+  adfToMarkdown,
+  markdownToAdf,
+  validateAndNormalizeAdfDoc,
+} from './utils/adf';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import {
   defaultDrawers,
@@ -166,6 +173,10 @@ export const App: React.FC = () => {
     startPercent: number;
     hasChanged: boolean;
   } | null>(null);
+  const stableNotesResetEpochRef = useRef<number>(workspaceResetEpoch);
+  if (!isDictating) {
+    stableNotesResetEpochRef.current = workspaceResetEpoch;
+  }
   const isElectronWindow = Boolean(window.sideflow?.isElectron);
   const safeMonitorSettings = sanitizeMonitorSettings(monitorSettings);
   const enabledDisplays = resolveEnabledDisplays(displays, safeMonitorSettings);
@@ -992,7 +1003,39 @@ export const App: React.FC = () => {
             typeof (n as NoteItem).body === 'string'
         )
       ) {
-        setNotes(parsed.notes);
+        const sanitizedNotes: NoteItem[] = parsed.notes.map((rawNote: NoteItem) => {
+          const safeTitle =
+            typeof rawNote.title === 'string' ? rawNote.title : 'Untitled Note';
+          const safeTags = Array.isArray(rawNote.tags)
+            ? rawNote.tags.filter((t): t is string => typeof t === 'string')
+            : undefined;
+          if (rawNote.format === 'adf') {
+            const validated = rawNote.adfDoc
+              ? validateAndNormalizeAdfDoc(rawNote.adfDoc)
+              : null;
+            const resolvedDoc =
+              validated && validated.valid
+                ? validated.doc
+                : markdownToAdf(rawNote.body);
+            return {
+              ...rawNote,
+              title: safeTitle,
+              tags: safeTags,
+              format: 'adf',
+              adfDoc: resolvedDoc,
+              body: rawNote.body || adfToMarkdown(resolvedDoc),
+            };
+          }
+          const { adfDoc: _discardedAdfDoc, ...restNote } = rawNote;
+          void _discardedAdfDoc;
+          return {
+            ...restNote,
+            title: safeTitle,
+            tags: safeTags,
+            format: rawNote.format === 'markdown' ? 'markdown' : undefined,
+          };
+        });
+        setNotes(sanitizedNotes);
         if (typeof parsed.activeNoteId === 'string') {
           setActiveNoteId(parsed.activeNoteId);
         }
@@ -1928,17 +1971,44 @@ export const App: React.FC = () => {
                 const targetId = targetNote.id;
                 const targetTitle = targetNote.title || 'Scratchpad Note';
                 setNotes((prev) =>
-                  prev.map((n) =>
-                    n.id === targetId
-                      ? {
-                          ...n,
-                          body: `${n.body.replace(/\s+$/, '')}${
-                            n.body.trim() ? '\n' : ''
-                          }${fenced}`,
-                          updatedAt: Date.now(),
-                        }
-                      : n
-                  )
+                  prev.map((n) => {
+                    if (n.id !== targetId) return n;
+                    if (n.format === 'adf') {
+                      const validated = n.adfDoc
+                        ? validateAndNormalizeAdfDoc(n.adfDoc)
+                        : null;
+                      const baseDoc: AdfDocNode =
+                        validated && validated.valid
+                          ? validated.doc
+                          : markdownToAdf(n.body);
+                      const trimmedMermaid = mermaidCode.trim();
+                      const mermaidBlock: AdfBlockNode = {
+                        type: 'codeBlock',
+                        attrs: { language: 'mermaid' },
+                        content: trimmedMermaid
+                          ? [{ type: 'text', text: trimmedMermaid }]
+                          : [],
+                      };
+                      const nextDoc: AdfDocNode = {
+                        version: 1,
+                        type: 'doc',
+                        content: [...baseDoc.content, mermaidBlock],
+                      };
+                      return {
+                        ...n,
+                        adfDoc: nextDoc,
+                        body: adfToMarkdown(nextDoc),
+                        updatedAt: Date.now(),
+                      };
+                    }
+                    return {
+                      ...n,
+                      body: `${n.body.replace(/\s+$/, '')}${
+                        n.body.trim() ? '\n' : ''
+                      }${fenced}`,
+                      updatedAt: Date.now(),
+                    };
+                  })
                 );
                 notify(
                   'Inserted Mermaid into Note',
@@ -1962,7 +2032,7 @@ export const App: React.FC = () => {
           }
         >
           <NotesView
-            key={isDictating ? 'dictating' : workspaceResetEpoch}
+            key={stableNotesResetEpochRef.current}
             notes={notes}
             onChangeNotes={setNotes}
             activeNoteId={activeNoteId}

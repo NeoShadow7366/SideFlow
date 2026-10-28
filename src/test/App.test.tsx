@@ -530,6 +530,258 @@ describe('SideFlow Application Integration Suite', () => {
       );
       expect(bodyInput.value).toMatch(/\[\d{1,2}:\d{2}.*\]/);
     });
+
+    it('toggles Instant Mode switch cleanly from aria-checked="true" by default to "false" alongside the STT config drawer', () => {
+      render(<App />);
+      fireEvent.click(screen.getByRole('tab', { name: /Notes/i }));
+
+      // Open the STT configuration drawer
+      fireEvent.click(
+        screen.getByRole('button', {
+          name: /Configure Local STT Engine & Microphone/i,
+        })
+      );
+      const sttDrawer = screen.getByTestId('stt-config-drawer');
+      expect(sttDrawer).toBeInTheDocument();
+      expect(sttDrawer).toHaveTextContent(/Instant Mode ON/i);
+
+      const instantSwitch = screen.getByRole('switch', {
+        name: /Instant/i,
+      });
+      expect(instantSwitch).toHaveAttribute('aria-checked', 'true');
+
+      // Toggle Instant Mode OFF
+      fireEvent.click(instantSwitch);
+      expect(instantSwitch).toHaveAttribute('aria-checked', 'false');
+      expect(sttDrawer).toHaveTextContent(/Deep Accuracy Mode/i);
+
+      const savedSettings = JSON.parse(
+        window.localStorage.getItem('sideflow_stt_settings') || '{}'
+      );
+      expect(savedSettings.instantMode).toBe(false);
+    });
+
+    it('preserves mounted NotesView instance and per-note Undo history across starting and stopping voice dictation', async () => {
+      let activeRecognition: {
+        onresult: ((e: unknown) => void) | null;
+        onend: (() => void) | null;
+      } | null = null;
+
+      class MockSpeechRecognition {
+        lang = 'en-US';
+        continuous = true;
+        interimResults = true;
+        onresult: ((e: unknown) => void) | null = null;
+        onerror: ((e: { error: string }) => void) | null = null;
+        onend: (() => void) | null = null;
+        start() {
+          activeRecognition = this;
+        }
+        stop() {
+          this.onend?.();
+        }
+      }
+
+      (
+        window as unknown as { SpeechRecognition: unknown }
+      ).SpeechRecognition = MockSpeechRecognition;
+
+      try {
+        render(<App />);
+        fireEvent.click(screen.getByRole('tab', { name: /Notes/i }));
+        fireEvent.click(screen.getByRole('button', { name: /New Note/i }));
+
+        const editorBefore = screen.getByLabelText(
+          /Note Body/i
+        ) as HTMLTextAreaElement;
+        fireEvent.change(editorBefore, {
+          target: { value: 'Manual draft before dictation' },
+        });
+
+        const undoBtn = screen.getByRole('button', {
+          name: /Undo Note Edit/i,
+        });
+        expect(undoBtn).not.toBeDisabled();
+
+        // Start dictation -> NotesView must NOT unmount or wipe historyMapRef
+        fireEvent.click(
+          screen.getByRole('button', { name: /Start voice dictation/i })
+        );
+        expect(screen.getByLabelText(/Note Body/i)).toBe(editorBefore);
+        expect(
+          screen.getByRole('button', { name: /Undo Note Edit/i })
+        ).not.toBeDisabled();
+
+        // Commit a spoken phrase during active dictation
+        act(() => {
+          activeRecognition?.onresult?.({
+            resultIndex: 0,
+            results: {
+              length: 1,
+              0: {
+                isFinal: true,
+                0: { transcript: 'plus dictated note line' },
+              },
+            },
+          });
+        });
+        expect(editorBefore.value).toBe(
+          'Manual draft before dictation plus dictated note line'
+        );
+
+        // Stop dictation (async flush) -> NotesView must remain mounted and Undo Note Edit remains enabled
+        await act(async () => {
+          fireEvent.click(
+            screen.getByRole('button', { name: /Stop voice dictation/i })
+          );
+        });
+        expect(screen.getByLabelText(/Note Body/i)).toBe(editorBefore);
+
+        const undoBtnAfterStop = screen.getByRole('button', {
+          name: /Undo Note Edit/i,
+        });
+        expect(undoBtnAfterStop).not.toBeDisabled();
+
+        // Undo steps back cleanly through both dictated edit and pre-dictation manual edit
+        fireEvent.click(undoBtnAfterStop);
+        expect(editorBefore.value).toBe('Manual draft before dictation');
+        expect(undoBtnAfterStop).not.toBeDisabled();
+
+        fireEvent.click(undoBtnAfterStop);
+        expect(editorBefore.value).toBe('');
+      } finally {
+        delete (window as unknown as { SpeechRecognition?: unknown })
+          .SpeechRecognition;
+      }
+    });
+
+    it('renders non-destructive live interim streaming HUD during isFinal:false SpeechRecognition events without mutating #note-body-input and hides it when finalized or stopped', async () => {
+      let activeRecognition: {
+        onresult: ((e: unknown) => void) | null;
+        onend: (() => void) | null;
+      } | null = null;
+
+      class MockInterimSpeechRecognition {
+        lang = 'en-US';
+        continuous = true;
+        interimResults = true;
+        onresult: ((e: unknown) => void) | null = null;
+        onerror: ((e: { error: string }) => void) | null = null;
+        onend: (() => void) | null = null;
+        start() {
+          activeRecognition = this;
+        }
+        stop() {
+          this.onend?.();
+        }
+      }
+
+      (
+        window as unknown as { SpeechRecognition: unknown }
+      ).SpeechRecognition = MockInterimSpeechRecognition;
+
+      try {
+        render(<App />);
+        fireEvent.click(screen.getByRole('tab', { name: /Notes/i }));
+        fireEvent.click(screen.getByRole('button', { name: /New Note/i }));
+
+        const bodyInput = document.getElementById(
+          'note-body-input'
+        ) as HTMLTextAreaElement;
+        fireEvent.change(bodyInput, {
+          target: { value: 'Existing note paragraph.' },
+        });
+        expect(
+          screen.queryByTestId('note-live-interim-banner')
+        ).not.toBeInTheDocument();
+
+        // Start dictation
+        fireEvent.click(
+          screen.getByRole('button', { name: /Start voice dictation/i })
+        );
+        expect(activeRecognition).not.toBeNull();
+
+        // 1. Emit interim result (isFinal: false) -> HUD renders, #note-body-input is untouched
+        act(() => {
+          activeRecognition?.onresult?.({
+            resultIndex: 0,
+            results: {
+              length: 1,
+              0: {
+                isFinal: false,
+                0: { transcript: 'streaming interim words live' },
+              },
+            },
+          });
+        });
+
+        const interimBanner = screen.getByTestId('note-live-interim-banner');
+        expect(interimBanner).toBeInTheDocument();
+        expect(interimBanner).toHaveTextContent('streaming interim words live');
+        expect(bodyInput.value).toBe('Existing note paragraph.');
+
+        // 2. Finalize utterance (isFinal: true) -> #note-body-input updates and HUD disappears
+        act(() => {
+          activeRecognition?.onresult?.({
+            resultIndex: 0,
+            results: {
+              length: 1,
+              0: {
+                isFinal: true,
+                0: { transcript: 'streaming interim words finalized' },
+              },
+            },
+          });
+        });
+
+        expect(bodyInput.value).toBe(
+          'Existing note paragraph. streaming interim words finalized'
+        );
+        expect(
+          screen.queryByTestId('note-live-interim-banner')
+        ).not.toBeInTheDocument();
+
+        // 3. Emit a second interim fragment, then stop dictation -> HUD disappears without mutating #note-body-input
+        act(() => {
+          activeRecognition?.onresult?.({
+            resultIndex: 1,
+            results: {
+              length: 2,
+              0: {
+                isFinal: true,
+                0: { transcript: 'streaming interim words finalized' },
+              },
+              1: {
+                isFinal: false,
+                0: { transcript: 'uncommitted trailing fragment' },
+              },
+            },
+          });
+        });
+
+        expect(
+          screen.getByTestId('note-live-interim-banner')
+        ).toHaveTextContent('uncommitted trailing fragment');
+        expect(bodyInput.value).toBe(
+          'Existing note paragraph. streaming interim words finalized'
+        );
+
+        await act(async () => {
+          fireEvent.click(
+            screen.getByRole('button', { name: /Stop voice dictation/i })
+          );
+        });
+        expect(
+          screen.queryByTestId('note-live-interim-banner')
+        ).not.toBeInTheDocument();
+        expect(bodyInput.value).toBe(
+          'Existing note paragraph. streaming interim words finalized'
+        );
+      } finally {
+        delete (window as unknown as { SpeechRecognition?: unknown })
+          .SpeechRecognition;
+      }
+    });
   });
 
   describe('SettingsView (Global Hotkey Recorder & Auto-Hide Pin Toggle)', () => {

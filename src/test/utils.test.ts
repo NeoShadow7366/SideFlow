@@ -34,10 +34,14 @@ import { useLocalStorage } from '../hooks/useLocalStorage';
 import { FlowchartState } from '../types/sideflow';
 import {
   computeRmsLevel,
+  detectLocalSttCapabilities,
   normalizeAudioFloat32,
   trimSilenceFloat32,
   mergeFloat32Chunks,
+  mergeRecentFloat32Chunks,
+  preloadLocalSttEngine,
   resampleTo16kHz,
+  resolveEffectiveModelSize,
   float32ToPcm16Base64,
   transcribeAudioChunkHybrid,
 } from '../utils/localSttEngine';
@@ -1284,6 +1288,248 @@ describe('localSttEngine DSP & Hybrid Multi-Engine Router', () => {
         promptContext: 'SideFlow Core i9 11950H',
       })
     );
+  });
+
+  it('slices trailing audio samples in O(1) via mergeRecentFloat32Chunks across empty, tail-windowed, and short buffers', () => {
+    // 1. Empty array or non-positive maxSamples
+    expect(mergeRecentFloat32Chunks([], 1600)).toEqual(new Float32Array(0));
+    expect(
+      mergeRecentFloat32Chunks([new Float32Array([1, 2, 3])], 0)
+    ).toEqual(new Float32Array(0));
+
+    // 2. Subset windowing from tail without copying earlier chunks
+    const chunks = [
+      new Float32Array([1, 2, 3]),
+      new Float32Array([4, 5, 6]),
+      new Float32Array([7, 8]),
+    ];
+    expect(Array.from(mergeRecentFloat32Chunks(chunks, 4))).toEqual([
+      5, 6, 7, 8,
+    ]);
+    expect(Array.from(mergeRecentFloat32Chunks(chunks, 5))).toEqual([
+      4, 5, 6, 7, 8,
+    ]);
+    expect(Array.from(mergeRecentFloat32Chunks(chunks, 1))).toEqual([8]);
+
+    // 3. Full array returned when total length is shorter than maxSamples
+    const shortChunks = [
+      new Float32Array([0.25, 0.5]),
+      new Float32Array([0.75]),
+    ];
+    expect(Array.from(mergeRecentFloat32Chunks(shortChunks, 10))).toEqual([
+      0.25, 0.5, 0.75,
+    ]);
+  });
+
+  it('resolves effective model size in resolveEffectiveModelSize for non-CUDA Instant Mode vs explicit overrides and CUDA', () => {
+    const nonCudaCaps = {
+      available: true,
+      fasterWhisperAvailable: false,
+      cudaAvailable: false,
+      windowsSapiAvailable: false,
+      webGpuAvailable: false,
+    };
+    const cudaCaps = {
+      available: true,
+      fasterWhisperAvailable: true,
+      cudaAvailable: true,
+      windowsSapiAvailable: true,
+      webGpuAvailable: true,
+    };
+
+    // Steps down heavy distil-small.en to moonshine-tiny on non-CUDA laptop worker in auto + instantMode: true
+    expect(
+      resolveEffectiveModelSize({
+        engineMode: 'auto',
+        modelSize: 'distil-small.en',
+        lang: 'en-US',
+        instantMode: true,
+        forWorker: true,
+        caps: nonCudaCaps,
+      })
+    ).toBe('moonshine-tiny');
+
+    // Steps down heavy distil-small.en to multilingual tiny for non-English worker in auto + instantMode: true
+    expect(
+      resolveEffectiveModelSize({
+        engineMode: 'auto',
+        modelSize: 'distil-small.en',
+        lang: 'es-ES',
+        instantMode: true,
+        forWorker: true,
+        caps: nonCudaCaps,
+      })
+    ).toBe('tiny');
+
+    // Preserves explicit distil-small.en when instantMode is false
+    expect(
+      resolveEffectiveModelSize({
+        engineMode: 'auto',
+        modelSize: 'distil-small.en',
+        lang: 'en-US',
+        instantMode: false,
+        forWorker: true,
+        caps: nonCudaCaps,
+      })
+    ).toBe('distil-small.en');
+
+    // Preserves explicit distil-small.en when engineMode is 'native-cpu'
+    expect(
+      resolveEffectiveModelSize({
+        engineMode: 'native-cpu',
+        modelSize: 'distil-small.en',
+        lang: 'en-US',
+        instantMode: true,
+        forWorker: true,
+        caps: nonCudaCaps,
+      })
+    ).toBe('distil-small.en');
+
+    // Preserves explicit distil-small.en when cudaAvailable is true
+    expect(
+      resolveEffectiveModelSize({
+        engineMode: 'auto',
+        modelSize: 'distil-small.en',
+        lang: 'en-US',
+        instantMode: true,
+        forWorker: true,
+        caps: cudaCaps,
+      })
+    ).toBe('distil-small.en');
+  });
+
+  it('preloads active local STT engine via window.sideflow.warmupLocalStt for os-speech and fasterWhisperAvailable routes', async () => {
+    // 1. Explicit os-speech route invokes warmupLocalStt with preferEngine: 'os-speech'
+    const warmupOsMock = vi.fn().mockResolvedValue({
+      success: true,
+      engineUsed: 'Windows Offline Speech (SAPI)',
+      durationMs: 14,
+    });
+    window.sideflow = {
+      isElectron: true,
+      getLocalSttStatus: vi.fn().mockResolvedValue({
+        available: true,
+        fasterWhisperAvailable: false,
+        cudaAvailable: false,
+        windowsSapiAvailable: true,
+      }),
+      warmupLocalStt: warmupOsMock,
+    } as unknown as typeof window.sideflow;
+
+    const osRes = await preloadLocalSttEngine({
+      lang: 'en-US',
+      engineMode: 'os-speech',
+      modelSize: 'moonshine-tiny',
+      instantMode: true,
+    });
+    expect(warmupOsMock).toHaveBeenCalledTimes(1);
+    expect(warmupOsMock).toHaveBeenCalledWith({
+      lang: 'en-US',
+      modelSize: 'moonshine-tiny',
+      preferEngine: 'os-speech',
+    });
+    expect(osRes).toEqual({
+      success: true,
+      engineUsed: 'Windows Offline Speech (SAPI)',
+      durationMs: 14,
+    });
+
+    // 2. Auto mode when fasterWhisperAvailable is true invokes warmupLocalStt
+    const warmupNativeMock = vi.fn().mockResolvedValue({
+      success: true,
+      engineUsed: 'faster-whisper CPU INT8',
+      durationMs: 42,
+    });
+    window.sideflow = {
+      isElectron: true,
+      getLocalSttStatus: vi.fn().mockResolvedValue({
+        available: true,
+        fasterWhisperAvailable: true,
+        cudaAvailable: false,
+        windowsSapiAvailable: true,
+      }),
+      warmupLocalStt: warmupNativeMock,
+    } as unknown as typeof window.sideflow;
+
+    const nativeRes = await preloadLocalSttEngine({
+      lang: 'en-US',
+      engineMode: 'auto',
+      modelSize: 'distil-small.en',
+      instantMode: true,
+    });
+    expect(warmupNativeMock).toHaveBeenCalledTimes(1);
+    expect(warmupNativeMock).toHaveBeenCalledWith({
+      lang: 'en-US',
+      modelSize: 'base.en',
+      preferEngine: 'auto',
+    });
+    expect(nativeRes).toEqual({
+      success: true,
+      engineUsed: 'faster-whisper CPU INT8',
+      durationMs: 42,
+    });
+  });
+
+  it('skips wasted faster-whisper native IPC in auto mode when hot status cache reports fasterWhisperAvailable: false', async () => {
+    const transcribeMock = vi.fn().mockResolvedValue({
+      success: true,
+      text: 'SAPI fallback phrase',
+      engineUsed: 'Windows Offline Speech (SAPI)',
+      durationMs: 35,
+    });
+    const statusMock = vi.fn().mockResolvedValue({
+      available: true,
+      fasterWhisperAvailable: false,
+      cudaAvailable: false,
+      windowsSapiAvailable: true,
+    });
+
+    window.sideflow = {
+      isElectron: true,
+      getLocalSttStatus: statusMock,
+      transcribeAudioLocal: transcribeMock,
+    } as unknown as typeof window.sideflow;
+
+    // Populate the hot capability cache for this bridge instance
+    const caps = await detectLocalSttCapabilities();
+    expect(caps.fasterWhisperAvailable).toBe(false);
+    expect(statusMock).toHaveBeenCalledTimes(1);
+
+    const activeAudio = new Float32Array(3200).fill(0.18);
+
+    // 1. Live partial preview in 'auto' mode skips transcribeAudioLocal IPC completely (0 calls)
+    await transcribeAudioChunkHybrid({
+      audio16k: activeAudio,
+      lang: 'en-US',
+      engineMode: 'auto',
+      modelSize: 'moonshine-tiny',
+      instantMode: true,
+      isPartial: true,
+    });
+    expect(transcribeMock).not.toHaveBeenCalled();
+
+    // 2. Final utterance in 'auto' mode never invokes native faster-whisper ('auto') IPC;
+    // in jsdom (where Worker is disabled) it falls straight through to last-resort 'os-speech'
+    const finalRes = await transcribeAudioChunkHybrid({
+      audio16k: activeAudio,
+      lang: 'en-US',
+      engineMode: 'auto',
+      modelSize: 'moonshine-tiny',
+      instantMode: true,
+      isPartial: false,
+    });
+    expect(
+      transcribeMock.mock.calls.some(
+        ([arg]) => arg?.preferEngine === 'auto'
+      )
+    ).toBe(false);
+    expect(transcribeMock).toHaveBeenCalledTimes(1);
+    expect(transcribeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preferEngine: 'os-speech',
+      })
+    );
+    expect(finalRes.text).toBe('SAPI fallback phrase');
   });
 });
 

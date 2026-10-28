@@ -101,6 +101,16 @@ export interface SideFlowElectronAPI {
     windowsSapiAvailable: boolean;
     activeModel?: string;
   }>;
+  warmupLocalStt: (payload?: {
+    lang?: string;
+    modelSize?: string;
+    preferEngine?: string;
+  }) => Promise<{
+    success: boolean;
+    engineUsed?: string;
+    durationMs?: number;
+    error?: string;
+  }>;
   transcribeAudioLocal: (payload: {
     pcm16Base64: string;
     sampleRate: number;
@@ -108,6 +118,10 @@ export interface SideFlowElectronAPI {
     modelSize?: string;
     preferEngine?: string;
     promptContext?: string;
+    lowLatency?: boolean;
+    isPartial?: boolean;
+    preTrimmed?: boolean;
+    preNormalized?: boolean;
   }) => Promise<{
     success: boolean;
     text?: string;
@@ -231,6 +245,7 @@ const sideflowAPI: SideFlowElectronAPI = {
   storeGetAll: () => ipcRenderer.invoke('store-get-all'),
   storeSet: (key: string, value: unknown) => ipcRenderer.send('store-set', { key, value }),
   getLocalSttStatus: () => ipcRenderer.invoke('get-local-stt-status'),
+  warmupLocalStt: (payload) => ipcRenderer.invoke('warmup-local-stt', payload),
   transcribeAudioLocal: (payload) => ipcRenderer.invoke('transcribe-audio-local', payload),
   getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
   setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke('set-auto-launch', enabled),

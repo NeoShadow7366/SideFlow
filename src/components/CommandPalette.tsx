@@ -438,19 +438,22 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       const safeBody = typeof note.body === 'string' ? note.body : '';
       const tags = extractNoteTags(note, safeBody);
       const isCurrentNote = note.id === activeNoteId;
+      const isAdfNote = note.format === 'adf';
       items.push({
         id: `note-${note.id}`,
         section: 'notes',
         title: note.title || 'Untitled Note',
         subtitle: buildNoteSnippet(safeBody, ''),
         rawBodyForSnippet: safeBody,
-        keywords: `note markdown scratchpad ${tags.join(' ')} ${safeBody.slice(
+        keywords: `note ${
+          isAdfNote ? 'jira adf atlassian rich' : 'markdown'
+        } scratchpad ${tags.join(' ')} ${safeBody.slice(
           0,
           600
         )}`,
         badge: note.pinned
           ? 'Pinned Note'
-          : tags[0] || (isCurrentNote ? 'Active' : undefined),
+          : tags[0] || (isAdfNote ? 'Jira ADF' : isCurrentNote ? 'Active' : undefined),
         accent: note.pinned ? 'amber' : 'cyan',
         renderIcon: () => <FileText className="w-4 h-4" aria-hidden="true" />,
         onSelect: () => {

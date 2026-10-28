@@ -336,6 +336,7 @@ svg[tabindex="0"]:focus-visible {
   }
   .recording-pulse::before,
   .animate-ping,
+  .animate-pulse,
   .animate-spin {
     animation: none !important;
   }
