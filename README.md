@@ -174,12 +174,14 @@ SideFlow/
 │   │   │   └── DrawerCard.tsx          # Collapsible category drawer with native file/URL drag-and-drop zone
 │   │   ├── Flowchart/
 │   │   │   ├── FlowCanvas.tsx          # Interactive SVG bezier edge layer + draggable HTML nodes editor
+│   │   │   ├── FlowMinimap.tsx         # Collapsible interactive SVG bird's-eye minimap radar & camera panner
 │   │   │   └── LucidModal.tsx          # Bi-directional Mermaid.js generator/parser & Lucidchart launcher
 │   │   ├── Notes/
 │   │   │   ├── NotesView.tsx           # Multi-note tab bar, title/body editor, word/char counter
 │   │   │   └── VoiceBar.tsx            # Web Speech API & local Whisper continuous dictation controller & tools
 │   │   ├── Settings/
 │   │   │   └── SettingsView.tsx        # Hotkey recorder, multi-monitor routing, panel edge/width, auto-updates, JSON backup/import/reset
+│   │   ├── CommandPalette.tsx          # Global Ctrl+K WAI-ARIA combobox/listbox search across apps, flows, notes & actions
 │   │   ├── DynamicIcon.tsx             # Maps icon identifier strings to Lucide React components
 │   │   ├── ElectronModal.tsx           # Reference modal displaying native Electron wrapper setup & code
 │   │   ├── Header.tsx                  # Panel header with Pin/Auto-Hide toggle button, tab switcher, and collapse controls
@@ -565,3 +567,4 @@ Managed via [`useLocalStorage`](src/hooks/useLocalStorage.ts) in `localStorage` 
 | `sideflow_dock_effect` | `DockHoverEffect` | `'zoom'` | App tile hover magnification style (`'zoom'`, `'swing'`, `'glow'`, `'none'`) |
 | `sideflow_dock_size` | `DockIconSize` | `'normal'` | App tile icon density (`'compact'`, `'normal'`, `'large'`) |
 | `sideflow_lock_icons` | `boolean` | `false` | Locks app tiles against accidental drag, edit, or removal |
+| `sideflow_flow_minimap` | `boolean` | `true` | Whether the interactive Flowchart Minimap radar is expanded on the Flow canvas |

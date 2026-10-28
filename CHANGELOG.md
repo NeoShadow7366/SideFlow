@@ -5,6 +5,18 @@ All notable changes to **SideFlow** (`sideflow-desktop`) will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-28
+
+### Added
+- **Global `Ctrl+K` / `Cmd+K` Command Palette (`src/components/CommandPalette.tsx`):** Added an accessible WAI-ARIA 1.2 `combobox` + `listbox` modal palette summonable from anywhere via `Ctrl+K` / `Cmd+K` (auto-opening the panel when retracted) or the Header quick-search trigger (`open-command-palette-btn`). Supports multi-token and subsequence fuzzy filtering, category pills (*All*, *Apps*, *Flows*, *Notes*, *Commands*), and instant execution across Dock Applications (with drawer-sort-aware `Alt+1..9` shortcut badges), Saved Flowchart Diagrams, Notes (`title`, `#tags`, and query-centered body snippets), and Workspace/Settings commands.
+- **Interactive Flowchart Minimap Radar (`src/components/Flowchart/FlowMinimap.tsx`):** Added a collapsible bird's-eye SVG radar docked above the canvas HUD (`toggle-flow-minimap-btn`, persisted via `sideflow_flow_minimap`), rendering high-contrast (`>= 3:1` WCAG 1.4.11) subgraph enclosures, connector edges, shape- and color-coded node silhouettes, and a live cyan camera viewport frame with frozen-snapshot click/drag-to-pan and `role="application"` keyboard navigation (`Arrow*`, `Shift+Arrow*`, `Home`, `Escape`).
+
+### Changed
+- **Responsive Narrow-Bezel Header (`@container sf-header`) & Popover Stacking:** Added tiered `@container sf-header` breakpoints (`560px`, `520px`, `430px`, `380px`) in `src/index.css` and `src/components/Header.tsx` so the header scales down cleanly to `320px` panel widths with zero horizontal overflow, elevated `flow-canvas-stage` (`z-40`) while dimming `FlowMinimap` when node/edge popovers open, isolated `flowDiagramSyncEpoch` so `<NotesView>` preserves active editor state on diagram switches, and suppressed background `DockView` app hotkeys whenever any `<Modal>` is open.
+
+### Security
+- **Command Palette Icon Scheme & Diagram Storage Validation:** Enforced `isSafeCustomIconUrl` URI scheme allowlisting (`https:`, `http:`, and raster `data:image/*` types, rejecting `data:image/svg+xml`, `javascript:`, and `file:`) and structural schema validation (`readSavedDiagramsSnapshot`) before rendering saved flowchart entries in `CommandPalette`.
+
 ## [1.2.1] - 2026-10-26
 
 ### Changed
@@ -57,6 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Voice-Dictated Multi-Note Scratchpad:** Multi-note editor with continuous speech-to-text dictation, language selection, one-click timestamps, clipboard copy, and JSON workspace backup/reset.
 - **Cross-Platform Build & Test Tooling:** Configured Windows NSIS/Portable and macOS DMG packaging via `electron-builder` with 256×256 application icons, WCAG accessibility support, and automated Vitest + React Testing Library suites.
 
+[1.3.0]: https://github.com/NeoShadow7366/SideFlow/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/NeoShadow7366/SideFlow/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/NeoShadow7366/SideFlow/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/NeoShadow7366/SideFlow/compare/v1.0.0...v1.1.0
