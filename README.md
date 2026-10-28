@@ -11,7 +11,7 @@ It unifies three high-frequency daily workflows into a single zero-context-switc
 1. [Executive Summary & Core Workflows](#1-executive-summary--core-workflows)
    - [ObjectDock-Style Categorized App Drawers](#11-objectdock-style-categorized-app-drawers)
    - [On-The-Fly Flowchart Scratchpad with Lucidchart Mermaid Bridge](#12-on-the-fly-flowchart-scratchpad-with-lucidchart-mermaid-bridge)
-   - [Voice-Dictated Multi-Note Scratchpad](#13-voice-dictated-multi-note-scratchpad)
+   - [Markdown (MD) & Jira ADF Voice-Dictated Scratchpad](#13-markdown-md--jira-adf-voice-dictated-scratchpad)
    - [Configurable Global Hotkey Recorder & Window Management](#14-configurable-global-hotkey-recorder--window-management)
 2. [Architecture & Tech Stack](#2-architecture--tech-stack)
 3. [Project Directory Structure](#3-project-directory-structure)
@@ -59,13 +59,22 @@ Rapidly sketch system architectures, decision trees, and API flows without leavi
   - Edit Mermaid code directly in the modal and click **Sync to Canvas** (`parseMermaidCode`) to reconstruct nodes and edges back on the visual canvas, **Copy Code** for one-step paste into Lucidchart (`Insert -> Mermaid`), or launch Lucidchart documents directly.
 - **Standalone SVG Export:** Click **Download SVG** (`generateStandaloneSVG`) to export a self-contained, styled `.svg` file of the diagram.
 
-### 1.3 Voice-Dictated Multi-Note Scratchpad
-Capture meeting notes, sprint tasks, and voice memos with zero friction:
-- **Multi-Note Pill Navigation:** Create, switch between, title, and delete multiple persistent notes.
-- **Real-Time Web Speech API Dictation:**
-  - Click the microphone button (with pulsing red recording ring `.recording-pulse`) to stream live speech-to-text into the active note using `SpeechRecognition` / `webkitSpeechRecognition` (`continuous: true`, `interimResults: true`).
-  - Supports language selection (`en-US`, `en-GB`, `es-ES`, `fr-FR`, `de-DE`, `ja-JP`), live interim transcript preview, automatic restart on speech end while active, and a graceful simulated dictation fallback when running in restricted/sandboxed browser environments without microphone access.
-- **Quick Note Utilities:** One-click **Insert Timestamp** (`[HH:MM AM/PM]`), one-click **Copy Note** to clipboard, and a live word/character counter with automatic local save indicator.
+### 1.3 Markdown (MD) & Jira ADF Voice-Dictated Scratchpad
+Author rich technical specs, Jira tickets, meeting notes, and voice memos in a dual-mode multi-note workspace:
+- **Multi-Note Organization & Metadata Pills:** Create, switch between, search (`Ctrl+F`), pin, color-code (`AccentColor`), `#tag`, and delete multiple persistent notes (with 6-second `[Undo]` recovery and `Ctrl+K` Command Palette search featuring `Jira ADF` badges and query-centered snippets).
+- **Per-Note `Markdown (MD)` ↔ `Jira ADF` Toggle & Bidirectional Conversion (`src/utils/adf.ts`):**
+  - Switch any note between **`Markdown (MD)`** (`note.format: 'markdown'`) and **`Jira ADF`** (`note.format: 'adf'`, Atlassian Document Format Schema v1: `version: 1`, `type: 'doc'`) with unified `NoteHistorySnapshot` undo/redo (`Ctrl+Z` / `Ctrl+Y`) across format transitions.
+  - Lossless-first `markdownToAdf` ↔ `adfToMarkdown` conversion supporting `H1`–`H6` headings, inline marks (`bold`, `italic`, `underline`, `strike`, `code`, `sub`/`sup`), links & smart cards, status lozenges (`[STATUS: LABEL | color]`), `@mentions`, `:emoji:`, dates, nested bullet/ordered lists, `- [ ]` / `- [x]` action checklists (`taskList` / `taskItem`), `<>` decisions (`decisionList` / `decisionItem`), blockquotes, `> [!INFO|NOTE|SUCCESS|WARNING|ERROR]` panels, fenced code blocks (including `mermaid`), Markdown tables with escaped pipes, `<details>` ↔ `expand` blocks, and `---` dividers.
+  - Contextual workspace layouts: **`Edit | Split | Preview`** in Markdown mode versus **`Visual | Split | ADF JSON`** in Jira ADF mode (with live ADF Schema v1 validation and one-click `Prettify`).
+- **WYSIWYG Jira Cloud Description Editor (`JiraAdfEditor.tsx`, `JiraSlashMenu.tsx`):**
+  - **Sticky Jira Formatting Toolbar:** Text styles (`Normal text`, `H1`–`H6`, `Blockquote`), inline marks with ADF v1 mark-exclusion rules (`Bold`, `Italic`, `Underline`, `Strikethrough`, `Inline code`, `Subscript`, `Superscript`, `Clear formatting`), Jira Text & Highlight color palettes (with light-pastel luminance contrast guards), mutually exclusive Alignment (`Left` / `Center` / `Right`) & Indentation (`1..6`), Lists (`Bullet`, `Numbered`, `Action item []`, `Decision <>`), `Link` / `inlineCard` Smart Card, `@Mention`, `Emoji`, `Status` lozenge, `Table`, `Code snippet`, `Panel`, and `+ Insert` menu.
+  - **Interactive `/` Slash Commands & Live Auto-Formatting:** Summon 30+ Jira blocks and inline widgets via `/` with keyboard filtering/navigation, or type Markdown-style shortcuts (`# `, `- `, `1. `, `[] `, `<> `, `> `, `---`, ```` ```lang ````) directly in the visual editor.
+  - **Interactive Jira Blocks & Inline Pills:** Edit tables inline (header row toggle, `#` numbered column, add/remove row/column, cell background tinting), semantic Panels (`info`, `note`, `success`, `warning`, `error`), collapsible `expand` sections, content-preserving 2-column & 3-column `layoutSection` blocks, click-to-edit 6-color `status` lozenges, `date` chips, `@mention` pills, `emoji` nodes, `inlineCard` smart links, and live sandboxed Mermaid `codeBlock` SVG previews with one-click Flowchart opening (plus Flowchart **"To Note"** appending Mermaid `codeBlock` nodes directly to ADF notes).
+- **Hybrid Local & Web Speech Dictation (`VoiceBar.tsx`, `localSttEngine.ts`, `whisperWorker.ts`):**
+  - Stream instant, cursor-aware speech-to-text into Markdown notes or active Jira ADF blocks (`JiraAdfEditorHandle.insertSnippetAtCursor`) via offline Python `faster-whisper` (`CUDA` / `CPU int8`), laptop-optimized quantized SIMD WASM / discrete WebGPU Whisper & Moonshine (`@huggingface/transformers`), a persistent zero-disk Windows SAPI `MemoryStream` daemon (`~64ms` per phrase), or `SpeechRecognition` / `webkitSpeechRecognition` (`en-US`, `en-GB`, `es-ES`, `fr-FR`, `de-DE`, `ja-JP`), complete with **Instant Mode**, background engine pre-warming (`warmup-local-stt`), 16kHz `AudioWorkletNode` capture, `380ms` VAD silence commits, rolling `550ms` intra-utterance live partial streaming (`LIVE` HUD), and sandboxed browser fallback.
+- **Jira Cloud Clipboard Bridge, Exports & Quick Utilities:**
+  - **Copy for Jira:** Serializes ADF via `adfToJiraHtml` into ProseMirror-compatible semantic `text/html` + `text/plain` `ClipboardItem` data for direct paste into Jira Cloud's browser Description Editor, alongside **Copy ADF JSON**, **Copy Note**, and `.adf.json` / `.md` file exports.
+  - Hardened with detached-`DOMParser` paste sanitization, `validateAndNormalizeAdfDoc` schema/URL/depth guards, one-click **Insert Timestamp** (`[HH:MM AM/PM]`), and live word/character counters with automatic local save indicators.
 
 ### 1.4 Configurable Global Hotkey Recorder & Window Management
 Customize how SideFlow integrates with your desktop and multi-monitor environment:
@@ -116,7 +125,7 @@ flowchart TB
         App["App.tsx (Slide-Out Container, Hotkey Recorder, Tray Simulator)"]
         Dock["DockView / DrawerCard / AppTile"]
         Flow["FlowCanvas / LucidModal (Mermaid & SVG Engine)"]
-        Notes["NotesView / VoiceBar (Hybrid Local & Web STT)"]
+        Notes["NotesView / JiraAdfEditor / VoiceBar (MD & Jira ADF + Hybrid STT)"]
         Settings["SettingsView / ElectronModal"]
         Storage["useLocalStorage Hook (localStorage + IPC Store Sync)"]
     end
@@ -177,7 +186,9 @@ SideFlow/
 │   │   │   ├── FlowMinimap.tsx         # Collapsible interactive SVG bird's-eye minimap radar & camera panner
 │   │   │   └── LucidModal.tsx          # Bi-directional Mermaid.js generator/parser & Lucidchart launcher
 │   │   ├── Notes/
-│   │   │   ├── NotesView.tsx           # Multi-note tab bar, title/body editor, word/char counter
+│   │   │   ├── JiraAdfEditor.tsx       # WYSIWYG Jira Cloud Description Editor (ADF v1 toolbar, tables, panels, layouts & pills)
+│   │   │   ├── JiraSlashMenu.tsx       # Interactive '/' slash-command popover for 30+ Jira blocks & inline widgets
+│   │   │   ├── NotesView.tsx           # Multi-note tab bar, MD <-> Jira ADF mode switcher, Split/JSON views & export tools
 │   │   │   └── VoiceBar.tsx            # Web Speech API & local Whisper continuous dictation controller & tools
 │   │   ├── Settings/
 │   │   │   └── SettingsView.tsx        # Hotkey recorder, multi-monitor routing, panel edge/width, auto-updates, JSON backup/import/reset
@@ -190,10 +201,13 @@ SideFlow/
 │   ├── hooks/
 │   │   └── useLocalStorage.ts          # Persistent state hook synced with localStorage and Electron userData store
 │   ├── test/
-│   │   └── setup.ts                    # Vitest + @testing-library/jest-dom test environment setup
+│   │   ├── JiraAdfNotes.test.tsx       # Vitest + RTL suite for Markdown <-> Jira ADF conversion, WYSIWYG editor & sanitizers
+│   │   └── setup.ts                    # Vitest + @testing-library/jest-dom test setup (alongside feature *.test.tsx suites)
 │   ├── types/
-│   │   └── sideflow.ts                 # Core TypeScript interfaces (AppDrawer, FlowNode, MonitorSettings, AppUpdateState, etc.)
+│   │   └── sideflow.ts                 # Core TypeScript interfaces (AppDrawer, FlowNode, NoteItem, AdfDocNode, MonitorSettings, etc.)
 │   ├── utils/
+│   │   ├── adf.ts                      # Atlassian Document Format (ADF v1) AST validator, Markdown <-> ADF converter & Jira HTML serializer
+│   │   ├── adfDom.ts                   # Jira ADF WYSIWYG DOM serializer/parser, clipboard paste sanitizer & cursor/mark helpers
 │   │   ├── defaults.ts                 # Default drawers, starter flowchart, sample notes, shortcut, and multi-monitor routing helpers
 │   │   ├── fileMeta.ts                 # File path extraction, extension-based icon/color inference, app execution
 │   │   ├── localSttEngine.ts           # Hybrid local/WebGPU/native speech-to-text audio capture & dispatch engine
@@ -312,7 +326,7 @@ Implemented in [`electron/main.ts`](electron/main.ts) (with `isMainSender` and `
 | `read-directory-items` | Renderer → Main | `invoke` | `dirPath: string` | Reads directory entries and extracted native file icons for live folder-synced drawers, returning `Promise<DirectoryEntryItem[]>`. |
 | `extract-file-icon` / `resolve-shortcut-item` | Renderer → Main | `invoke` | `filePath: string` | Resolves `.lnk`/executable targets and extracts native OS icons as `data:image/png;base64` URLs. |
 | `get-system-metrics` / `get-running-processes` | Renderer → Main | `invoke` | `void` | Returns live CPU, RAM, uptime metrics (`SystemMetrics`) and active process names for dock running indicators. |
-| `get-local-stt-status` / `transcribe-audio-local` | Renderer → Main | `invoke` | `void` / PCM16 audio payload | Detects local `faster-whisper` (CUDA/CPU) and Windows SAPI availability (`LocalSttStatus`) and transcribes recorded audio buffers offline (`LocalTranscriptionResult`). |
+| `get-local-stt-status` / `warmup-local-stt` / `transcribe-audio-local` | Renderer → Main | `invoke` | `void` / warmup config / PCM16 audio payload | Detects local `faster-whisper` (CUDA/CPU) and Windows SAPI availability (`LocalSttStatus`), eagerly pre-warms native `faster-whisper` or persistent Windows SAPI `MemoryStream` recognizers (`warmup-local-stt`), and transcribes recorded audio buffers offline (`LocalTranscriptionResult`). |
 | `get-auto-launch` / `set-auto-launch` | Renderer → Main | `invoke` | `void` / `enabled: boolean` | Queries or updates OS login startup registration (`app.setLoginItemSettings`) and `sideflow_open_at_login`, returning `Promise<AutoLaunchState>`. |
 | `get-update-status` / `check-for-updates` / `install-update-now` | Renderer → Main | `invoke` | `void` | Reads current `AppUpdateState`, triggers a GitHub Releases check via `electron-updater`, or invokes `autoUpdater.quitAndInstall()`. |
 | `update-status-changed` | Main → Renderer | `webContents.send` | `AppUpdateState` | Streams auto-updater lifecycle transitions (`checking`, `available`, `downloading`, `downloaded`, `not-available`, `error`) and download progress to Settings. |
@@ -377,6 +391,11 @@ export interface SideFlowElectronBridge {
   storeGetAll: () => Promise<Record<string, unknown>>;
   storeSet: (key: string, value: unknown) => void;
   getLocalSttStatus?: () => Promise<LocalSttStatus>;
+  warmupLocalStt?: (payload?: {
+    lang?: string;
+    modelSize?: WhisperModelId;
+    preferEngine?: SttEngineMode;
+  }) => Promise<{ success: boolean; engineUsed?: string; durationMs?: number; error?: string }>;
   transcribeAudioLocal?: (payload: {
     pcm16Base64: string;
     sampleRate: number;
@@ -384,6 +403,10 @@ export interface SideFlowElectronBridge {
     modelSize?: WhisperModelId;
     preferEngine?: SttEngineMode;
     promptContext?: string;
+    lowLatency?: boolean;
+    isPartial?: boolean;
+    preTrimmed?: boolean;
+    preNormalized?: boolean;
   }) => Promise<LocalTranscriptionResult>;
   getAutoLaunch?: () => Promise<AutoLaunchState>;
   setAutoLaunch?: (enabled: boolean) => Promise<AutoLaunchState>;
@@ -493,10 +516,21 @@ export interface FlowchartState {
   edgeCurve?: 'bezier' | 'orthogonal' | 'straight';
 }
 
+export type NoteFormatMode = 'markdown' | 'adf';
+
+// Atlassian Document Format (ADF Schema v1) root document AST (full AdfBlockNode / AdfInlineNode / AdfMark unions in src/types/sideflow.ts)
+export interface AdfDocNode {
+  version: 1;
+  type: 'doc';
+  content: AdfBlockNode[];
+}
+
 export interface NoteItem {
   id: string;
   title: string;
   body: string;
+  format?: NoteFormatMode;   // 'markdown' (default) | 'adf' (Jira Cloud ADF v1)
+  adfDoc?: AdfDocNode;       // Canonical ADF v1 document AST when format === 'adf'
   updatedAt?: number;
   pinned?: boolean;
   color?: AccentColor;
@@ -556,7 +590,7 @@ Managed via [`useLocalStorage`](src/hooks/useLocalStorage.ts) in `localStorage` 
 | :--- | :--- | :--- | :--- |
 | `sideflow_drawers` | `AppDrawer[]` | `defaultDrawers` (3 categories, 10 apps) | Categorized ObjectDock drawers and application tiles |
 | `sideflow_flow` | `FlowchartState` | `defaultFlowData` (4 nodes, 3 edges) | Flowchart canvas nodes, coordinates, and directed edges |
-| `sideflow_notes` | `NoteItem[]` | `defaultNotes` (2 starter notes) | Multi-note scratchpad titles, bodies, tags, and timestamps |
+| `sideflow_notes` | `NoteItem[]` | `defaultNotes` (2 starter notes) | Multi-note scratchpad titles, Markdown bodies, per-note format mode (`format`), Jira ADF v1 documents (`adfDoc`), pins, colors, tags, and timestamps |
 | `sideflow_shortcut` | `ShortcutConfig` | `Alt + Space` | Active global keyboard shortcut configuration |
 | `sideflow_pinned` | `boolean` | `true` | Whether the panel stays pinned (`true`) or auto-hides on outside click/blur (`false`) |
 | `sideflow_edge_handle` | `boolean` | `true` | Whether screen-edge peek handles and companion edge tabs are visible when retracted |
