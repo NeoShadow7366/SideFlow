@@ -1102,6 +1102,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     New release v{updateState.latestVersion} is available on GitHub!
                   </span>
                 </>
+              ) : updateState?.status === 'error' ? (
+                <>
+                  <AlertTriangle
+                    className="w-3.5 h-3.5 text-rose-400"
+                    aria-hidden="true"
+                  />
+                  <span className="text-rose-300 font-medium">
+                    {updateState.error || 'Unable to check for updates'}
+                  </span>
+                </>
               ) : (
                 <>
                   <CheckCircle2

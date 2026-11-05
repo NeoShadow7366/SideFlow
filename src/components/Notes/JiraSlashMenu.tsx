@@ -720,7 +720,7 @@ export const ColorPickerPopover: React.FC<ColorPickerPopoverProps> = ({
               onSelectTextColor(c.value);
               onClose();
             }}
-            className={`w-5 h-5 rounded border border-slate-600 hover:scale-110 transition ${c.swatchClass}`}
+            className={`w-6 h-6 rounded border border-slate-600 hover:scale-110 transition ${c.swatchClass}`}
           />
         ))}
       </div>
@@ -739,7 +739,7 @@ export const ColorPickerPopover: React.FC<ColorPickerPopoverProps> = ({
               onSelectHighlightColor(c.value);
               onClose();
             }}
-            className={`w-6 h-5 rounded border border-slate-600 hover:scale-110 transition ${c.swatchClass}`}
+            className={`w-6 h-6 rounded border border-slate-600 hover:scale-110 transition ${c.swatchClass}`}
           />
         ))}
       </div>

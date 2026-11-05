@@ -33,15 +33,15 @@ interface TranscribeMessage {
   isPartial?: boolean;
 }
 
-interface CachedPipelineEntry {
+export interface CachedPipelineEntry {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   transcriber: any;
   label: string;
   modelId: string;
 }
 
-const MAX_CACHED_PIPELINES = 2;
-const pipelineCache = new Map<string, CachedPipelineEntry>();
+export const MAX_CACHED_PIPELINES = 2;
+export const pipelineCache = new Map<string, CachedPipelineEntry>();
 let lastDeviceLabel = 'CPU WASM';
 const pendingPipelineLoads = new Map<string, Promise<CachedPipelineEntry>>();
 const warmedModelIds = new Set<string>();
@@ -166,7 +166,7 @@ async function hasDiscreteWebGpuAdapter(): Promise<boolean> {
   return discreteWebGpuPromise;
 }
 
-async function storePipelineInCache(entry: CachedPipelineEntry): Promise<void> {
+export async function storePipelineInCache(entry: CachedPipelineEntry): Promise<void> {
   if (pipelineCache.has(entry.modelId)) {
     pipelineCache.delete(entry.modelId);
   }

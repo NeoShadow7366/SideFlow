@@ -167,6 +167,20 @@ export interface SideFlowElectronAPI {
       canQuitAndInstall?: boolean;
     }) => void
   ) => () => void;
+  addWordToSpellCheckerDictionary?: (word: string) => Promise<boolean>;
+  removeWordFromSpellCheckerDictionary?: (word: string) => Promise<boolean>;
+  setSpellCheckerLanguages?: (languages: string[]) => Promise<boolean>;
+  replaceMisspelling?: (replacement: string) => Promise<boolean>;
+  onSpellCheckContextMenu?: (
+    callback: (params: {
+      x: number;
+      y: number;
+      misspelledWord: string;
+      dictionarySuggestions: string[];
+      selectionText: string;
+      isEditable: boolean;
+    }) => void
+  ) => () => void;
 }
 
 const sideflowAPI: SideFlowElectronAPI = {
@@ -258,6 +272,37 @@ const sideflowAPI: SideFlowElectronAPI = {
     ipcRenderer.on('update-status-changed', listener);
     return () => ipcRenderer.removeListener('update-status-changed', listener);
   },
+  addWordToSpellCheckerDictionary: (word: string) =>
+    ipcRenderer.invoke('spellcheck-add-word', word),
+  removeWordFromSpellCheckerDictionary: (word: string) =>
+    ipcRenderer.invoke('spellcheck-remove-word', word),
+  setSpellCheckerLanguages: (languages: string[]) =>
+    ipcRenderer.invoke('spellcheck-set-languages', languages),
+  replaceMisspelling: (replacement: string) =>
+    ipcRenderer.invoke('spellcheck-replace-misspelling', replacement),
+  onSpellCheckContextMenu: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      params: Parameters<typeof callback>[0]
+    ) => callback(params);
+    ipcRenderer.on('spellcheck-context-menu', listener);
+    return () => ipcRenderer.removeListener('spellcheck-context-menu', listener);
+  },
 };
 
-contextBridge.exposeInMainWorld('sideflow', sideflowAPI);
+const isCompanionEdgeTabWindow =
+  typeof window !== 'undefined' &&
+  typeof window.location?.pathname === 'string' &&
+  /edge-tab\.html$/i.test(window.location.pathname);
+
+if (isCompanionEdgeTabWindow) {
+  contextBridge.exposeInMainWorld('sideflow', {
+    isElectron: true,
+    clickEdgeTab: sideflowAPI.clickEdgeTab,
+    prepareEdgeTabClick: sideflowAPI.prepareEdgeTabClick,
+    setCompanionIgnoreMouse: sideflowAPI.setCompanionIgnoreMouse,
+    onEdgeTabUpdate: sideflowAPI.onEdgeTabUpdate,
+  });
+} else {
+  contextBridge.exposeInMainWorld('sideflow', sideflowAPI);
+}

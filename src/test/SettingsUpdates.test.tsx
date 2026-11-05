@@ -85,4 +85,20 @@ describe('SettingsView Work Laptop Startup & Auto-Update Controls', () => {
     fireEvent.click(installBtn);
     expect(onInstallUpdate).toHaveBeenCalledTimes(1);
   });
+
+  it('displays an error banner when an update check fails with status: error', () => {
+    render(
+      <SettingsView
+        {...baseProps}
+        updateState={{
+          status: 'error',
+          currentVersion: '1.4.0',
+          error: 'GitHub Releases API returned HTTP 403.',
+        }}
+      />
+    );
+
+    const banner = screen.getByTestId('update-status-banner');
+    expect(banner).toHaveTextContent(/GitHub Releases API returned HTTP 403\./i);
+  });
 });

@@ -27,10 +27,22 @@ import {
   insertNodeOnEdge,
   parseMermaidCode,
   generateStandaloneSVG,
+  renderCachedMermaidPreview,
   renderFlowchartToPngData,
   spliceExistingNodeOnEdge,
 } from '../utils/mermaid';
-import { useLocalStorage } from '../hooks/useLocalStorage';
+import {
+  useLocalStorage,
+  writeSharedStorage,
+  removeSharedStorage,
+} from '../hooks/useLocalStorage';
+import { getSpellingSuggestions } from '../utils/spellcheck';
+import {
+  resolveHuggingFaceModelId,
+  storePipelineInCache,
+  pipelineCache,
+  MAX_CACHED_PIPELINES,
+} from '../utils/whisperWorker';
 import { FlowchartState } from '../types/sideflow';
 import {
   computeRmsLevel,
@@ -1660,6 +1672,110 @@ describe('Flowchart Edge Splicing, Multi-Select Alignment & High-DPI PNG Export 
     expect(res.svgString).toContain('<svg');
     expect(res.dataUrl.length).toBeGreaterThan(20);
   });
+
+  it('memoizes parsed Mermaid preview SVG via renderCachedMermaidPreview', () => {
+    const code = 'flowchart TD\n  a(["Start"]) --> b["Done"]';
+    const first = renderCachedMermaidPreview(code);
+    const second = renderCachedMermaidPreview(code);
+    expect(first.svgMarkup).not.toBeNull();
+    expect(first).toBe(second);
+    expect(first.svgMarkup).toContain('<svg');
+    expect(renderCachedMermaidPreview('   ').svgMarkup).toBeNull();
+  });
 });
+
+describe('Shared Storage Sync, Spellcheck Cache & WhisperWorker Pipeline Cache', () => {
+  afterEach(() => {
+    delete window.sideflow;
+    pipelineCache.clear();
+  });
+
+  it('synchronizes writeSharedStorage and removeSharedStorage with localStorage, Electron storeSet, and mounted useLocalStorage hooks', async () => {
+    const storeSetMock = vi.fn().mockResolvedValue(true);
+    window.sideflow = {
+      isElectron: true,
+      storeSet: storeSetMock,
+    } as unknown as typeof window.sideflow;
+
+    const { result } = renderHook(() =>
+      useLocalStorage<string[]>('sideflow_shared_sync_test', ['initial'])
+    );
+    expect(result.current[0]).toEqual(['initial']);
+
+    act(() => {
+      writeSharedStorage('sideflow_shared_sync_test', ['alpha', 'beta']);
+    });
+
+    expect(result.current[0]).toEqual(['alpha', 'beta']);
+    expect(
+      JSON.parse(window.localStorage.getItem('sideflow_shared_sync_test') || '[]')
+    ).toEqual(['alpha', 'beta']);
+    expect(storeSetMock).toHaveBeenCalledWith('sideflow_shared_sync_test', [
+      'alpha',
+      'beta',
+    ]);
+
+    act(() => {
+      removeSharedStorage('sideflow_shared_sync_test');
+    });
+
+    expect(window.localStorage.getItem('sideflow_shared_sync_test')).toBeNull();
+    expect(storeSetMock).toHaveBeenCalledWith('sideflow_shared_sync_test', null);
+  });
+
+  it('caches ranked spelling suggestions in getSpellingSuggestions across repeated lookups', () => {
+    const first = getSpellingSuggestions('teh', { customDictionary: ['the'] });
+    const second = getSpellingSuggestions('teh', { customDictionary: ['the'] });
+    expect(first).toContain('the');
+    expect(second).toEqual(first);
+    expect(second).not.toBe(first); // Returns defensive copy
+  });
+
+  it('resolves HuggingFace ONNX model IDs and evicts oldest LRU pipeline with dispose() in storePipelineInCache', async () => {
+    expect(resolveHuggingFaceModelId('moonshine-tiny', 'en-US')).toBe(
+      'onnx-community/moonshine-tiny-ONNX'
+    );
+    expect(resolveHuggingFaceModelId('moonshine-tiny', 'es-ES')).toBe(
+      'onnx-community/whisper-tiny'
+    );
+    expect(resolveHuggingFaceModelId('tiny.en', 'fr-FR')).toBe(
+      'onnx-community/whisper-tiny'
+    );
+    expect(resolveHuggingFaceModelId('distil-small.en', 'en-US')).toBe(
+      'onnx-community/distil-small.en'
+    );
+
+    const disposeA = vi.fn().mockResolvedValue(undefined);
+    const disposeB = vi.fn().mockResolvedValue(undefined);
+    const disposeC = vi.fn().mockResolvedValue(undefined);
+
+    await storePipelineInCache({
+      modelId: 'model-a',
+      label: 'CPU WASM (model-a)',
+      transcriber: { dispose: disposeA },
+    });
+    await storePipelineInCache({
+      modelId: 'model-b',
+      label: 'CPU WASM (model-b)',
+      transcriber: { dispose: disposeB },
+    });
+    expect(pipelineCache.size).toBe(MAX_CACHED_PIPELINES);
+    expect(disposeA).not.toHaveBeenCalled();
+
+    // Adding a 3rd model evicts the oldest ('model-a') and calls its dispose()
+    await storePipelineInCache({
+      modelId: 'model-c',
+      label: 'CPU WASM (model-c)',
+      transcriber: { dispose: disposeC },
+    });
+    expect(pipelineCache.size).toBe(MAX_CACHED_PIPELINES);
+    expect(pipelineCache.has('model-a')).toBe(false);
+    expect(pipelineCache.has('model-b')).toBe(true);
+    expect(pipelineCache.has('model-c')).toBe(true);
+    expect(disposeA).toHaveBeenCalledTimes(1);
+    expect(disposeB).not.toHaveBeenCalled();
+  });
+});
+
 
 

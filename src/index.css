@@ -295,6 +295,25 @@ body {
   z-index: -1;
 }
 
+/* Chrome & Word Style Wavy Red Spellcheck Underlines */
+.sf-misspelled-word {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: #f43f5e;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
+.sf-misspelled-backdrop {
+  background: transparent;
+  color: transparent;
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: #f43f5e;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+}
+
 /* Accessible Keyboard Focus Ring (WCAG 2.4.7 / 2.4.11) — overrides .focus:outline-none on keyboard navigation */
 :is(
   button,

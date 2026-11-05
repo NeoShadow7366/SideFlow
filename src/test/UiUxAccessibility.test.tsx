@@ -583,4 +583,72 @@ describe('SideFlow Phase 1-4 UI/UX & WCAG 2.2 AA Accessibility Suite', () => {
       ).not.toBeInTheDocument();
     });
   });
+
+  describe('6. Multi-Keystroke Undo Coalescing, Cross-Store Sync & WCAG 24x24px Target Sizing', () => {
+    it('coalesces rapid single-character typing in NotesView into a single undo snapshot', () => {
+      render(<App />);
+      fireEvent.click(screen.getByRole('tab', { name: /^Notes$/i }));
+
+      const noteBody = screen.getByLabelText('Note Body') as HTMLTextAreaElement;
+      // Clear first to get a known baseline, then wait > 500ms or start fresh
+      fireEvent.click(screen.getByRole('button', { name: /New Note/i }));
+      const freshBody = screen.getByLabelText('Note Body') as HTMLTextAreaElement;
+      expect(freshBody.value).toBe('');
+
+      // Simulate typing "Hello" character-by-character rapidly (< 500ms apart)
+      fireEvent.change(freshBody, { target: { value: 'H' } });
+      fireEvent.change(freshBody, { target: { value: 'He' } });
+      fireEvent.change(freshBody, { target: { value: 'Hel' } });
+      fireEvent.change(freshBody, { target: { value: 'Hell' } });
+      fireEvent.change(freshBody, { target: { value: 'Hello' } });
+      expect(freshBody.value).toBe('Hello');
+
+      // Single Undo reverts the entire rapid typing burst back to empty string
+      fireEvent.click(screen.getByRole('button', { name: /Undo Note Edit/i }));
+      expect(
+        (screen.getByLabelText('Note Body') as HTMLTextAreaElement).value
+      ).toBe('');
+      expect(noteBody).toBeDefined();
+    });
+
+    it('synchronizes sideflow_flow_diagrams_v1 with Electron storeSet when resetting defaults and enforces >= 24x24px quick-add targets', () => {
+      const storeSetMock = vi.fn().mockResolvedValue(true);
+      window.sideflow = {
+        isElectron: true,
+        storeSet: storeSetMock,
+        setPanelVisibility: vi.fn(),
+        setPanelEdge: vi.fn(),
+        setPanelWidthPercent: vi.fn(),
+        setEdgeHandleState: vi.fn(),
+        getAutoLaunch: vi.fn().mockResolvedValue({ enabled: true }),
+        getUpdateStatus: vi.fn().mockResolvedValue({
+          status: 'idle',
+          currentVersion: '1.4.0',
+        }),
+      } as unknown as Window['sideflow'];
+
+      render(<App />);
+
+      // Verify Flow toolbar and quick-add buttons enforce >= 24x24px for WCAG 2.5.8 Target Size
+      fireEvent.click(screen.getByRole('tab', { name: /^Flow$/i }));
+      const copyPngBtn = screen.getByTestId('copy-png-btn');
+      expect(copyPngBtn.className).toContain('min-h-[24px]');
+      const quickAddPort = screen.getByTestId('quick-add-bottom-n1');
+      expect(quickAddPort.className).toContain('w-6 h-6');
+
+      // Reset Defaults clears sideflow_flow_diagrams_v1 via storeSet(..., null)
+      fireEvent.click(screen.getByRole('tab', { name: /^Config/i }));
+      fireEvent.click(screen.getByTestId('reset-defaults-trigger-btn'));
+      fireEvent.click(screen.getByTestId('confirm-reset-defaults-btn'));
+
+      expect(storeSetMock).toHaveBeenCalledWith(
+        'sideflow_flow_diagrams_v1',
+        null
+      );
+      expect(storeSetMock).toHaveBeenCalledWith(
+        'sideflow_custom_dictionary',
+        null
+      );
+    });
+  });
 });

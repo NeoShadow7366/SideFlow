@@ -56,6 +56,7 @@ interface DockViewProps {
   onToggleLock?: () => void;
   dockEffect?: DockHoverEffect;
   dockIconSize?: DockIconSize;
+  isPanelOpen?: boolean;
 }
 
 export const DockView: React.FC<DockViewProps> = ({
@@ -66,6 +67,7 @@ export const DockView: React.FC<DockViewProps> = ({
   onToggleLock,
   dockEffect = 'zoom',
   dockIconSize = 'normal',
+  isPanelOpen = true,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<string>('all');
@@ -170,10 +172,11 @@ export const DockView: React.FC<DockViewProps> = ({
   }, []);
 
   useEffect(() => {
+    if (!isPanelOpen) return;
     refreshSystemTelemetry();
     const interval = window.setInterval(refreshSystemTelemetry, 10000);
     return () => window.clearInterval(interval);
-  }, [refreshSystemTelemetry]);
+  }, [isPanelOpen, refreshSystemTelemetry]);
 
   const [isCustomIconOpen, setIsCustomIconOpen] = useState(false);
 

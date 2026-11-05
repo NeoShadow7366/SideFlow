@@ -160,8 +160,11 @@ function main() {
   }
 
   // 7. Push branch and tag to GitHub to trigger .github/workflows/release.yml
-  const currentBranch =
+  const rawBranch =
     run('git rev-parse --abbrev-ref HEAD', { silent: true }) || 'master';
+  const currentBranch = /^[a-zA-Z0-9._/-]+$/.test(rawBranch)
+    ? rawBranch
+    : 'master';
   console.log(
     `\n[6/6] Pushing branch '${currentBranch}' and tag '${nextTag}' to origin...`
   );

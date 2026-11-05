@@ -5,6 +5,25 @@ All notable changes to **SideFlow** (`sideflow-desktop`) will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-11-05
+
+### Added
+- **Chrome & Word-Style Spellcheck Engine, Context Menu & Proofing Suite (`src/utils/spellcheck.ts`, `src/components/Notes/SpellcheckMenu.tsx`, `src/test/SpellcheckNotes.test.tsx`):** Added real-time spellchecking across Markdown and Jira ADF notes with Damerau-Levenshtein + 256-entry LRU suggestion caching (`getSpellingSuggestions`), right-click context menu replacements, **Change All**, **Ignore All**, and **Add to Dictionary** (synced with Electron Hunspell IPC), and a Word-style Proofing & Custom Dictionary popover (`F7` shortcut).
+- **Two-Source Dialogue Transcription (`src/components/Notes/VoiceBar.tsx`, `src/utils/localSttEngine.ts`, `src/test/DialogueDictation.test.tsx`):** Added dual-channel dialogue dictation (`#voice-dialogue-mode-toggle`) supporting Host (Primary Mic) + Client/Guest (Secondary Input / Loopback) speaker attribution, acoustic bleed suppression gating, optional turn timestamps, Markdown bold speaker prefixes (`**Host:**` / `**Client:**`), and Jira ADF colored `status` speaker lozenges.
+- **Cross-Component Shared Storage Sync (`src/hooks/useLocalStorage.ts`):** Added `writeSharedStorage` and `removeSharedStorage` helpers with `sideflow:local-storage-sync` custom event broadcasting so writes and factory resets stay synchronized across `window.localStorage`, the Electron `storeGetAll` hydration cache, `window.sideflow.storeSet`, and mounted hooks even when target views are unmounted.
+
+### Changed
+- **Debounced & Atomic Electron Config Persistence (`electron/main.ts`):** Updated `writeLocalStore` to delete `null`/`undefined` keys, coalesce disk writes via a `250ms` debounce timer, write atomically via `.tmp` + rename (`sideflow-config.json.tmp` → `sideflow-config.json`), and flush synchronously on `will-quit` (`flushLocalStoreSync`).
+- **Multi-Keystroke Undo Coalescing & Mermaid Preview Memoization (`src/components/Notes/NotesView.tsx`, `src/utils/mermaid.ts`, `src/components/Notes/JiraAdfEditor.tsx`):** Coalesced rapid single-character typing bursts (`< 500ms`) in `NotesView` into single undo snapshots, added a 32-entry LRU cache for Mermaid SVG previews (`renderCachedMermaidPreview`), memoized `renderedHtml` in `RichInlineEditable`, and wrapped `DrawerCard` and `AppTile` in `React.memo`.
+- **Real-Time Delta CPU Telemetry, Async Shortcut Resolution & Idle Polling (`electron/main.ts`, `src/components/DockDrawers/DockView.tsx`):** Updated `get-system-metrics` to compute real-time delta CPU usage between samples instead of cumulative boot average, converted Start Menu `.lnk`/`.url` shortcut resolution to async `fs.promises` with a 60s TTL lookup cache, gated Dock telemetry polling on `isPanelOpen`, and disabled `{ forward: true }` mouse-move hit-test forwarding when the panel and edge handle are hidden.
+- **WCAG 2.2 AA Accessibility & Menu Keyboard Navigation (`electron/edge-tab.html`, `src/components/Flowchart/FlowCanvas.tsx`, `src/components/Notes/SpellcheckMenu.tsx`, `src/components/Notes/JiraSlashMenu.tsx`, `src/components/Modal.tsx`):** Upgraded sub-24×24px interactive targets to `>= 24×24px`, added `ArrowUp`/`ArrowDown`/`Home`/`End` keyboard navigation to `role="menu"` popovers, aligned companion edge-tab vertical positioning (`28vh`), and reference-counted `data-sideflow-modal-open` for nested modals.
+
+### Fixed
+- **Auto-Updater & GitHub Release Fallback Error Reporting (`electron/main.ts`, `src/App.tsx`, `src/components/Settings/SettingsView.tsx`):** Fixed swallowed HTTP 4xx/5xx, timeout, and network errors in `checkGitHubReleaseFallback` and `autoUpdater` so manual update checks surface `status: 'error'` banners and toasts instead of reporting `not-available`.
+
+### Security
+- **Content-Security-Policy, Shell URI Filtering & Scoped Preload (`index.html`, `electron/main.ts`, `electron/preload.ts`, `src/App.tsx`, `scripts/release.mjs`):** Added a strict Content-Security-Policy `<meta>` policy in `index.html`, restricted `shell:` URIs to `shell:AppsFolder\`, validated `releaseUrl` via `isTrustedReleaseUrl` before `shell.openExternal`, sanitized imported backup `AppItem.cmd` protocols, scoped `window.sideflow` on companion `edge-tab.html` windows to their 4 required methods, and hardened `scripts/release.mjs` and `.github/workflows/release.yml`.
+
 ## [1.4.0] - 2026-10-28
 
 ### Added
@@ -84,7 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Voice-Dictated Multi-Note Scratchpad:** Multi-note editor with continuous speech-to-text dictation, language selection, one-click timestamps, clipboard copy, and JSON workspace backup/reset.
 - **Cross-Platform Build & Test Tooling:** Configured Windows NSIS/Portable and macOS DMG packaging via `electron-builder` with 256×256 application icons, WCAG accessibility support, and automated Vitest + React Testing Library suites.
 
-[Unreleased]: https://github.com/NeoShadow7366/SideFlow/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/NeoShadow7366/SideFlow/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/NeoShadow7366/SideFlow/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/NeoShadow7366/SideFlow/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/NeoShadow7366/SideFlow/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/NeoShadow7366/SideFlow/compare/v1.2.0...v1.2.1

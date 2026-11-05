@@ -448,12 +448,29 @@ export type WhisperModelId =
   | 'small.en'
   | 'tiny';
 
+export type DialogueSpeakerRole = 'primary' | 'external';
+
+export interface TranscriptCommitMeta {
+  isDialogue?: boolean;
+  speakerRole?: DialogueSpeakerRole;
+  speakerLabel?: string;
+  includeTimestamp?: boolean;
+  timestampText?: string;
+  capturedAt?: number;
+}
+
 export interface SttSettings {
   lang: string;
   engineMode: SttEngineMode;
   modelSize: WhisperModelId;
   selectedMicId: string;
   instantMode?: boolean;
+  dialogueMode?: boolean;
+  secondarySourceId?: string;
+  primarySpeakerLabel?: string;
+  secondarySpeakerLabel?: string;
+  dialogueTimestamps?: boolean;
+  bleedSuppression?: boolean;
 }
 
 export interface LocalSttStatus {
@@ -615,6 +632,20 @@ export interface SideFlowElectronBridge {
   checkForUpdates?: () => Promise<AppUpdateState>;
   installUpdateNow?: () => Promise<{ success: boolean; error?: string }>;
   onUpdateStatus?: (callback: (state: AppUpdateState) => void) => () => void;
+  addWordToSpellCheckerDictionary?: (word: string) => Promise<boolean>;
+  removeWordFromSpellCheckerDictionary?: (word: string) => Promise<boolean>;
+  setSpellCheckerLanguages?: (languages: string[]) => Promise<boolean>;
+  replaceMisspelling?: (replacement: string) => Promise<boolean>;
+  onSpellCheckContextMenu?: (
+    callback: (params: {
+      x: number;
+      y: number;
+      misspelledWord: string;
+      dictionarySuggestions: string[];
+      selectionText: string;
+      isEditable: boolean;
+    }) => void
+  ) => () => void;
 }
 
 declare global {

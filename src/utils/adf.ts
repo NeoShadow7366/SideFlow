@@ -2443,3 +2443,107 @@ export function appendTextToAdfDoc(
   });
   return { version: 1, type: 'doc', content: blocks };
 }
+
+export interface AppendDialogueTurnOptions {
+  speakerRole: 'primary' | 'external';
+  speakerLabel: string;
+  appendToActiveTurn?: boolean;
+  includeTimestamp?: boolean;
+  timestampText?: string;
+}
+
+/**
+ * Appends a transcribed two-way dialogue utterance to a canonical Jira ADF v1 document:
+ * - New speaker turns create a clean `paragraph` prefixed with a colored Jira `status` lozenge
+ *   (`blue` for primary user, `green` for external source) + optional `[HH:MM]` timestamp.
+ * - Consecutive utterances from the same speaker (`appendToActiveTurn: true`) append directly
+ *   onto the active speaker turn paragraph with clean single-space padding.
+ */
+export function appendDialogueTurnToAdfDoc(
+  doc: AdfDocNode,
+  utterance: string,
+  options: AppendDialogueTurnOptions
+): AdfDocNode {
+  const trimmed = (utterance || '').trim();
+  if (!trimmed) return doc;
+
+  const cleanLabel =
+    (
+      options.speakerLabel ||
+      (options.speakerRole === 'external' ? 'External' : 'You')
+    ).trim() || 'Speaker';
+  const statusColor: AdfStatusColor =
+    options.speakerRole === 'primary' ? 'blue' : 'green';
+
+  const blocks = [...doc.content];
+
+  if (options.appendToActiveTurn && blocks.length > 0) {
+    const lastIdx = blocks.length - 1;
+    const lastBlock = blocks[lastIdx];
+    const leadingNode =
+      lastBlock.type === 'paragraph' && Array.isArray(lastBlock.content)
+        ? lastBlock.content[0]
+        : undefined;
+    if (
+      lastBlock.type === 'paragraph' &&
+      leadingNode?.type === 'status' &&
+      leadingNode.attrs?.text === cleanLabel.toUpperCase() &&
+      leadingNode.attrs?.color === statusColor
+    ) {
+      const existing = normalizeInlineNodes(lastBlock.content);
+      const prevLast = existing[existing.length - 1];
+      const needsSpace =
+        !prevLast ||
+        prevLast.type !== 'text' ||
+        (!prevLast.text.endsWith(' ') && !trimmed.startsWith(' '));
+      blocks[lastIdx] = {
+        ...lastBlock,
+        content: normalizeInlineNodes([
+          ...existing,
+          { type: 'text', text: `${needsSpace ? ' ' : ''}${trimmed}` },
+        ]),
+      };
+      return { version: 1, type: 'doc', content: blocks };
+    }
+  }
+
+  const stampSegment =
+    options.includeTimestamp && options.timestampText
+      ? ` [${options.timestampText}] `
+      : ' ';
+
+  const turnParagraph: AdfParagraphNode = {
+    type: 'paragraph',
+    attrs: { localId: createAdfLocalId('turn') },
+    content: normalizeInlineNodes([
+      {
+        type: 'status',
+        attrs: {
+          text: cleanLabel.toUpperCase(),
+          color: statusColor,
+          localId: createAdfLocalId('speaker'),
+        },
+      },
+      {
+        type: 'text',
+        text: `${stampSegment}${trimmed}`,
+      },
+    ]),
+  };
+
+  // Replace the single initial empty placeholder paragraph if the document is otherwise empty
+  if (
+    blocks.length === 1 &&
+    blocks[0].type === 'paragraph' &&
+    (!blocks[0].content || blocks[0].content.length === 0)
+  ) {
+    return {
+      version: 1,
+      type: 'doc',
+      content: [turnParagraph],
+    };
+  }
+
+  blocks.push(turnParagraph);
+  return { version: 1, type: 'doc', content: blocks };
+}

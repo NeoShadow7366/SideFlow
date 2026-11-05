@@ -10,6 +10,7 @@ import {
   dialog,
   nativeImage,
   session,
+  desktopCapturer,
 } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { execFile, spawn, ChildProcessWithoutNullStreams } from 'child_process';
@@ -70,10 +71,13 @@ let showEdgeHandleState = true;
 let isDictatingState = false;
 let shortcutLabelState = 'Alt + Space';
 let suppressBlurUntil = 0;
-let isHoveringCompanionTab = false;
+const hoveredCompanionDisplayIds = new Set<number>();
 let cachedStore: Record<string, unknown> | null = null;
 let storeWriteChain: Promise<void> = Promise.resolve();
+let storeWriteTimer: NodeJS.Timeout | null = null;
+let storeDirty = false;
 let updateCheckInterval: NodeJS.Timeout | null = null;
+let lastCpuSample: { totalIdle: number; totalTick: number } | null = null;
 
 interface MainUpdateState {
   status:
@@ -165,18 +169,62 @@ function readLocalStore(): Record<string, unknown> {
   return cachedStore;
 }
 
-function writeLocalStore(key: string, value: unknown): void {
-  if (!key || FORBIDDEN_STORE_KEYS.has(key)) return;
+function persistLocalStoreSnapshot(): void {
+  if (!storeDirty) return;
+  storeDirty = false;
   try {
     const storePath = getStorePath();
+    const tmpPath = `${storePath}.tmp`;
     const current = readLocalStore();
-    current[key] = value;
     const serialized = JSON.stringify(current, null, 2);
     storeWriteChain = storeWriteChain
-      .then(() => fs.promises.writeFile(storePath, serialized, 'utf-8'))
+      .then(async () => {
+        await fs.promises.writeFile(tmpPath, serialized, 'utf-8');
+        await fs.promises.rename(tmpPath, storePath);
+      })
       .catch((err) => {
         console.error('[SideFlow] Failed to write local store:', err);
       });
+  } catch (err) {
+    console.error('[SideFlow] Failed to serialize local store:', err);
+  }
+}
+
+function flushLocalStoreSync(): void {
+  if (storeWriteTimer) {
+    clearTimeout(storeWriteTimer);
+    storeWriteTimer = null;
+  }
+  if (!storeDirty || !cachedStore) return;
+  storeDirty = false;
+  try {
+    const storePath = getStorePath();
+    const tmpPath = `${storePath}.tmp`;
+    const serialized = JSON.stringify(cachedStore, null, 2);
+    fs.writeFileSync(tmpPath, serialized, 'utf-8');
+    fs.renameSync(tmpPath, storePath);
+  } catch (err) {
+    console.error('[SideFlow] Failed to flush local store synchronously:', err);
+  }
+}
+
+function writeLocalStore(key: string, value: unknown): void {
+  if (!key || FORBIDDEN_STORE_KEYS.has(key)) return;
+  try {
+    const current = readLocalStore();
+    if (value === null || value === undefined) {
+      delete current[key];
+    } else {
+      current[key] = value;
+    }
+    storeDirty = true;
+    if (storeWriteTimer) {
+      clearTimeout(storeWriteTimer);
+    }
+    storeWriteTimer = setTimeout(() => {
+      storeWriteTimer = null;
+      persistLocalStoreSnapshot();
+    }, 250);
   } catch (err) {
     console.error('[SideFlow] Failed to update local store:', err);
   }
@@ -245,6 +293,25 @@ function isNewerSemver(currentVer: string, candidateVer: string): boolean {
   return false;
 }
 
+function isTrustedReleaseUrl(candidate: unknown): candidate is string {
+  if (typeof candidate !== 'string' || !candidate.trim()) return false;
+  try {
+    const parsed = new URL(candidate.trim());
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    return (
+      (host === 'github.com' &&
+        parsed.pathname.toLowerCase().startsWith(
+          `/${GITHUB_OWNER.toLowerCase()}/${GITHUB_REPO.toLowerCase()}/`
+        )) ||
+      host === 'objects.githubusercontent.com' ||
+      host.endsWith('.githubusercontent.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
 function broadcastUpdateState(patch: Partial<MainUpdateState>): MainUpdateState {
   updateState = {
     ...updateState,
@@ -292,10 +359,10 @@ function checkGitHubReleaseFallback(): Promise<MainUpdateState> {
         if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
           resolve(
             broadcastUpdateState({
-              status: 'not-available',
+              status: 'error',
               latestVersion: app.getVersion(),
               lastCheckedAt: Date.now(),
-              error: undefined,
+              error: `GitHub Releases returned HTTP ${res.statusCode || 'unknown'}`,
             })
           );
           return;
@@ -313,8 +380,11 @@ function checkGitHubReleaseFallback(): Promise<MainUpdateState> {
           const setupAsset =
             assets.find((a) => a.name && /setup.*\.exe$/i.test(a.name)) ||
             assets.find((a) => a.name && a.name.toLowerCase().endsWith('.exe'));
-          const releaseUrl =
+          const candidateUrl =
             setupAsset?.browser_download_url || parsed.html_url || GITHUB_RELEASES_URL;
+          const releaseUrl = isTrustedReleaseUrl(candidateUrl)
+            ? candidateUrl
+            : GITHUB_RELEASES_URL;
 
           if (isNewerSemver(app.getVersion(), latestVersion)) {
             resolve(
@@ -343,21 +413,23 @@ function checkGitHubReleaseFallback(): Promise<MainUpdateState> {
         } catch {
           resolve(
             broadcastUpdateState({
-              status: 'not-available',
+              status: 'error',
               latestVersion: app.getVersion(),
               lastCheckedAt: Date.now(),
+              error: 'Failed to parse GitHub Releases response',
             })
           );
         }
       });
     });
 
-    req.on('error', () => {
+    req.on('error', (err) => {
       resolve(
         broadcastUpdateState({
-          status: 'not-available',
+          status: 'error',
           latestVersion: app.getVersion(),
           lastCheckedAt: Date.now(),
+          error: err?.message || 'Unable to connect to GitHub Releases',
         })
       );
     });
@@ -366,9 +438,10 @@ function checkGitHubReleaseFallback(): Promise<MainUpdateState> {
       req.destroy();
       resolve(
         broadcastUpdateState({
-          status: 'not-available',
+          status: 'error',
           latestVersion: app.getVersion(),
           lastCheckedAt: Date.now(),
+          error: 'GitHub Releases check timed out',
         })
       );
     });
@@ -451,7 +524,8 @@ function setupAutoUpdater(): void {
     });
   });
 
-  autoUpdater.on('error', () => {
+  autoUpdater.on('error', (err) => {
+    console.warn('[SideFlow] autoUpdater error, falling back to GitHub API:', err?.message || err);
     void checkGitHubReleaseFallback();
   });
 }
@@ -607,7 +681,10 @@ function updateTrayMenu(): void {
           return;
         }
         if (updateState.status === 'available' && updateState.releaseUrl) {
-          void shell.openExternal(updateState.releaseUrl);
+          const safeUrl = isTrustedReleaseUrl(updateState.releaseUrl)
+            ? updateState.releaseUrl
+            : GITHUB_RELEASES_URL;
+          void shell.openExternal(safeUrl);
           return;
         }
         navigateToTabFromMain('settings');
@@ -625,12 +702,21 @@ function updateTrayMenu(): void {
   tray.setContextMenu(contextMenu);
 }
 
+function syncClosedMainWindowMouseForwarding(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || isPanelVisible) return;
+  if (showEdgeHandleState || isDictatingState) {
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  } else {
+    mainWindow.setIgnoreMouseEvents(true);
+  }
+}
+
 function openPanelOnDisplay(
   targetDisplayId: number,
   switchToTab?: 'drawers' | 'flowchart' | 'notes' | 'settings'
 ): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  isHoveringCompanionTab = false;
+  hoveredCompanionDisplayIds.clear();
   suppressBlurUntil = Date.now() + 500;
 
   const allDisplays = getAllMonitorDisplayInfos();
@@ -664,7 +750,7 @@ function openPanelOnDisplay(
 function closePanelFromMain(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   isPanelVisible = false;
-  mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  syncClosedMainWindowMouseForwarding();
   mainWindow.webContents.send('set-panel-visibility', false);
   syncEdgeTabWindows();
 }
@@ -838,6 +924,13 @@ function launchNativeCommand(
       }
 
       if (trimmed.toLowerCase().startsWith('shell:')) {
+        if (!/^shell:appsfolder\\/i.test(trimmed)) {
+          resolve({
+            success: false,
+            error: 'Blocked unrestricted shell: URI',
+          });
+          return;
+        }
         if (process.platform === 'win32') {
           try {
             const child = execFile('explorer.exe', [trimmed]);
@@ -941,6 +1034,24 @@ function getSttWorkerScriptPath(): string | null {
   return null;
 }
 
+function resolvePythonCandidates(): Array<{ bin: string; prefixArgs: string[] }> {
+  const candidates: Array<{ bin: string; prefixArgs: string[] }> = [];
+  if (process.env.SIDEFLOW_PYTHON_PATH && fs.existsSync(process.env.SIDEFLOW_PYTHON_PATH)) {
+    candidates.push({ bin: process.env.SIDEFLOW_PYTHON_PATH, prefixArgs: [] });
+  }
+  const venvWin = path.join(__dirname, '../.venv/Scripts/python.exe');
+  if (fs.existsSync(venvWin)) {
+    candidates.push({ bin: venvWin, prefixArgs: [] });
+  }
+  candidates.push({ bin: 'python', prefixArgs: [] });
+  if (process.platform === 'win32') {
+    candidates.push({ bin: 'py', prefixArgs: ['-3'] });
+  } else {
+    candidates.push({ bin: 'python3', prefixArgs: [] });
+  }
+  return candidates;
+}
+
 function ensureSttWorker(): Promise<boolean> {
   if (sttWorkerProcess && sttWorkerReady) {
     return Promise.resolve(true);
@@ -958,6 +1069,8 @@ function ensureSttWorker(): Promise<boolean> {
     sttWorkerFailedAt = Date.now();
     return Promise.resolve(false);
   }
+
+  const pyCandidates = resolvePythonCandidates();
 
   sttWorkerInitPromise = new Promise<boolean>((resolve) => {
     let settled = false;
@@ -979,71 +1092,9 @@ function ensureSttWorker(): Promise<boolean> {
       }
     };
 
-    try {
-      const proc = spawn('python', ['-u', scriptPath], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
-      sttWorkerProcess = proc;
-      // Drain stderr continuously so Windows pipe buffers never block tqdm / CTranslate2 logs
-      proc.stderr.resume();
-
-      const rl = readline.createInterface({ input: proc.stdout });
-      rl.on('line', (line) => {
-        try {
-          const parsed = JSON.parse(line.replace(/^\uFEFF/, '')) as Record<string, unknown>;
-          if (parsed.id === 'init') {
-            const hasFasterWhisper = Boolean(parsed.fasterWhisperAvailable);
-            if (sttWorkerProcess === proc) {
-              sttWorkerReady = hasFasterWhisper;
-            }
-            sttStatusCache = {
-              available: hasFasterWhisper || process.platform === 'win32',
-              fasterWhisperAvailable: hasFasterWhisper,
-              cudaAvailable: Boolean(parsed.cudaAvailable),
-              gpuName: typeof parsed.gpuName === 'string' ? parsed.gpuName : undefined,
-              gpuVramMb: typeof parsed.gpuVramMb === 'number' ? parsed.gpuVramMb : undefined,
-              cpuThreads: typeof parsed.cpuThreads === 'number' ? parsed.cpuThreads : undefined,
-              windowsSapiAvailable: process.platform === 'win32',
-              activeModel: Boolean(parsed.cudaAvailable) ? 'distil-small.en' : 'base.en',
-            };
-            // If Python started but faster-whisper isn't installed, shut down idle python process immediately
-            if (!hasFasterWhisper) {
-              if (sttWorkerProcess === proc) {
-                sttWorkerReady = false;
-                sttWorkerProcess = null;
-              }
-              try {
-                rl.close();
-                proc.kill();
-              } catch {
-                // ignore
-              }
-            }
-            finish(hasFasterWhisper);
-            return;
-          }
-          const reqId = String(parsed.id || '');
-          const cb = sttPendingRequests.get(reqId);
-          if (cb) {
-            sttPendingRequests.delete(reqId);
-            cb(parsed);
-          }
-        } catch {
-          // ignore non-json stdout lines
-        }
-      });
-
-      proc.on('error', () => {
-        try {
-          rl.close();
-        } catch {
-          // ignore
-        }
-        if (sttWorkerProcess === proc) {
-          sttWorkerReady = false;
-          sttWorkerProcess = null;
-        }
+    const trySpawnCandidate = (candIndex: number) => {
+      if (settled) return;
+      if (candIndex >= pyCandidates.length) {
         if (!sttStatusCache) {
           sttStatusCache = {
             available: process.platform === 'win32',
@@ -1053,43 +1104,133 @@ function ensureSttWorker(): Promise<boolean> {
           };
         }
         finish(false);
-      });
+        return;
+      }
 
-      proc.on('exit', () => {
-        try {
-          rl.close();
-        } catch {
-          // ignore
-        }
-        if (sttWorkerProcess === proc) {
-          sttWorkerReady = false;
-          sttWorkerProcess = null;
-          for (const [, cb] of sttPendingRequests) {
-            cb({ success: false, error: 'STT worker exited' });
+      const { bin, prefixArgs } = pyCandidates[candIndex];
+      try {
+        const proc = spawn(bin, [...prefixArgs, '-u', scriptPath], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+        sttWorkerProcess = proc;
+        let stderrRing = '';
+        proc.stderr.on('data', (chunk: Buffer) => {
+          stderrRing = (stderrRing + chunk.toString('utf-8')).slice(-2048);
+        });
+
+        let gotInit = false;
+        const rl = readline.createInterface({ input: proc.stdout });
+        rl.on('line', (line) => {
+          try {
+            const parsed = JSON.parse(line.replace(/^\uFEFF/, '')) as Record<string, unknown>;
+            if (parsed.id === 'init') {
+              gotInit = true;
+              const hasFasterWhisper = Boolean(parsed.fasterWhisperAvailable);
+              if (sttWorkerProcess === proc) {
+                sttWorkerReady = hasFasterWhisper;
+              }
+              sttStatusCache = {
+                available: hasFasterWhisper || process.platform === 'win32',
+                fasterWhisperAvailable: hasFasterWhisper,
+                cudaAvailable: Boolean(parsed.cudaAvailable),
+                gpuName: typeof parsed.gpuName === 'string' ? parsed.gpuName : undefined,
+                gpuVramMb: typeof parsed.gpuVramMb === 'number' ? parsed.gpuVramMb : undefined,
+                cpuThreads: typeof parsed.cpuThreads === 'number' ? parsed.cpuThreads : undefined,
+                windowsSapiAvailable: process.platform === 'win32',
+                activeModel: Boolean(parsed.cudaAvailable) ? 'distil-small.en' : 'base.en',
+              };
+              // If Python started but faster-whisper isn't installed, shut down idle python process immediately
+              if (!hasFasterWhisper) {
+                if (sttWorkerProcess === proc) {
+                  sttWorkerReady = false;
+                  sttWorkerProcess = null;
+                }
+                try {
+                  rl.close();
+                  proc.stdin.end();
+                  proc.kill();
+                } catch {
+                  // ignore
+                }
+              }
+              finish(hasFasterWhisper);
+              return;
+            }
+            const reqId = String(parsed.id || '');
+            const cb = sttPendingRequests.get(reqId);
+            if (cb) {
+              sttPendingRequests.delete(reqId);
+              cb(parsed);
+            }
+          } catch {
+            // ignore non-json stdout lines
           }
-          sttPendingRequests.clear();
-        }
-        finish(false);
-      });
+        });
 
-      initTimer = setTimeout(() => {
-        if (!settled) {
+        proc.on('error', () => {
+          try {
+            rl.close();
+          } catch {
+            // ignore
+          }
           if (sttWorkerProcess === proc) {
             sttWorkerReady = false;
             sttWorkerProcess = null;
           }
+          if (!gotInit && !settled) {
+            trySpawnCandidate(candIndex + 1);
+          } else {
+            finish(false);
+          }
+        });
+
+        proc.on('exit', (code) => {
           try {
             rl.close();
-            proc.kill();
           } catch {
             // ignore
           }
-          finish(false);
+          if (sttWorkerProcess === proc) {
+            sttWorkerReady = false;
+            sttWorkerProcess = null;
+            for (const [, cb] of sttPendingRequests) {
+              cb({
+                success: false,
+                error: stderrRing.trim()
+                  ? `STT worker exited (${code ?? 'signal'}): ${stderrRing.trim().slice(-240)}`
+                  : 'STT worker exited',
+              });
+            }
+            sttPendingRequests.clear();
+          }
+          if (!gotInit && !settled) {
+            trySpawnCandidate(candIndex + 1);
+          } else {
+            finish(false);
+          }
+        });
+      } catch {
+        trySpawnCandidate(candIndex + 1);
+      }
+    };
+
+    initTimer = setTimeout(() => {
+      if (!settled) {
+        const proc = sttWorkerProcess;
+        sttWorkerReady = false;
+        sttWorkerProcess = null;
+        try {
+          proc?.stdin.end();
+          proc?.kill();
+        } catch {
+          // ignore
         }
-      }, 8000);
-    } catch {
-      finish(false);
-    }
+        finish(false);
+      }
+    }, 8000);
+
+    trySpawnCandidate(0);
   });
 
   return sttWorkerInitPromise;
@@ -1731,7 +1872,7 @@ function computeEdgeTabBounds(
 }
 
 function destroyAllEdgeTabWindows(): void {
-  isHoveringCompanionTab = false;
+  hoveredCompanionDisplayIds.clear();
   for (const [, win] of edgeTabWindows) {
     try {
       if (!win.isDestroyed()) {
@@ -1830,7 +1971,7 @@ function syncEdgeTabWindows(): void {
 
   // If in single-display routing where no companion windows are needed, release idle companion renderers
   if (enabledDisplays.length <= 1) {
-    isHoveringCompanionTab = false;
+    hoveredCompanionDisplayIds.clear();
     destroyAllEdgeTabWindows();
     return;
   }
@@ -1838,7 +1979,7 @@ function syncEdgeTabWindows(): void {
   // Destroy companion windows for disconnected displays
   for (const [id, win] of edgeTabWindows) {
     if (!allIds.has(id) || win.isDestroyed()) {
-      isHoveringCompanionTab = false;
+      hoveredCompanionDisplayIds.delete(id);
       try {
         if (!win.isDestroyed()) win.destroy();
       } catch {
@@ -1860,7 +2001,7 @@ function syncEdgeTabWindows(): void {
   for (const [id, win] of edgeTabWindows) {
     if (!companionTargetIds.has(id) && !win.isDestroyed()) {
       if (win.isVisible()) {
-        isHoveringCompanionTab = false;
+        hoveredCompanionDisplayIds.delete(id);
         win.hide();
       }
     }
@@ -1986,24 +2127,160 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      spellcheck: true,
     },
   });
 
-  // Automatically grant local microphone access for Voice Dictation inside mainWindow only
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    if (
-      permission === 'media' &&
-      mainWindow &&
-      !mainWindow.isDestroyed() &&
-      webContents === mainWindow.webContents
-    ) {
-      callback(true);
-      return;
+  // Configure Chromium Hunspell spellchecker languages & persisted custom dictionary words
+  try {
+    const sttCfg = store.sideflow_stt_settings as { lang?: string } | undefined;
+    const rawLang =
+      typeof sttCfg?.lang === 'string' && sttCfg.lang.trim()
+        ? sttCfg.lang.trim()
+        : 'en-US';
+    const availableLangs = session.defaultSession.availableSpellCheckerLanguages || [];
+    const targetLang = availableLangs.includes(rawLang)
+      ? rawLang
+      : availableLangs.find((l) => l.startsWith(rawLang.split('-')[0])) || 'en-US';
+    if (availableLangs.length === 0 || availableLangs.includes(targetLang)) {
+      session.defaultSession.setSpellCheckerLanguages([targetLang]);
     }
-    callback(false);
+  } catch {
+    // Ignore if platform uses OS native spellchecker (e.g. macOS)
+  }
+
+  try {
+    const customWords = store.sideflow_custom_dictionary;
+    if (Array.isArray(customWords)) {
+      for (const word of customWords) {
+        if (typeof word === 'string' && word.trim()) {
+          session.defaultSession.addWordToSpellCheckerDictionary(word.trim());
+        }
+      }
+    }
+  } catch {
+    // Ignore custom dictionary init errors
+  }
+
+  // Forward native Chromium spellchecker context-menu params to the renderer
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('spellcheck-context-menu', {
+      x: params.x,
+      y: params.y,
+      misspelledWord: params.misspelledWord || '',
+      dictionarySuggestions: Array.isArray(params.dictionarySuggestions)
+        ? params.dictionarySuggestions.slice(0, 8)
+        : [],
+      selectionText: params.selectionText || '',
+      isEditable: Boolean(params.isEditable),
+    });
   });
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  let trustedDevOrigin: string | null = null;
+  if (devServerUrl) {
+    try {
+      trustedDevOrigin = new URL(devServerUrl).origin;
+    } catch {
+      trustedDevOrigin = null;
+    }
+  }
+
+  const isTrustedAppUrl = (rawUrl?: string | null): boolean => {
+    if (!rawUrl) return false;
+    try {
+      const parsed = new URL(rawUrl);
+      if (trustedDevOrigin) {
+        return parsed.origin === trustedDevOrigin;
+      }
+      return parsed.protocol === 'file:';
+    } catch {
+      return false;
+    }
+  };
+
+  // Automatically grant local microphone & display-audio loopback access for Voice Dictation inside mainWindow mainFrame only
+  session.defaultSession.setPermissionRequestHandler(
+    (webContents, permission, callback, details) => {
+      const isMainFrame =
+        (details as { isMainFrame?: boolean } | undefined)?.isMainFrame !==
+        false;
+      const reqUrl = (details as { requestingUrl?: string } | undefined)
+        ?.requestingUrl;
+      const originOk = !reqUrl || isTrustedAppUrl(reqUrl);
+      if (
+        (permission === 'media' || permission === 'display-capture') &&
+        isMainFrame &&
+        originOk &&
+        mainWindow &&
+        !mainWindow.isDestroyed() &&
+        webContents === mainWindow.webContents
+      ) {
+        callback(true);
+        return;
+      }
+      callback(false);
+    }
+  );
+
+  // Enable zero-config Windows PC System Audio Loopback (Teams / Zoom / Browser calls) for Dialogue Mode inside mainWindow only
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    let responded = false;
+    const safeRespond = (streams: Electron.Streams) => {
+      if (responded) return;
+      responded = true;
+      try {
+        callback(streams);
+      } catch {
+        // Ignore if requesting frame closed or OS stream option unsupported
+      }
+    };
+
+    const win = mainWindow;
+    const frameUrl = request.frame?.url || request.securityOrigin;
+    const isTrustedMainFrame =
+      Boolean(win) &&
+      !win!.isDestroyed() &&
+      Boolean(request.frame) &&
+      request.frame?.routingId === win!.webContents.mainFrame.routingId &&
+      request.frame?.processId === win!.webContents.mainFrame.processId &&
+      isTrustedAppUrl(frameUrl);
+
+    if (!isTrustedMainFrame) {
+      safeRespond({});
+      return;
+    }
+
+    desktopCapturer
+      .getSources({
+        types: ['screen'],
+        thumbnailSize: { width: 1, height: 1 },
+      })
+      .then(
+        (sources) => {
+          if (
+            !win ||
+            win.isDestroyed() ||
+            !sources ||
+            sources.length === 0
+          ) {
+            safeRespond({});
+            return;
+          }
+          safeRespond({
+            video: sources[0],
+            ...(request.audioRequested && process.platform === 'win32'
+              ? { audio: 'loopback' }
+              : {}),
+          });
+        },
+        () => {
+          safeRespond({});
+        }
+      );
+  });
+
   if (devServerUrl) {
     mainWindow.loadURL(devServerUrl);
   } else {
@@ -2012,7 +2289,7 @@ function createWindow(): void {
 
   // Prevent untrusted navigation inside the Electron shell
   mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
-    if (devServerUrl && navigationUrl.startsWith(devServerUrl)) return;
+    if (trustedDevOrigin && isTrustedAppUrl(navigationUrl)) return;
     event.preventDefault();
   });
 
@@ -2029,7 +2306,7 @@ function createWindow(): void {
   });
 
   mainWindow.on('blur', () => {
-    if (isHoveringCompanionTab || Date.now() < suppressBlurUntil) return;
+    if (hoveredCompanionDisplayIds.size > 0 || Date.now() < suppressBlurUntil) return;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('window-blur');
     }
@@ -2148,8 +2425,7 @@ app.whenReady().then(() => {
       mainWindow.show();
       mainWindow.focus();
     } else {
-      // Forward mouse events so desktop underneath remains clickable while edge handle can still be hovered
-      mainWindow.setIgnoreMouseEvents(true, { forward: true });
+      syncClosedMainWindowMouseForwarding();
     }
     syncEdgeTabWindows();
   });
@@ -2165,7 +2441,9 @@ app.whenReady().then(() => {
     if (!isMainSender(event)) return;
     const clamped = clampPanelWidthPercent(widthPercent);
     applyMainWindowBounds(undefined, clamped, { skipCompanionSync: true });
-    writeLocalStore('sideflow_panel_width_percent', clamped);
+    if (readLocalStore().sideflow_panel_width_percent !== clamped) {
+      writeLocalStore('sideflow_panel_width_percent', clamped);
+    }
   });
 
   ipcMain.on('set-ignore-mouse-events', (event, ignore: boolean) => {
@@ -2240,13 +2518,13 @@ app.whenReady().then(() => {
       if (typeof state.shortcutLabel === 'string' && state.shortcutLabel.trim()) {
         shortcutLabelState = state.shortcutLabel.trim().slice(0, 64);
       }
+      syncClosedMainWindowMouseForwarding();
       syncEdgeTabWindows();
     }
   );
 
   ipcMain.on('prepare-edge-tab-click', (event) => {
     if (!isCompanionSender(event)) return;
-    isHoveringCompanionTab = true;
     suppressBlurUntil = Date.now() + 600;
   });
 
@@ -2264,17 +2542,14 @@ app.whenReady().then(() => {
     'set-companion-ignore-mouse',
     (event, payload: { displayId?: number; ignore?: boolean }) => {
       if (!payload || typeof payload.displayId !== 'number') return;
-      if (payload.ignore && isCompanionSender(event)) {
-        isHoveringCompanionTab = false;
-      }
       if (!isCompanionSender(event, payload.displayId)) return;
       const tabWin = edgeTabWindows.get(payload.displayId);
       if (!tabWin || tabWin.isDestroyed()) return;
       if (payload.ignore) {
-        isHoveringCompanionTab = false;
+        hoveredCompanionDisplayIds.delete(payload.displayId);
         tabWin.setIgnoreMouseEvents(true, { forward: true });
       } else {
-        isHoveringCompanionTab = true;
+        hoveredCompanionDisplayIds.add(payload.displayId);
         suppressBlurUntil = Date.now() + 800;
         tabWin.setIgnoreMouseEvents(false);
       }
@@ -2368,22 +2643,35 @@ app.whenReady().then(() => {
     });
   };
 
-  const findShortcutInDirs = (
+  const shortcutLookupCache = new Map<
+    string,
+    { path: string | null; expiresAt: number }
+  >();
+
+  const findShortcutInDirs = async (
     baseName: string,
     dirs: string[],
     maxDepth = 3
-  ): string | null => {
+  ): Promise<string | null> => {
     const cleanTarget = baseName
       .replace(/\.(lnk|appref-ms|url|exe)$/i, '')
       .trim()
       .toLowerCase();
     if (!cleanTarget) return null;
 
-    const searchDir = (dir: string, depth: number): string | null => {
+    const cached = shortcutLookupCache.get(cleanTarget);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.path;
+    }
+
+    const searchDir = async (
+      dir: string,
+      depth: number
+    ): Promise<string | null> => {
       if (depth > maxDepth) return null;
       let entries: fs.Dirent[] = [];
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
       } catch {
         return null;
       }
@@ -2396,12 +2684,15 @@ app.whenReady().then(() => {
               .basename(entry.name, path.extname(entry.name))
               .trim()
               .toLowerCase();
-            if (stem === cleanTarget || entry.name.toLowerCase() === baseName.toLowerCase()) {
+            if (
+              stem === cleanTarget ||
+              entry.name.toLowerCase() === baseName.toLowerCase()
+            ) {
               return fullPath;
             }
           }
         } else if (entry.isDirectory()) {
-          const found = searchDir(fullPath, depth + 1);
+          const found = await searchDir(fullPath, depth + 1);
           if (found) return found;
         }
       }
@@ -2409,9 +2700,19 @@ app.whenReady().then(() => {
     };
 
     for (const dir of dirs) {
-      const match = searchDir(dir, 0);
-      if (match) return match;
+      const match = await searchDir(dir, 0);
+      if (match) {
+        shortcutLookupCache.set(cleanTarget, {
+          path: match,
+          expiresAt: Date.now() + 60000,
+        });
+        return match;
+      }
     }
+    shortcutLookupCache.set(cleanTarget, {
+      path: null,
+      expiresAt: Date.now() + 30000,
+    });
     return null;
   };
 
@@ -2442,7 +2743,7 @@ app.whenReady().then(() => {
 
     if (!fs.existsSync(resolvedPath)) {
       const baseName = path.basename(candidatePath);
-      const located = findShortcutInDirs(
+      const located = await findShortcutInDirs(
         baseName,
         getWindowsShortcutSearchDirs()
       );
@@ -2473,14 +2774,17 @@ app.whenReady().then(() => {
       }
     } else if (lowerPath.endsWith('.url') && fs.existsSync(resolvedPath)) {
       try {
-        const content = fs.readFileSync(resolvedPath, 'utf-8');
-        const urlMatch = content.match(/^URL=(.+)$/im);
-        const iconMatch = content.match(/^IconFile=(.+)$/im);
-        if (urlMatch && urlMatch[1]) {
-          targetPath = urlMatch[1].trim();
-        }
-        if (iconMatch && iconMatch[1]) {
-          customIconFilePath = iconMatch[1].trim();
+        const stat = await fs.promises.stat(resolvedPath);
+        if (stat.size <= 65536) {
+          const content = await fs.promises.readFile(resolvedPath, 'utf-8');
+          const urlMatch = content.match(/^URL=(.+)$/im);
+          const iconMatch = content.match(/^IconFile=(.+)$/im);
+          if (urlMatch && urlMatch[1]) {
+            targetPath = urlMatch[1].trim();
+          }
+          if (iconMatch && iconMatch[1]) {
+            customIconFilePath = iconMatch[1].trim();
+          }
         }
       } catch {
         // ignore
@@ -2577,10 +2881,21 @@ app.whenReady().then(() => {
       }
       totalIdle += cpu.times.idle;
     }
-    const cpuPercent =
-      totalTick > 0
-        ? Math.max(1, Math.min(99, Math.round((1 - totalIdle / totalTick) * 100)))
-        : 12;
+    let cpuPercent = 12;
+    if (lastCpuSample && totalTick > lastCpuSample.totalTick) {
+      const deltaTick = totalTick - lastCpuSample.totalTick;
+      const deltaIdle = Math.max(0, totalIdle - lastCpuSample.totalIdle);
+      cpuPercent = Math.max(
+        1,
+        Math.min(99, Math.round((1 - deltaIdle / deltaTick) * 100))
+      );
+    } else if (totalTick > 0) {
+      cpuPercent = Math.max(
+        1,
+        Math.min(99, Math.round((1 - totalIdle / totalTick) * 100))
+      );
+    }
+    lastCpuSample = { totalIdle, totalTick };
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
     const usedMem = Math.max(0, totalMem - freeMem);
@@ -2655,6 +2970,7 @@ app.whenReady().then(() => {
       writeLocalStore(payload.key, payload.value);
       if (payload.key === 'sideflow_edge_handle' && typeof payload.value === 'boolean') {
         showEdgeHandleState = payload.value;
+        syncClosedMainWindowMouseForwarding();
         syncEdgeTabWindows();
       } else if (payload.key === 'sideflow_monitor_settings') {
         const incoming = sanitizeMainMonitorSettings(payload.value);
@@ -2790,6 +3106,9 @@ app.whenReady().then(() => {
       if (!payload || typeof payload.pcm16Base64 !== 'string' || !payload.pcm16Base64) {
         return { success: false, error: 'Missing audio payload' };
       }
+      if (payload.pcm16Base64.length > 10 * 1024 * 1024) {
+        return { success: false, error: 'Audio payload exceeds maximum allowed size' };
+      }
 
       const preferEngine =
         typeof payload.preferEngine === 'string'
@@ -2904,7 +3223,7 @@ app.whenReady().then(() => {
         });
         return { success: true };
       }
-      if (updateState.releaseUrl) {
+      if (updateState.releaseUrl && isTrustedReleaseUrl(updateState.releaseUrl)) {
         await shell.openExternal(updateState.releaseUrl);
         return { success: true };
       }
@@ -2917,9 +3236,65 @@ app.whenReady().then(() => {
       };
     }
   });
+
+  ipcMain.handle('spellcheck-add-word', async (event, word: string) => {
+    if (!isMainSender(event) || typeof word !== 'string') return false;
+    const clean = word.trim();
+    if (!clean) return false;
+    try {
+      return session.defaultSession.addWordToSpellCheckerDictionary(clean);
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle('spellcheck-remove-word', async (event, word: string) => {
+    if (!isMainSender(event) || typeof word !== 'string') return false;
+    const clean = word.trim();
+    if (!clean) return false;
+    try {
+      return session.defaultSession.removeWordFromSpellCheckerDictionary(clean);
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle('spellcheck-set-languages', async (event, languages: string[]) => {
+    if (!isMainSender(event) || !Array.isArray(languages)) return false;
+    try {
+      const available = session.defaultSession.availableSpellCheckerLanguages || [];
+      const valid = languages
+        .filter((l): l is string => typeof l === 'string' && Boolean(l.trim()))
+        .map((l) => {
+          const clean = l.trim();
+          if (available.includes(clean)) return clean;
+          return available.find((a) => a.startsWith(clean.split('-')[0])) || clean;
+        })
+        .filter((l) => available.length === 0 || available.includes(l));
+      if (valid.length > 0) {
+        session.defaultSession.setSpellCheckerLanguages(valid);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle('spellcheck-replace-misspelling', async (event, replacement: string) => {
+    if (!isMainSender(event) || typeof replacement !== 'string') return false;
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    try {
+      mainWindow.webContents.replaceMisspelling(replacement);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 });
 
 app.on('will-quit', () => {
+  flushLocalStoreSync();
   globalShortcut.unregisterAll();
   destroyAllEdgeTabWindows();
   if (updateCheckInterval) {
@@ -2928,6 +3303,7 @@ app.on('will-quit', () => {
   }
   if (sttWorkerProcess) {
     try {
+      sttWorkerProcess.stdin.end();
       sttWorkerProcess.kill();
     } catch {
       // ignore
@@ -2936,6 +3312,7 @@ app.on('will-quit', () => {
   }
   if (sapiWorkerProcess) {
     try {
+      sapiWorkerProcess.stdin.end();
       sapiWorkerProcess.kill();
     } catch {
       // ignore

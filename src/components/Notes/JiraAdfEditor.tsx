@@ -6,6 +6,9 @@ import React, {
   useCallback,
   useImperativeHandle,
   forwardRef,
+  createContext,
+  useContext,
+  useMemo,
 } from 'react';
 import {
   Bold,
@@ -86,9 +89,15 @@ import {
   setInlineSelectionOffsets,
 } from '../../utils/adfDom';
 import {
+  getInlineNodesSpellcheckSurface,
+  getWordAtCharacterOffset,
+  replaceWordInAdfInlineNodes,
+} from '../../utils/spellcheck';
+import {
   computeDagLayout,
   generateStandaloneSVG,
   parseMermaidCode,
+  renderCachedMermaidPreview,
 } from '../../utils/mermaid';
 import {
   ColorPickerPopover,
@@ -102,11 +111,30 @@ import {
   StatusEditorPopover,
 } from './JiraSlashMenu';
 
+export interface JiraAdfSpellcheckContextMenuPayload {
+  targetId: string;
+  topLevelIndex: number;
+  word?: string;
+  wordStart?: number;
+  wordEnd?: number;
+  selectedText: string;
+}
+
 export interface JiraAdfEditorHandle {
   insertSnippetAtCursor: (
     snippet: string,
     options?: { padSpace?: boolean }
   ) => void;
+  replaceWordInTarget: (
+    targetId: string,
+    start: number,
+    end: number,
+    replacement: string
+  ) => boolean;
+  cutInActiveTarget: () => string;
+  getSelectedTextInActiveTarget: () => string;
+  pasteTextInActiveTarget: (plainText: string) => void;
+  selectAllInActiveTarget: () => void;
 }
 
 export interface JiraAdfEditorProps {
@@ -118,7 +146,33 @@ export interface JiraAdfEditorProps {
   canRedo?: boolean;
   onNotify: NotifyFn;
   onOpenMermaidInFlow?: (flowState: FlowchartState) => void;
+  spellCheckEnabled?: boolean;
+  spellCheckLang?: string;
+  customDictionary?: string[];
+  ignoredWords?: string[];
+  onSpellCheckContextMenu?: (
+    e: React.MouseEvent<HTMLDivElement>,
+    payload: JiraAdfSpellcheckContextMenuPayload
+  ) => void;
 }
+
+interface JiraSpellcheckContextValue {
+  spellCheckEnabled: boolean;
+  spellCheckLang: string;
+  customDictionary: string[];
+  ignoredWords: string[];
+  onSpellCheckContextMenu?: (
+    e: React.MouseEvent<HTMLDivElement>,
+    payload: JiraAdfSpellcheckContextMenuPayload
+  ) => void;
+}
+
+const JiraSpellcheckContext = createContext<JiraSpellcheckContextValue>({
+  spellCheckEnabled: false,
+  spellCheckLang: 'en-US',
+  customDictionary: [],
+  ignoredWords: [],
+});
 
 interface InlineBlockRegistration {
   getInline: () => AdfInlineNode[];
@@ -287,7 +341,29 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
   const pendingFocusRef = useRef<{ start: number; end: number } | null>(null);
   const suppressDomSyncOnceRef = useRef(false);
 
-  const renderedHtml = adfInlineToEditorHtml(inlineNodes);
+  const spellCtx = useContext(JiraSpellcheckContext);
+  const spellOptions = useMemo(
+    () =>
+      spellCtx.spellCheckEnabled
+        ? {
+            spellCheckEnabled: true,
+            customDictionary: spellCtx.customDictionary,
+            ignoredWords: spellCtx.ignoredWords,
+          }
+        : undefined,
+    [
+      spellCtx.spellCheckEnabled,
+      spellCtx.customDictionary,
+      spellCtx.ignoredWords,
+    ]
+  );
+  const spellOptionsRef = useRef(spellOptions);
+  spellOptionsRef.current = spellOptions;
+
+  const renderedHtml = useMemo(
+    () => adfInlineToEditorHtml(inlineNodes, spellOptions),
+    [inlineNodes, spellOptions]
+  );
   const isEmpty = getInlineNodesLength(inlineNodes) === 0;
 
   useLayoutEffect(() => {
@@ -331,7 +407,10 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
         pendingFocusRef.current = { start, end };
         const el = elRef.current;
         if (el) {
-          el.innerHTML = adfInlineToEditorHtml(latestNodesRef.current);
+          el.innerHTML = adfInlineToEditorHtml(
+            latestNodesRef.current,
+            spellOptionsRef.current
+          );
           el.focus();
           setInlineSelectionOffsets(el, start, end);
           lastSelectionRef.current = { start, end };
@@ -473,7 +552,17 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
       onSlashTriggerChange(null);
     }
 
-    suppressDomSyncOnceRef.current = true;
+    const lastTypedChar = prefix.slice(-1);
+    if (
+      spellCtx.spellCheckEnabled &&
+      lastTypedChar &&
+      /[\s.,!?;:()[\]{}"']/.test(lastTypedChar)
+    ) {
+      pendingFocusRef.current = lastSelectionRef.current;
+      suppressDomSyncOnceRef.current = false;
+    } else {
+      suppressDomSyncOnceRef.current = true;
+    }
     onChangeInline(parsed);
   };
 
@@ -655,6 +744,87 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
     syncSelection();
   };
 
+  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    onFocusTarget(targetId, topLevelIndex);
+    const el = elRef.current;
+    const rawTarget = e.target as HTMLElement | null;
+    const { plainText, skipRanges } = getInlineNodesSpellcheckSurface(
+      latestNodesRef.current
+    );
+
+    const liveSel = (el && getInlineSelectionOffsets(el)) || lastSelectionRef.current;
+    const selectedText =
+      liveSel && liveSel.end > liveSel.start
+        ? plainText.slice(liveSel.start, liveSel.end)
+        : '';
+
+    // 1. Check if right-clicked directly on a highlighted misspelled word span
+    const errorSpan = rawTarget?.closest?.('[data-spellcheck-error="true"]') as
+      | HTMLElement
+      | null;
+    if (errorSpan && el?.contains(errorSpan)) {
+      const word = errorSpan.getAttribute('data-misspelled-word') || undefined;
+      const startAttr = Number(errorSpan.getAttribute('data-spellcheck-start'));
+      const endAttr = Number(errorSpan.getAttribute('data-spellcheck-end'));
+      if (word && Number.isFinite(startAttr) && Number.isFinite(endAttr)) {
+        spellCtx.onSpellCheckContextMenu?.(e, {
+          targetId,
+          topLevelIndex,
+          word,
+          wordStart: startAttr,
+          wordEnd: endAttr,
+          selectedText,
+        });
+        return;
+      }
+    }
+
+    // 2. Resolve word at current caret / selection inside the block
+    const offset = liveSel ? liveSel.start : 0;
+    const wordHit = getWordAtCharacterOffset(plainText, offset);
+    if (
+      wordHit &&
+      !skipRanges.some(([s, end]) => wordHit.start < end && wordHit.end > s)
+    ) {
+      spellCtx.onSpellCheckContextMenu?.(e, {
+        targetId,
+        topLevelIndex,
+        word: wordHit.word,
+        wordStart: wordHit.start,
+        wordEnd: wordHit.end,
+        selectedText,
+      });
+      return;
+    }
+
+    // 3. Fallback: if block contains a highlighted misspelled word and caret was at boundary
+    const firstErrorSpan = el?.querySelector<HTMLElement>(
+      '[data-spellcheck-error="true"]'
+    );
+    if (firstErrorSpan) {
+      const word = firstErrorSpan.getAttribute('data-misspelled-word') || undefined;
+      const startAttr = Number(firstErrorSpan.getAttribute('data-spellcheck-start'));
+      const endAttr = Number(firstErrorSpan.getAttribute('data-spellcheck-end'));
+      if (word && Number.isFinite(startAttr) && Number.isFinite(endAttr)) {
+        spellCtx.onSpellCheckContextMenu?.(e, {
+          targetId,
+          topLevelIndex,
+          word,
+          wordStart: startAttr,
+          wordEnd: endAttr,
+          selectedText,
+        });
+        return;
+      }
+    }
+
+    spellCtx.onSpellCheckContextMenu?.(e, {
+      targetId,
+      topLevelIndex,
+      selectedText,
+    });
+  };
+
   return (
     <div className="relative min-w-0 flex-1">
       {isEmpty && placeholder && (
@@ -676,15 +846,24 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
         data-testid={testId}
         contentEditable
         suppressContentEditableWarning
+        spellCheck={spellCtx.spellCheckEnabled}
+        lang={spellCtx.spellCheckLang}
         onFocus={() => {
           onFocusTarget(targetId, topLevelIndex);
           syncSelection();
+        }}
+        onBlur={() => {
+          const el = elRef.current;
+          if (el && el.innerHTML !== renderedHtml) {
+            el.innerHTML = renderedHtml;
+          }
         }}
         onInput={handleInput}
         onPaste={handlePaste}
         onKeyUp={syncSelection}
         onMouseUp={syncSelection}
         onClick={handleClick}
+        onContextMenu={handleContextMenu}
         onKeyDown={handleKeyDown}
         className={`min-h-[1.5em] outline-none select-text whitespace-pre-wrap break-words ${className}`}
       />
@@ -703,6 +882,11 @@ export const JiraAdfEditor = forwardRef<
     onRedo,
     onNotify,
     onOpenMermaidInFlow,
+    spellCheckEnabled = true,
+    spellCheckLang = 'en-US',
+    customDictionary = [],
+    ignoredWords = [],
+    onSpellCheckContextMenu,
   },
   ref
 ) {
@@ -844,8 +1028,99 @@ export const JiraAdfEditor = forwardRef<
         }
         onChangeDoc(appendTextToAdfDoc(doc, snippet, options));
       },
+      replaceWordInTarget: (
+        targetId: string,
+        start: number,
+        end: number,
+        replacement: string
+      ) => {
+        const reg = registryRef.current.get(targetId);
+        if (!reg) return false;
+        const current = reg.getInline();
+        const { content, nextOffset } = replaceWordInAdfInlineNodes(
+          current,
+          start,
+          end,
+          replacement
+        );
+        reg.setInline(content);
+        setActiveTargetId(targetId);
+        requestAnimationFrame(() => {
+          registryRef.current.get(targetId)?.focusAt(nextOffset, nextOffset);
+        });
+        return true;
+      },
+      getSelectedTextInActiveTarget: () => {
+        const reg = registryRef.current.get(activeTargetId);
+        if (!reg) return '';
+        const sel = reg.getSelection();
+        if (sel.end <= sel.start) return '';
+        const { plainText } = getInlineNodesSpellcheckSurface(reg.getInline());
+        return plainText.slice(sel.start, sel.end);
+      },
+      cutInActiveTarget: () => {
+        const reg = registryRef.current.get(activeTargetId);
+        if (!reg) return '';
+        const sel = reg.getSelection();
+        if (sel.end <= sel.start) return '';
+        const current = reg.getInline();
+        const { plainText } = getInlineNodesSpellcheckSurface(current);
+        const cutText = plainText.slice(sel.start, sel.end);
+        const { content, nextOffset } = replaceInlineRange(
+          current,
+          sel.start,
+          sel.end,
+          []
+        );
+        reg.setInline(content);
+        requestAnimationFrame(() => {
+          registryRef.current.get(activeTargetId)?.focusAt(nextOffset, nextOffset);
+        });
+        return cutText;
+      },
+      pasteTextInActiveTarget: (plainText: string) => {
+        if (!plainText) return;
+        const reg = registryRef.current.get(activeTargetId);
+        if (!reg) return;
+        const sel = reg.getSelection();
+        const pastedNodes = parseClipboardToAdfInline('', plainText);
+        if (pastedNodes.length === 0) return;
+        const { content, nextOffset } = replaceInlineRange(
+          reg.getInline(),
+          sel.start,
+          sel.end,
+          pastedNodes
+        );
+        reg.setInline(content);
+        requestAnimationFrame(() => {
+          registryRef.current.get(activeTargetId)?.focusAt(nextOffset, nextOffset);
+        });
+      },
+      selectAllInActiveTarget: () => {
+        const reg = registryRef.current.get(activeTargetId);
+        if (!reg) return;
+        const len = getInlineNodesLength(reg.getInline());
+        reg.focusAt(0, len);
+      },
     }),
     [activeTargetId, doc, onChangeDoc]
+  );
+
+  const spellContextValue = useMemo<JiraSpellcheckContextValue>(
+    () => ({
+      spellCheckEnabled,
+      spellCheckLang,
+      customDictionary,
+      ignoredWords,
+      onSpellCheckContextMenu,
+    }),
+    [
+      spellCheckEnabled,
+      spellCheckLang,
+      customDictionary,
+      ignoredWords,
+      onSpellCheckContextMenu,
+    ]
   );
 
   const safeTopIdx = Math.min(
@@ -1835,6 +2110,7 @@ export const JiraAdfEditor = forwardRef<
               <textarea
                 key={subTargetId}
                 aria-label="Nested code snippet"
+                spellCheck={false}
                 value={nestedCode}
                 onChange={(e) => {
                   const updated = [...blocks];
@@ -3137,16 +3413,9 @@ export const JiraAdfEditor = forwardRef<
         const rawCode = (block.content || []).map((t) => t.text).join('');
         const lang = block.attrs?.language || 'plaintext';
         const isMermaid = lang === 'mermaid';
-        const parsedMermaid = isMermaid ? parseMermaidCode(rawCode) : null;
-        const laidOutMermaid: FlowchartState | null = parsedMermaid
-          ? { ...parsedMermaid, nodes: computeDagLayout(parsedMermaid) }
-          : null;
-        const svgMarkup = laidOutMermaid
-          ? generateStandaloneSVG(laidOutMermaid).replace(
-              /^<\?xml[^>]*>\s*/i,
-              ''
-            )
-          : null;
+        const { laidOut: laidOutMermaid, svgMarkup } = isMermaid
+          ? renderCachedMermaidPreview(rawCode)
+          : { laidOut: null, svgMarkup: null };
 
         return (
           <div
@@ -3225,6 +3494,7 @@ export const JiraAdfEditor = forwardRef<
 
             <textarea
               aria-label={`Code snippet (${lang})`}
+              spellCheck={false}
               value={rawCode}
               onFocus={() => setActiveTopLevelIndex(idx)}
               onChange={(e) => {
@@ -3528,10 +3798,11 @@ export const JiraAdfEditor = forwardRef<
     currentTopBlock?.type === 'heading';
 
   return (
-    <div
-      data-testid="jira-adf-editor"
-      className="flex-1 flex flex-col min-h-0 overflow-hidden"
-    >
+    <JiraSpellcheckContext.Provider value={spellContextValue}>
+      <div
+        data-testid="jira-adf-editor"
+        className="flex-1 flex flex-col min-h-0 overflow-hidden"
+      >
       {/* Jira Cloud Description Editor Sticky Toolbar */}
       <div
         ref={toolbarRef}
@@ -3634,6 +3905,44 @@ export const JiraAdfEditor = forwardRef<
             <div
               data-testid="jira-more-formatting-menu"
               role="menu"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setOpenMenu(null);
+                  return;
+                }
+                if (
+                  e.key === 'ArrowDown' ||
+                  e.key === 'ArrowUp' ||
+                  e.key === 'Home' ||
+                  e.key === 'End'
+                ) {
+                  const items = Array.from(
+                    e.currentTarget.querySelectorAll<HTMLButtonElement>(
+                      '[role="menuitem"], [role="menuitemcheckbox"]'
+                    )
+                  );
+                  if (items.length === 0) return;
+                  e.preventDefault();
+                  const idx = items.indexOf(
+                    document.activeElement as HTMLButtonElement
+                  );
+                  const next =
+                    e.key === 'Home'
+                      ? 0
+                      : e.key === 'End'
+                      ? items.length - 1
+                      : e.key === 'ArrowDown'
+                      ? idx < 0
+                        ? 0
+                        : (idx + 1) % items.length
+                      : idx <= 0
+                      ? items.length - 1
+                      : (idx - 1) % items.length;
+                  items[next]?.focus();
+                }
+              }}
               className="absolute left-2 top-full mt-1 w-48 max-w-[calc(100%-1rem)] rounded-xl bg-slate-900 border border-slate-700 shadow-2xl py-1 z-30 text-xs"
             >
               <button
@@ -4111,6 +4420,44 @@ export const JiraAdfEditor = forwardRef<
             <div
               data-testid="jira-insert-dropdown"
               role="menu"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setOpenMenu(null);
+                  return;
+                }
+                if (
+                  e.key === 'ArrowDown' ||
+                  e.key === 'ArrowUp' ||
+                  e.key === 'Home' ||
+                  e.key === 'End'
+                ) {
+                  const items = Array.from(
+                    e.currentTarget.querySelectorAll<HTMLButtonElement>(
+                      '[role="menuitem"]'
+                    )
+                  );
+                  if (items.length === 0) return;
+                  e.preventDefault();
+                  const idx = items.indexOf(
+                    document.activeElement as HTMLButtonElement
+                  );
+                  const next =
+                    e.key === 'Home'
+                      ? 0
+                      : e.key === 'End'
+                      ? items.length - 1
+                      : e.key === 'ArrowDown'
+                      ? idx < 0
+                        ? 0
+                        : (idx + 1) % items.length
+                      : idx <= 0
+                      ? items.length - 1
+                      : (idx - 1) % items.length;
+                  items[next]?.focus();
+                }
+              }}
               className="absolute right-2 top-full mt-1 w-64 max-w-[calc(100%-1rem)] max-h-72 overflow-y-auto rounded-xl bg-slate-900 border border-sky-500/40 shadow-2xl py-1 z-30"
             >
               {JIRA_SLASH_COMMANDS.map((cmd) => (
@@ -4314,5 +4661,6 @@ export const JiraAdfEditor = forwardRef<
         {doc.content.map((block, idx) => renderTopLevelBlock(block, idx))}
       </div>
     </div>
+    </JiraSpellcheckContext.Provider>
   );
 });

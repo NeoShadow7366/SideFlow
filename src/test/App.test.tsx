@@ -939,7 +939,11 @@ describe('SideFlow Application Integration Suite', () => {
 
       // Wait for FileReader onload
       expect(
-        await screen.findByText(/Restored SideFlow Backup/i)
+        await screen.findByText(
+          /Restored SideFlow Backup/i,
+          {},
+          { timeout: 10000 }
+        )
       ).toBeInTheDocument();
       expect(screen.getByTestId('current-shortcut-pill')).toHaveTextContent(
         'Ctrl + Alt + P'

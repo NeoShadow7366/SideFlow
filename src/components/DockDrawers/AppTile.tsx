@@ -42,7 +42,7 @@ interface AppTileProps {
   onEdit?: (app: AppItem, drawerId: string) => void;
 }
 
-export const AppTile: React.FC<AppTileProps> = ({
+export const AppTile: React.FC<AppTileProps> = React.memo(({
   app,
   drawerId,
   isLocked = false,
@@ -284,4 +284,4 @@ export const AppTile: React.FC<AppTileProps> = ({
       </div>
     </div>
   );
-};
+});

@@ -44,7 +44,11 @@ import {
   markdownToAdf,
   validateAndNormalizeAdfDoc,
 } from './utils/adf';
-import { useLocalStorage } from './hooks/useLocalStorage';
+import {
+  useLocalStorage,
+  writeSharedStorage,
+  removeSharedStorage,
+} from './hooks/useLocalStorage';
 import {
   defaultDrawers,
   defaultFlowData,
@@ -73,6 +77,21 @@ import { CommandPalette } from './components/CommandPalette';
 import { DynamicIcon } from './components/DynamicIcon';
 import { SideFlowIcon } from './components/SideFlowIcon';
 
+const DEFAULT_SAVED_FLOW_DIAGRAMS: FlowDiagramItem[] = [
+  {
+    id: 'flow-1',
+    title: 'Hotkey Launch Flow',
+    flowData: defaultFlowData,
+    updatedAt: 1700000000000,
+  },
+  {
+    id: 'flow-2',
+    title: 'CI/CD Deployment Pipeline',
+    flowData: getMermaidTemplatePreset('ci-cd') || defaultFlowData,
+    updatedAt: 1699999940000,
+  },
+];
+
 export const App: React.FC = () => {
   const [drawers, setDrawers] = useLocalStorage<AppDrawer[]>(
     'sideflow_drawers',
@@ -81,6 +100,10 @@ export const App: React.FC = () => {
   const [flowData, setFlowData] = useLocalStorage<FlowchartState>(
     'sideflow_flow',
     defaultFlowData
+  );
+  const [savedFlowDiagrams] = useLocalStorage<FlowDiagramItem[]>(
+    'sideflow_flow_diagrams_v1',
+    DEFAULT_SAVED_FLOW_DIAGRAMS
   );
   const [notes, setNotes] = useLocalStorage<NoteItem[]>(
     'sideflow_notes',
@@ -405,15 +428,16 @@ export const App: React.FC = () => {
     [setIsPinned]
   );
 
-  // Clock updater
+  // Clock updater (only needed when rendering the simulated desktop environment in web preview)
   useEffect(() => {
+    if (isElectronWindow) return;
     const interval = window.setInterval(() => {
       setClockTime(
         new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       );
     }, 15000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [isElectronWindow]);
 
   // Electron IPC listeners
   useEffect(() => {
@@ -966,7 +990,47 @@ export const App: React.FC = () => {
             Array.isArray((d as AppDrawer).apps)
         )
       ) {
-        setDrawers(parsed.drawers);
+        const sanitizedDrawers: AppDrawer[] = (
+          parsed.drawers as AppDrawer[]
+        ).map((drawer) => ({
+          ...drawer,
+          title:
+            typeof drawer.title === 'string'
+              ? drawer.title.slice(0, 120)
+              : 'Drawer',
+          apps: (drawer.apps || [])
+            .filter(
+              (a): a is AppItem =>
+                Boolean(a) &&
+                typeof a === 'object' &&
+                typeof a.id === 'string' &&
+                typeof a.name === 'string' &&
+                typeof a.cmd === 'string'
+            )
+            .map((a) => ({
+              ...a,
+              name: a.name.slice(0, 120),
+              cmd: a.cmd.replace(/[\r\n\0]/g, '').trim(),
+            }))
+            .filter((a) => {
+              const lowerCmd = a.cmd.toLowerCase();
+              if (
+                lowerCmd.startsWith('javascript:') ||
+                lowerCmd.startsWith('vbscript:') ||
+                lowerCmd.startsWith('data:')
+              ) {
+                return false;
+              }
+              if (
+                lowerCmd.startsWith('shell:') &&
+                !/^shell:appsfolder\\/i.test(a.cmd)
+              ) {
+                return false;
+              }
+              return Boolean(a.cmd);
+            }),
+        }));
+        setDrawers(sanitizedDrawers);
         restoredAny = true;
       }
       if (
@@ -982,9 +1046,9 @@ export const App: React.FC = () => {
         parsed.savedDiagrams.length > 0
       ) {
         try {
-          window.localStorage.setItem(
+          writeSharedStorage(
             'sideflow_flow_diagrams_v1',
-            JSON.stringify(parsed.savedDiagrams)
+            parsed.savedDiagrams
           );
           setWorkspaceResetEpoch((prev) => prev + 1);
           restoredAny = true;
@@ -1151,6 +1215,13 @@ export const App: React.FC = () => {
             'rocket',
             'Ready to install from NeoShadow7366/SideFlow'
           );
+        } else if (nextState.status === 'error') {
+          notify(
+            'Update Check Failed',
+            'zap',
+            nextState.error || 'Could not reach GitHub Releases',
+            { variant: 'error' }
+          );
         } else {
           notify(
             'SideFlow is Up to Date',
@@ -1203,11 +1274,15 @@ export const App: React.FC = () => {
 
   const handleResetAllData = () => {
     try {
-      window.localStorage.removeItem('sideflow_flow_diagrams_v1');
-      window.localStorage.removeItem('sideflow_active_diagram_id');
-      window.localStorage.removeItem('sideflow_flow_minimap');
-      window.localStorage.removeItem('sideflow_show_docklets');
-      window.localStorage.removeItem('sideflow_notes_view_mode');
+      removeSharedStorage('sideflow_flow_diagrams_v1');
+      removeSharedStorage('sideflow_active_diagram_id');
+      removeSharedStorage('sideflow_flow_minimap');
+      removeSharedStorage('sideflow_show_docklets');
+      removeSharedStorage('sideflow_notes_view_mode');
+      removeSharedStorage('sideflow_spellcheck_enabled');
+      removeSharedStorage('sideflow_custom_dictionary');
+      removeSharedStorage('sideflow_stt_settings');
+      removeSharedStorage('sideflow_stt_drawer_open');
     } catch {
       // ignore storage errors
     }
@@ -1240,18 +1315,9 @@ export const App: React.FC = () => {
     notify('Restored Default Workspace', 'check', 'All drawers, flows & notes reset');
   };
 
-  const savedDiagramCount = (() => {
-    try {
-      const raw = window.localStorage.getItem('sideflow_flow_diagrams_v1');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed.length;
-      }
-    } catch {
-      // ignore
-    }
-    return 2;
-  })();
+  const savedDiagramCount = Array.isArray(savedFlowDiagrams)
+    ? savedFlowDiagrams.length
+    : 2;
 
   const totalAppCount = drawers.reduce((sum, d) => sum + d.apps.length, 0);
 
@@ -1928,6 +1994,7 @@ export const App: React.FC = () => {
               onToggleLock={() => setIsDockLocked((prev) => !prev)}
               dockEffect={dockEffect}
               dockIconSize={dockIconSize}
+              isPanelOpen={isPanelOpen}
             />
           </div>
         )}
@@ -2073,11 +2140,34 @@ export const App: React.FC = () => {
                         ? { ...d, flowData: nextFlow, updatedAt: Date.now() }
                         : d
                     );
-                    window.localStorage.setItem(
+                    writeSharedStorage(
                       'sideflow_flow_diagrams_v1',
-                      JSON.stringify(updatedDiags)
+                      updatedDiags
                     );
                   }
+                } else {
+                  const seeded: FlowDiagramItem[] = [
+                    {
+                      id: 'flow-1',
+                      title: 'Hotkey Launch Flow',
+                      flowData:
+                        activeDiagId === 'flow-1'
+                          ? nextFlow
+                          : JSON.parse(JSON.stringify(flowData)),
+                      updatedAt: Date.now(),
+                    },
+                    {
+                      id: 'flow-2',
+                      title: 'CI/CD Deployment Pipeline',
+                      flowData:
+                        activeDiagId === 'flow-2'
+                          ? nextFlow
+                          : getMermaidTemplatePreset('ci-cd') ||
+                            JSON.parse(JSON.stringify(defaultFlowData)),
+                      updatedAt: Date.now() - 60000,
+                    },
+                  ];
+                  writeSharedStorage('sideflow_flow_diagrams_v1', seeded);
                 }
               } catch {
                 // ignore
@@ -2094,16 +2184,20 @@ export const App: React.FC = () => {
                   onUndo: () => {
                     try {
                       if (prevDiagramsRaw !== null) {
-                        window.localStorage.setItem(
+                        writeSharedStorage(
                           'sideflow_flow_diagrams_v1',
-                          prevDiagramsRaw
+                          JSON.parse(prevDiagramsRaw)
                         );
+                      } else {
+                        removeSharedStorage('sideflow_flow_diagrams_v1');
                       }
                       if (prevActiveDiagramRaw !== null) {
-                        window.localStorage.setItem(
+                        writeSharedStorage(
                           'sideflow_active_diagram_id',
-                          prevActiveDiagramRaw
+                          JSON.parse(prevActiveDiagramRaw)
                         );
+                      } else {
+                        removeSharedStorage('sideflow_active_diagram_id');
                       }
                     } catch {
                       // ignore
@@ -2230,15 +2324,9 @@ export const App: React.FC = () => {
                   updatedAt: Date.now() - 60000,
                 },
               ];
-              window.localStorage.setItem(
-                'sideflow_flow_diagrams_v1',
-                JSON.stringify(seeded)
-              );
+              writeSharedStorage('sideflow_flow_diagrams_v1', seeded);
             }
-            window.localStorage.setItem(
-              'sideflow_active_diagram_id',
-              JSON.stringify(diagram.id)
-            );
+            writeSharedStorage('sideflow_active_diagram_id', diagram.id);
           } catch {
             // ignore storage errors
           }
@@ -2304,14 +2392,11 @@ export const App: React.FC = () => {
             updatedAt: Date.now(),
           };
           try {
-            window.localStorage.setItem(
-              'sideflow_flow_diagrams_v1',
-              JSON.stringify([...existing, newDiag])
-            );
-            window.localStorage.setItem(
-              'sideflow_active_diagram_id',
-              JSON.stringify(newDiag.id)
-            );
+            writeSharedStorage('sideflow_flow_diagrams_v1', [
+              ...existing,
+              newDiag,
+            ]);
+            writeSharedStorage('sideflow_active_diagram_id', newDiag.id);
           } catch {
             // ignore
           }
@@ -2340,14 +2425,12 @@ export const App: React.FC = () => {
             if (rawDiags) {
               const parsed = JSON.parse(rawDiags);
               if (Array.isArray(parsed)) {
-                window.localStorage.setItem(
+                writeSharedStorage(
                   'sideflow_flow_diagrams_v1',
-                  JSON.stringify(
-                    parsed.map((d: FlowDiagramItem) =>
-                      d.id === activeDiagId
-                        ? { ...d, flowData: nextFlow, updatedAt: Date.now() }
-                        : d
-                    )
+                  parsed.map((d: FlowDiagramItem) =>
+                    d.id === activeDiagId
+                      ? { ...d, flowData: nextFlow, updatedAt: Date.now() }
+                      : d
                   )
                 );
               }

@@ -12,6 +12,7 @@ import {
   normalizeInlineNodes,
   sanitizeHexColor,
 } from './adf';
+import { isWordSpelledCorrectly } from './spellcheck';
 
 function escapeHtml(raw: string): string {
   return raw
@@ -49,24 +50,96 @@ function formatSmartCardLabel(rawUrl: string): string {
   }
 }
 
+export interface AdfInlineEditorHtmlOptions {
+  spellCheckEnabled?: boolean;
+  customDictionary?: Iterable<string>;
+  ignoredWords?: Iterable<string>;
+}
+
+function escapeAndHighlightTextNode(
+  rawText: string,
+  baseOffset: number,
+  options?: AdfInlineEditorHtmlOptions
+): string {
+  if (!options?.spellCheckEnabled || !rawText) {
+    return escapeHtml(rawText);
+  }
+  const urlOrMentionRegex =
+    /\b(?:https?:\/\/|mailto:|www\.)[^\s<>()]+|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b|(?:^|\s)[#@][a-zA-Z0-9_.-]+/gi;
+  const skipIntervals: Array<[number, number]> = [];
+  let skipMatch: RegExpExecArray | null;
+  while ((skipMatch = urlOrMentionRegex.exec(rawText)) !== null) {
+    skipIntervals.push([
+      skipMatch.index,
+      skipMatch.index + skipMatch[0].length,
+    ]);
+  }
+
+  const wordRegex = /\b[A-Za-z]+(?:['’][A-Za-z]+)*\b/g;
+  let out = '';
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = wordRegex.exec(rawText)) !== null) {
+    const word = m[0];
+    const start = m.index;
+    const end = start + word.length;
+    const skipped = skipIntervals.some(([s, e]) => start < e && end > s);
+    if (
+      !skipped &&
+      !isWordSpelledCorrectly(
+        word,
+        options.customDictionary,
+        options.ignoredWords
+      )
+    ) {
+      out += escapeHtml(rawText.slice(lastIdx, start));
+      const globalStart = baseOffset + start;
+      const globalEnd = baseOffset + end;
+      out += `<span data-spellcheck-error="true" data-misspelled-word="${escapeHtml(
+        word
+      )}" data-spellcheck-start="${globalStart}" data-spellcheck-end="${globalEnd}" class="sf-misspelled-word">${escapeHtml(
+        word
+      )}</span>`;
+      lastIdx = end;
+    }
+  }
+
+  out += escapeHtml(rawText.slice(lastIdx));
+  return out;
+}
+
 /**
  * Renders canonical `AdfInlineNode[]` into rich HTML for a single block's
  * `contentEditable` surface, including interactive `contenteditable="false"`
  * Jira inline pills (`status`, `mention`, `date`, `emoji`, `inlineCard`).
  */
-export function adfInlineToEditorHtml(nodes?: AdfInlineNode[]): string {
+export function adfInlineToEditorHtml(
+  nodes?: AdfInlineNode[],
+  options?: AdfInlineEditorHtmlOptions
+): string {
   if (!nodes || nodes.length === 0) return '';
+
+  let runningOffset = 0;
 
   return nodes
     .map((node, index) => {
+      const nodeBaseOffset = runningOffset;
+      runningOffset += node.type === 'text' ? node.text.length : 1;
+
       switch (node.type) {
         case 'text': {
-          let html = escapeHtml(node.text);
           const marks = node.marks || [];
+          const hasCodeOrLink = marks.some(
+            (mk) => mk.type === 'code' || mk.type === 'link'
+          );
+          let html = hasCodeOrLink
+            ? escapeHtml(node.text)
+            : escapeAndHighlightTextNode(node.text, nodeBaseOffset, options);
           for (const m of marks) {
             switch (m.type) {
               case 'code':
-                html = `<code data-adf-mark="code" class="px-1.5 py-0.5 rounded bg-slate-800/95 border border-slate-700 text-amber-300 font-mono text-[0.88em]">${html}</code>`;
+                html = `<code data-adf-mark="code" spellcheck="false" class="px-1.5 py-0.5 rounded bg-slate-800/95 border border-slate-700 text-amber-300 font-mono text-[0.88em]">${html}</code>`;
                 break;
               case 'strong':
                 html = `<strong data-adf-mark="strong" class="font-bold text-white">${html}</strong>`;
@@ -113,7 +186,7 @@ export function adfInlineToEditorHtml(nodes?: AdfInlineNode[]): string {
                     m.attrs.href
                   )}" href="${escapeHtml(
                     m.attrs.href
-                  )}" target="_blank" rel="noopener noreferrer" class="text-sky-400 underline decoration-sky-400/60 hover:text-sky-300 cursor-pointer">${html}</a>`;
+                  )}" spellcheck="false" target="_blank" rel="noopener noreferrer" class="text-sky-400 underline decoration-sky-400/60 hover:text-sky-300 cursor-pointer">${html}</a>`;
                 }
                 break;
             }
@@ -128,7 +201,7 @@ export function adfInlineToEditorHtml(nodes?: AdfInlineNode[]): string {
           const palette =
             JIRA_STATUS_COLORS.find((c) => c.id === node.attrs.color) ||
             JIRA_STATUS_COLORS[0];
-          return `<span contenteditable="false" role="button" tabindex="0" aria-label="Status: ${escapeHtml(
+          return `<span contenteditable="false" spellcheck="false" role="button" tabindex="0" aria-label="Status: ${escapeHtml(
             node.attrs.text
           )} (${escapeHtml(
             node.attrs.color
@@ -145,7 +218,7 @@ export function adfInlineToEditorHtml(nodes?: AdfInlineNode[]): string {
 
         case 'mention': {
           const display = node.attrs.text || `@${node.attrs.id}`;
-          return `<span contenteditable="false" role="button" tabindex="0" aria-label="Mention ${escapeHtml(
+          return `<span contenteditable="false" spellcheck="false" role="button" tabindex="0" aria-label="Mention ${escapeHtml(
             display
           )}" data-testid="adf-mention-pill" data-adf-inline-index="${index}" data-adf-inline-type="mention" data-mention-id="${escapeHtml(
             node.attrs.id
@@ -158,7 +231,7 @@ export function adfInlineToEditorHtml(nodes?: AdfInlineNode[]): string {
 
         case 'date': {
           const label = formatDateChipLabel(node.attrs.timestamp);
-          return `<span contenteditable="false" role="button" tabindex="0" aria-label="Date: ${escapeHtml(
+          return `<span contenteditable="false" spellcheck="false" role="button" tabindex="0" aria-label="Date: ${escapeHtml(
             label
           )}" data-testid="adf-date-chip" data-adf-inline-index="${index}" data-adf-inline-type="date" data-date-timestamp="${escapeHtml(
             node.attrs.timestamp
@@ -169,7 +242,7 @@ export function adfInlineToEditorHtml(nodes?: AdfInlineNode[]): string {
 
         case 'emoji': {
           const glyph = node.attrs.text || '🙂';
-          return `<span contenteditable="false" data-testid="adf-emoji-node" data-adf-inline-index="${index}" data-adf-inline-type="emoji" data-emoji-shortname="${escapeHtml(
+          return `<span contenteditable="false" spellcheck="false" data-testid="adf-emoji-node" data-adf-inline-index="${index}" data-adf-inline-type="emoji" data-emoji-shortname="${escapeHtml(
             node.attrs.shortName
           )}" data-emoji-text="${escapeHtml(
             glyph
@@ -180,7 +253,7 @@ export function adfInlineToEditorHtml(nodes?: AdfInlineNode[]): string {
 
         case 'inlineCard': {
           const label = formatSmartCardLabel(node.attrs.url);
-          return `<span contenteditable="false" role="button" tabindex="0" aria-label="Smart link: ${escapeHtml(
+          return `<span contenteditable="false" spellcheck="false" role="button" tabindex="0" aria-label="Smart link: ${escapeHtml(
             label
           )}" data-testid="adf-inline-card" data-adf-inline-index="${index}" data-adf-inline-type="inlineCard" data-card-url="${escapeHtml(
             node.attrs.url

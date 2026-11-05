@@ -28,19 +28,23 @@ import {
   Braces,
   FileCode2,
   AlertCircle,
+  SpellCheck,
 } from 'lucide-react';
 import {
   AccentColor,
   AdfDocNode,
+  DialogueSpeakerRole,
   FlowchartState,
   NoteFormatMode,
   NoteItem,
   NotifyFn,
+  TranscriptCommitMeta,
 } from '../../types/sideflow';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import {
   adfToJiraHtml,
   adfToMarkdown,
+  appendDialogueTurnToAdfDoc,
   appendTextToAdfDoc,
   countAdfTasks,
   createEmptyAdfDoc,
@@ -53,8 +57,28 @@ import {
   computeDagLayout,
   generateStandaloneSVG,
   parseMermaidCode,
+  renderCachedMermaidPreview,
 } from '../../utils/mermaid';
-import { JiraAdfEditor, JiraAdfEditorHandle } from './JiraAdfEditor';
+import {
+  findMisspellingsInAdfDoc,
+  findMisspellingsInText,
+  getSpellingSuggestions,
+  getWordAtCharacterOffset,
+  isWordSpelledCorrectly,
+  MisspellingMatch,
+  replaceAllWordOccurrencesInAdfDoc,
+  replaceAllWordOccurrencesInText,
+} from '../../utils/spellcheck';
+import {
+  JiraAdfEditor,
+  JiraAdfEditorHandle,
+  JiraAdfSpellcheckContextMenuPayload,
+} from './JiraAdfEditor';
+import {
+  SpellcheckContextMenu,
+  SpellcheckContextTarget,
+  SpellcheckProofingPopover,
+} from './SpellcheckMenu';
 import { VoiceBar, LiveInterimPayload } from './VoiceBar';
 
 interface NotesViewProps {
@@ -163,6 +187,16 @@ export const NotesView: React.FC<NotesViewProps> = ({
     isProcessing: false,
   });
   const speechOriginNoteIdRef = useRef<string | null>(null);
+  const speechOriginByRoleRef = useRef<{
+    primary: string | null;
+    external: string | null;
+  }>({ primary: null, external: null });
+  const lastDialogueTurnRef = useRef<{
+    noteId: string;
+    speakerRole: DialogueSpeakerRole;
+    speakerLabel: string;
+    format: NoteFormatMode;
+  } | null>(null);
 
   const handleDictatingStateChange = useCallback(
     (next: boolean) => {
@@ -170,6 +204,8 @@ export const NotesView: React.FC<NotesViewProps> = ({
       if (!next) {
         setLiveInterim({ text: '', isSpeaking: false, isProcessing: false });
         speechOriginNoteIdRef.current = null;
+        speechOriginByRoleRef.current = { primary: null, external: null };
+        lastDialogueTurnRef.current = null;
       }
       onDictatingChange?.(next);
     },
@@ -182,12 +218,84 @@ export const NotesView: React.FC<NotesViewProps> = ({
   const isEditingRawJsonRef = useRef<boolean>(false);
 
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const markdownBackdropRef = useRef<HTMLDivElement | null>(null);
   const jiraEditorRef = useRef<JiraAdfEditorHandle | null>(null);
+
+  // Spellcheck & Custom Dictionary State (Chrome / Word style)
+  const [spellCheckEnabled, setSpellCheckEnabled] = useLocalStorage<boolean>(
+    'sideflow_spellcheck_enabled',
+    true
+  );
+  const [customDictionary, setCustomDictionary] = useLocalStorage<string[]>(
+    'sideflow_custom_dictionary',
+    []
+  );
+  const [ignoredWords, setIgnoredWords] = useState<string[]>([]);
+  const [isProofingOpen, setIsProofingOpen] = useState<boolean>(false);
+  const [contextMenuTarget, setContextMenuTarget] =
+    useState<SpellcheckContextTarget | null>(null);
+
+  // Merge native Electron Hunspell dictionary suggestions when right-clicking in Electron
+  useEffect(() => {
+    const unsub = window.sideflow?.onSpellCheckContextMenu?.((params) => {
+      if (!params) return;
+      const nativeSuggestions = Array.isArray(params.dictionarySuggestions)
+        ? params.dictionarySuggestions.filter(Boolean)
+        : [];
+      if (nativeSuggestions.length === 0 && !params.misspelledWord) return;
+      setContextMenuTarget((prev) => {
+        if (!prev) return prev;
+        const word = prev.word || params.misspelledWord || undefined;
+        if (!word) return prev;
+        const merged: string[] = [];
+        for (const s of [...prev.suggestions, ...nativeSuggestions]) {
+          if (
+            s &&
+            !merged.some((m) => m.toLowerCase() === s.toLowerCase())
+          ) {
+            merged.push(s);
+          }
+          if (merged.length >= 6) break;
+        }
+        return {
+          ...prev,
+          word,
+          isMisspelled: true,
+          suggestions: merged,
+        };
+      });
+    });
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
+  }, []);
+
+  // Word-style F7 shortcut to toggle Proofing & Custom Dictionary popover
+  useEffect(() => {
+    if (!isActiveTab || !isPanelOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F7') {
+        e.preventDefault();
+        if (!spellCheckEnabled) {
+          setSpellCheckEnabled(true);
+        }
+        setIsProofingOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isActiveTab, isPanelOpen, spellCheckEnabled, setSpellCheckEnabled]);
   // Tracks the exact collapsed insertion index where text was last added or cursor was placed per note ID.
   // Never stores a destructive range so Timestamp / Voice Dictation never deletes selected text.
   const lastInsertPosMapRef = useRef<Record<string, number>>({});
   // Per-note undo/redo history stacks
   const historyMapRef = useRef<Record<string, NoteHistoryEntry>>({});
+  // Tracks the timestamp of the last coalesced character-typing undo snapshot per note ID
+  const lastTypingSnapshotAtRef = useRef<Record<string, number>>({});
+  // Synchronous mirror of notes array so rapid multi-turn voice commits & StrictMode updaters stay pure and deterministic
+  const latestNotesRef = useRef<NoteItem[]>(notes);
+  latestNotesRef.current = notes;
 
   useEffect(() => {
     if (notes.length > 0 && !notes.some((n) => n.id === activeNoteId)) {
@@ -209,8 +317,17 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
   const handleLiveInterimChange = useCallback(
     (payload: LiveInterimPayload) => {
-      if (payload.isSpeaking && !speechOriginNoteIdRef.current) {
-        speechOriginNoteIdRef.current = currentNote.id;
+      if (payload.isSpeaking) {
+        if (!speechOriginNoteIdRef.current) {
+          speechOriginNoteIdRef.current = currentNote.id;
+        }
+        const role: DialogueSpeakerRole = payload.speakerRole || 'primary';
+        if (!speechOriginByRoleRef.current[role]) {
+          speechOriginByRoleRef.current[role] = currentNote.id;
+        }
+      } else if (!payload.isProcessing) {
+        speechOriginNoteIdRef.current = null;
+        speechOriginByRoleRef.current = { primary: null, external: null };
       }
       setLiveInterim(payload);
     },
@@ -262,10 +379,26 @@ export const NotesView: React.FC<NotesViewProps> = ({
     noteId: string,
     prevSnap: NoteHistorySnapshot,
     nextSnap: NoteHistorySnapshot,
-    triggerRender = true
+    triggerRender = true,
+    coalesceTyping = false
   ) => {
     if (snapshotEquals(prevSnap, nextSnap)) return;
     const hist = getNoteHistory(noteId);
+    const now = Date.now();
+    const lastTypingAt = lastTypingSnapshotAtRef.current[noteId] || 0;
+    const isSingleCharEdit =
+      coalesceTyping &&
+      prevSnap.format === nextSnap.format &&
+      Math.abs((nextSnap.body || '').length - (prevSnap.body || '').length) <= 1;
+
+    if (isSingleCharEdit && hist.past.length > 0 && now - lastTypingAt < 500) {
+      // Coalesce rapid single-character keystrokes into the active typing burst
+      lastTypingSnapshotAtRef.current[noteId] = now;
+      hist.future = [];
+      return;
+    }
+
+    lastTypingSnapshotAtRef.current[noteId] = isSingleCharEdit ? now : 0;
     const lastPast = hist.past[hist.past.length - 1];
     if (!lastPast || !snapshotEquals(lastPast, prevSnap)) {
       hist.past = [...hist.past.slice(-39), prevSnap];
@@ -278,38 +411,54 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
   const handleUpdateCurrentNote = (
     patch: Partial<NoteItem>,
-    recordUndo = true
+    recordUndo = true,
+    coalesceTyping = false
   ) => {
+    const activeTarget =
+      latestNotesRef.current.find((n) => n.id === currentNote.id) || currentNote;
+
     const isContentMutation =
       typeof patch.body === 'string' ||
       patch.adfDoc !== undefined ||
       patch.format !== undefined;
 
     if (isContentMutation && recordUndo) {
-      const prevSnap = createSnapshotFromNote(currentNote);
+      const prevSnap = createSnapshotFromNote(activeTarget);
       const nextSnap: NoteHistorySnapshot = {
-        body: patch.body !== undefined ? patch.body : currentNote.body,
+        body: patch.body !== undefined ? patch.body : activeTarget.body,
         format:
           patch.format !== undefined
             ? patch.format
-            : currentNote.format === 'adf'
+            : activeTarget.format === 'adf'
             ? 'adf'
             : 'markdown',
-        adfDoc: patch.adfDoc !== undefined ? patch.adfDoc : currentNote.adfDoc,
+        adfDoc: patch.adfDoc !== undefined ? patch.adfDoc : activeTarget.adfDoc,
       };
-      recordNoteSnapshot(currentNote.id, prevSnap, nextSnap, true);
+      recordNoteSnapshot(
+        currentNote.id,
+        prevSnap,
+        nextSnap,
+        true,
+        coalesceTyping
+      );
     }
 
+    const updatedAt = Date.now();
+    latestNotesRef.current = latestNotesRef.current.map((n) =>
+      n.id === currentNote.id ? { ...n, ...patch, updatedAt } : n
+    );
     onChangeNotes((prev) =>
       prev.map((n) =>
-        n.id === currentNote.id
-          ? { ...n, ...patch, updatedAt: Date.now() }
-          : n
+        n.id === currentNote.id ? { ...n, ...patch, updatedAt } : n
       )
     );
   };
 
-  const handleChangeAdfDoc = (nextDoc: AdfDocNode, syncJsonDraft = true) => {
+  const handleChangeAdfDoc = (
+    nextDoc: AdfDocNode,
+    syncJsonDraft = true,
+    coalesceTyping = false
+  ) => {
     const syncedMarkdown = adfToMarkdown(nextDoc);
     if (syncJsonDraft) {
       isEditingRawJsonRef.current = false;
@@ -322,11 +471,13 @@ export const NotesView: React.FC<NotesViewProps> = ({
         adfDoc: nextDoc,
         body: syncedMarkdown,
       },
-      true
+      true,
+      coalesceTyping
     );
   };
 
   const handleRawAdfJsonInput = (rawText: string) => {
+    lastDialogueTurnRef.current = null;
     isEditingRawJsonRef.current = true;
     setAdfJsonDraft(rawText);
     const parsed = parseAdfJsonString(rawText);
@@ -359,6 +510,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
   const handleSwitchFormatMode = (targetFormat: NoteFormatMode) => {
     if (targetFormat === currentFormat) return;
+    lastDialogueTurnRef.current = null;
     isEditingRawJsonRef.current = false;
     setAdfJsonError(null);
 
@@ -401,6 +553,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
   const handleUndo = () => {
     const hist = getNoteHistory(currentNote.id);
     if (hist.past.length === 0) return;
+    lastDialogueTurnRef.current = null;
     const previous = hist.past[hist.past.length - 1];
     hist.past = hist.past.slice(0, -1);
     hist.future = [
@@ -423,6 +576,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
   const handleRedo = () => {
     const hist = getNoteHistory(currentNote.id);
     if (hist.future.length === 0) return;
+    lastDialogueTurnRef.current = null;
     const next = hist.future[0];
     hist.future = hist.future.slice(1);
     hist.past = [
@@ -448,6 +602,12 @@ export const NotesView: React.FC<NotesViewProps> = ({
     const selStart = el.selectionStart ?? el.value.length;
     const selEnd = el.selectionEnd ?? el.value.length;
     if (selStart === selEnd) {
+      if (
+        typeof lastInsertPosMapRef.current[currentNote.id] === 'number' &&
+        lastInsertPosMapRef.current[currentNote.id] !== selEnd
+      ) {
+        lastDialogueTurnRef.current = null;
+      }
       lastInsertPosMapRef.current[currentNote.id] = selEnd;
     } else if (typeof lastInsertPosMapRef.current[currentNote.id] !== 'number') {
       lastInsertPosMapRef.current[currentNote.id] = selEnd;
@@ -460,11 +620,16 @@ export const NotesView: React.FC<NotesViewProps> = ({
    */
   const insertAtCursor = (
     snippet: string,
-    options?: { padSpace?: boolean; ensureNewlineBefore?: boolean; targetNoteId?: string }
+    options?: {
+      padSpace?: boolean;
+      ensureNewlineBefore?: boolean;
+      startOnNewLine?: boolean;
+      targetNoteId?: string;
+    }
   ) => {
     const resolvedNoteId = options?.targetNoteId || currentNote.id;
     const targetNoteObj =
-      notes.find((n) => n.id === resolvedNoteId) || currentNote;
+      latestNotesRef.current.find((n) => n.id === resolvedNoteId) || currentNote;
     const targetFormat: NoteFormatMode =
       targetNoteObj.format === 'adf' ? 'adf' : 'markdown';
 
@@ -487,15 +652,23 @@ export const NotesView: React.FC<NotesViewProps> = ({
         if (resolvedNoteId === currentNote.id) {
           handleChangeAdfDoc(nextDoc);
         } else {
+          const syncedBody = adfToMarkdown(nextDoc);
+          const updatedAt = Date.now();
+          recordNoteSnapshot(
+            resolvedNoteId,
+            createSnapshotFromNote(targetNoteObj),
+            { body: syncedBody, format: 'adf', adfDoc: nextDoc },
+            true
+          );
+          latestNotesRef.current = latestNotesRef.current.map((n) =>
+            n.id === resolvedNoteId
+              ? { ...n, adfDoc: nextDoc, body: syncedBody, updatedAt }
+              : n
+          );
           onChangeNotes((prev) =>
             prev.map((n) =>
               n.id === resolvedNoteId
-                ? {
-                    ...n,
-                    adfDoc: nextDoc,
-                    body: adfToMarkdown(nextDoc),
-                    updatedAt: Date.now(),
-                  }
+                ? { ...n, adfDoc: nextDoc, body: syncedBody, updatedAt }
                 : n
             )
           );
@@ -517,75 +690,83 @@ export const NotesView: React.FC<NotesViewProps> = ({
       lastInsertPosMapRef.current[noteId] = el.selectionStart;
     }
 
-    let computedNextPos = 0;
+    const body = targetNoteObj.body || '';
+    const savedPos = lastInsertPosMapRef.current[noteId];
+    const insertPos =
+      typeof savedPos === 'number'
+        ? Math.max(0, Math.min(savedPos, body.length))
+        : body.length;
 
-    onChangeNotes((prev) =>
-      prev.map((n) => {
-        if (n.id !== noteId) return n;
-        const body = n.body || '';
-        const savedPos = lastInsertPosMapRef.current[noteId];
-        const insertPos =
-          typeof savedPos === 'number'
-            ? Math.max(0, Math.min(savedPos, body.length))
-            : body.length;
+    const before = body.slice(0, insertPos);
+    const after = body.slice(insertPos);
 
-        const before = body.slice(0, insertPos);
-        const after = body.slice(insertPos);
+    let prefix = '';
+    if (options?.startOnNewLine) {
+      if (before.length > 0 && !before.endsWith('\n')) {
+        prefix = '\n';
+      }
+    } else if (options?.ensureNewlineBefore) {
+      if (
+        before.length > 0 &&
+        !before.endsWith('\n') &&
+        !before.endsWith(' ')
+      ) {
+        prefix = ' ';
+      }
+    } else if (options?.padSpace) {
+      const needsLeadingSpace =
+        before.length > 0 &&
+        !before.endsWith(' ') &&
+        !before.endsWith('\n') &&
+        !snippet.startsWith('\n') &&
+        !snippet.startsWith(' ');
+      if (needsLeadingSpace) {
+        prefix = ' ';
+      }
+    }
 
-        let prefix = '';
-        if (options?.ensureNewlineBefore) {
-          if (
-            before.length > 0 &&
-            !before.endsWith('\n') &&
-            !before.endsWith(' ')
-          ) {
-            prefix = ' ';
-          }
-        } else if (options?.padSpace) {
-          const needsLeadingSpace =
-            before.length > 0 &&
-            !before.endsWith(' ') &&
-            !before.endsWith('\n') &&
-            !snippet.startsWith('\n') &&
-            !snippet.startsWith(' ');
-          if (needsLeadingSpace) {
-            prefix = ' ';
-          }
-        }
+    let suffix = '';
+    if (
+      options?.startOnNewLine &&
+      after.length > 0 &&
+      !after.startsWith('\n') &&
+      !snippet.endsWith('\n')
+    ) {
+      suffix = '\n';
+    } else if (
+      options?.padSpace &&
+      after.length > 0 &&
+      !after.startsWith(' ') &&
+      !after.startsWith('\n') &&
+      !snippet.endsWith(' ') &&
+      !snippet.endsWith('\n')
+    ) {
+      suffix = ' ';
+    }
 
-        let suffix = '';
-        if (
-          options?.padSpace &&
-          after.length > 0 &&
-          !after.startsWith(' ') &&
-          !after.startsWith('\n') &&
-          !snippet.endsWith(' ') &&
-          !snippet.endsWith('\n')
-        ) {
-          suffix = ' ';
-        }
+    const inserted = `${prefix}${snippet}${suffix}`;
+    const nextBody = `${before}${inserted}${after}`;
+    const computedNextPos = options?.startOnNewLine
+      ? before.length + prefix.length + snippet.length
+      : before.length + inserted.length;
 
-        const inserted = `${prefix}${snippet}${suffix}`;
-        const nextBody = `${before}${inserted}${after}`;
-        computedNextPos = before.length + inserted.length;
-
-        recordNoteSnapshot(
-          noteId,
-          { body, format: 'markdown', adfDoc: n.adfDoc },
-          { body: nextBody, format: 'markdown', adfDoc: n.adfDoc },
-          false
-        );
-        lastInsertPosMapRef.current[noteId] = computedNextPos;
-
-        return {
-          ...n,
-          body: nextBody,
-          updatedAt: Date.now(),
-        };
-      })
+    recordNoteSnapshot(
+      noteId,
+      { body, format: 'markdown', adfDoc: targetNoteObj.adfDoc },
+      { body: nextBody, format: 'markdown', adfDoc: targetNoteObj.adfDoc },
+      true
     );
+    lastInsertPosMapRef.current[noteId] = computedNextPos;
 
-    setHistoryTick((t) => t + 1);
+    const updatedAt = Date.now();
+    latestNotesRef.current = latestNotesRef.current.map((n) =>
+      n.id === noteId ? { ...n, body: nextBody, updatedAt } : n
+    );
+    onChangeNotes((prev) =>
+      prev.map((n) =>
+        n.id === noteId ? { ...n, body: nextBody, updatedAt } : n
+      )
+    );
 
     requestAnimationFrame(() => {
       if (editorRef.current && document.activeElement === editorRef.current) {
@@ -594,13 +775,132 @@ export const NotesView: React.FC<NotesViewProps> = ({
     });
   };
 
-  const handleVoiceTranscript = (transcript: string) => {
-    const originId = speechOriginNoteIdRef.current || currentNote.id;
-    speechOriginNoteIdRef.current = null;
-    insertAtCursor(transcript, { padSpace: true, targetNoteId: originId });
+  const handleVoiceTranscript = (
+    transcript: string,
+    meta?: TranscriptCommitMeta
+  ) => {
+    const role: DialogueSpeakerRole = meta?.speakerRole || 'primary';
+    const roleOrigin = speechOriginByRoleRef.current[role];
+    speechOriginByRoleRef.current[role] = null;
+
+    if (!meta?.isDialogue) {
+      const originId =
+        speechOriginNoteIdRef.current || roleOrigin || currentNote.id;
+      speechOriginNoteIdRef.current = null;
+      lastDialogueTurnRef.current = null;
+      insertAtCursor(transcript, { padSpace: true, targetNoteId: originId });
+      return;
+    }
+
+    const originId = roleOrigin || currentNote.id;
+    const cleanText = transcript.trim();
+    if (!cleanText) return;
+
+    const targetNoteObj =
+      latestNotesRef.current.find((n) => n.id === originId) || currentNote;
+    const targetFormat: NoteFormatMode =
+      targetNoteObj.format === 'adf' ? 'adf' : 'markdown';
+    const speakerLabel =
+      (
+        meta.speakerLabel || (role === 'external' ? 'External' : 'You')
+      ).trim() || (role === 'external' ? 'External' : 'You');
+
+    const prevTurn = lastDialogueTurnRef.current;
+    const canAppendSameTurn =
+      Boolean(prevTurn) &&
+      prevTurn!.noteId === originId &&
+      prevTurn!.speakerRole === role &&
+      prevTurn!.speakerLabel === speakerLabel &&
+      prevTurn!.format === targetFormat;
+
+    if (targetFormat === 'adf') {
+      const validated = targetNoteObj.adfDoc
+        ? validateAndNormalizeAdfDoc(targetNoteObj.adfDoc)
+        : null;
+      const baseDoc =
+        validated && validated.valid
+          ? validated.doc
+          : markdownToAdf(targetNoteObj.body || '');
+      const nextDoc = appendDialogueTurnToAdfDoc(baseDoc, cleanText, {
+        speakerRole: role,
+        speakerLabel,
+        appendToActiveTurn: canAppendSameTurn,
+        includeTimestamp: meta.includeTimestamp,
+        timestampText: meta.timestampText,
+      });
+      const syncedMarkdown = adfToMarkdown(nextDoc);
+      recordNoteSnapshot(
+        originId,
+        createSnapshotFromNote(targetNoteObj),
+        { body: syncedMarkdown, format: 'adf', adfDoc: nextDoc },
+        true
+      );
+
+      const updatedAt = Date.now();
+      latestNotesRef.current = latestNotesRef.current.map((n) =>
+        n.id === originId
+          ? {
+              ...n,
+              format: 'adf',
+              adfDoc: nextDoc,
+              body: syncedMarkdown,
+              updatedAt,
+            }
+          : n
+      );
+      onChangeNotes((prev) =>
+        prev.map((n) =>
+          n.id === originId
+            ? {
+                ...n,
+                format: 'adf',
+                adfDoc: nextDoc,
+                body: syncedMarkdown,
+                updatedAt,
+              }
+            : n
+        )
+      );
+
+      if (originId === currentNote.id) {
+        isEditingRawJsonRef.current = false;
+        setAdfJsonDraft(JSON.stringify(nextDoc, null, 2));
+        setAdfJsonError(null);
+      }
+
+      lastDialogueTurnRef.current = {
+        noteId: originId,
+        speakerRole: role,
+        speakerLabel,
+        format: 'adf',
+      };
+      return;
+    }
+
+    if (canAppendSameTurn) {
+      insertAtCursor(cleanText, { padSpace: true, targetNoteId: originId });
+    } else {
+      const stampPrefix =
+        meta.includeTimestamp && meta.timestampText
+          ? `[${meta.timestampText}] `
+          : '';
+      const formattedTurn = `${stampPrefix}**${speakerLabel}:** ${cleanText}`;
+      insertAtCursor(formattedTurn, {
+        startOnNewLine: true,
+        targetNoteId: originId,
+      });
+    }
+
+    lastDialogueTurnRef.current = {
+      noteId: originId,
+      speakerRole: role,
+      speakerLabel,
+      format: 'markdown',
+    };
   };
 
   const handleInsertTimestamp = () => {
+    lastDialogueTurnRef.current = null;
     const stamp = `[${new Date().toLocaleTimeString([], {
       hour: '2-digit',
       minute: '2-digit',
@@ -682,6 +982,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
       }
     }
 
+    lastDialogueTurnRef.current = null;
     const nextBody = `${body.slice(0, start)}${replacement}${body.slice(end)}`;
     handleUpdateCurrentNote({ body: nextBody }, true);
     const nextPos = start + cursorOffset;
@@ -708,10 +1009,12 @@ export const NotesView: React.FC<NotesViewProps> = ({
       return;
     }
 
+    lastDialogueTurnRef.current = null;
     handleUpdateCurrentNote({ body: lines.join('\n') }, true);
   };
 
   const handleCreateNewNote = () => {
+    lastDialogueTurnRef.current = null;
     const newNote: NoteItem = {
       id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       title: `Quick Note ${notes.length + 1}`,
@@ -723,6 +1026,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
       pinned: false,
       tags: [],
     };
+    latestNotesRef.current = [...latestNotesRef.current, newNote];
     onChangeNotes((prev) => [...prev, newNote]);
     setActiveNoteId(newNote.id);
     setSearchQuery('');
@@ -730,10 +1034,12 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
   const handleDeleteCurrentNote = () => {
     if (notes.length <= 1) return;
+    lastDialogueTurnRef.current = null;
     const deletedNote = currentNote;
     const deletedIndex = notes.findIndex((n) => n.id === currentNote.id);
     const deletedTitle = deletedNote.title || 'Untitled';
     const remaining = notes.filter((n) => n.id !== currentNote.id);
+    latestNotesRef.current = remaining;
     onChangeNotes(remaining);
     if (remaining[0]) {
       setActiveNoteId(remaining[0].id);
@@ -778,6 +1084,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
       currentFormat === 'adf' ? currentAdfDoc : currentNote.adfDoc;
     const clearedTitle = currentNote.title || 'Untitled';
 
+    lastDialogueTurnRef.current = null;
     isEditingRawJsonRef.current = false;
     handleUpdateCurrentNote(
       {
@@ -1043,6 +1350,696 @@ export const NotesView: React.FC<NotesViewProps> = ({
   const canUndo = currentHistory.past.length > 0;
   const canRedo = currentHistory.future.length > 0;
 
+  // --- Spellcheck & Custom Dictionary Engine ---
+  const customDictSet = useMemo(
+    () => new Set(customDictionary.map((w) => w.toLowerCase())),
+    [customDictionary]
+  );
+  const ignoredWordsSet = useMemo(
+    () => new Set(ignoredWords.map((w) => w.toLowerCase())),
+    [ignoredWords]
+  );
+
+  const activeMisspellings: MisspellingMatch[] = useMemo(() => {
+    if (!spellCheckEnabled) return [];
+    if (currentFormat === 'adf') {
+      return findMisspellingsInAdfDoc(currentAdfDoc, {
+        customDictionary: customDictSet,
+        ignoredWords: ignoredWordsSet,
+      });
+    }
+    return findMisspellingsInText(currentNote.body || '', {
+      isMarkdown: true,
+      customDictionary: customDictSet,
+      ignoredWords: ignoredWordsSet,
+    });
+  }, [
+    spellCheckEnabled,
+    currentFormat,
+    currentAdfDoc,
+    currentNote.body,
+    customDictSet,
+    ignoredWordsSet,
+  ]);
+
+  const countOccurrencesOfWord = useCallback(
+    (word: string, source: 'markdown' | 'adf' | 'title'): number => {
+      if (!word) return 0;
+      const lower = word.toLowerCase();
+      if (source === 'title') {
+        const titleIssues = findMisspellingsInText(currentNote.title || '', {
+          isMarkdown: false,
+          customDictionary: customDictSet,
+          ignoredWords: ignoredWordsSet,
+        });
+        return Math.max(
+          1,
+          titleIssues.filter((m) => m.word.toLowerCase() === lower).length
+        );
+      }
+      return Math.max(
+        1,
+        activeMisspellings.filter((m) => m.word.toLowerCase() === lower).length
+      );
+    },
+    [currentNote.title, customDictSet, ignoredWordsSet, activeMisspellings]
+  );
+
+  const handleAddWordToDictionary = useCallback(
+    (rawWord: string) => {
+      const cleaned = rawWord
+        .trim()
+        .replace(/^['’]+|['’]+$/g, '')
+        .toLowerCase();
+      if (!cleaned) return;
+      setCustomDictionary((prev) =>
+        prev.some((w) => w.toLowerCase() === cleaned)
+          ? prev
+          : [...prev, cleaned]
+      );
+      window.sideflow?.addWordToSpellCheckerDictionary?.(cleaned);
+      setContextMenuTarget(null);
+      onNotify(
+        'Added to Dictionary',
+        'check',
+        `"${rawWord.trim()}" will no longer be flagged as misspelled`
+      );
+    },
+    [setCustomDictionary, onNotify]
+  );
+
+  const handleRemoveWordFromDictionary = useCallback(
+    (word: string) => {
+      const lower = word.trim().toLowerCase();
+      setCustomDictionary((prev) =>
+        prev.filter((w) => w.toLowerCase() !== lower)
+      );
+      window.sideflow?.removeWordFromSpellCheckerDictionary?.(lower);
+    },
+    [setCustomDictionary]
+  );
+
+  const handleIgnoreWord = useCallback((word: string) => {
+    const lower = word.trim().toLowerCase();
+    if (!lower) return;
+    setIgnoredWords((prev) =>
+      prev.includes(lower) ? prev : [...prev, lower]
+    );
+    setContextMenuTarget(null);
+  }, []);
+
+  const handleReplaceMisspelling = useCallback(
+    (
+      replacement: string,
+      overrideTarget?: {
+        source: 'markdown' | 'adf' | 'title';
+        wordStart?: number;
+        wordEnd?: number;
+        adfTargetId?: string;
+        word?: string;
+      }
+    ) => {
+      const target = overrideTarget || contextMenuTarget;
+      if (!target) return;
+      const start = target.wordStart ?? 0;
+      const end = target.wordEnd ?? start;
+
+      if (target.source === 'title') {
+        const title = currentNote.title || '';
+        const nextTitle = `${title.slice(0, start)}${replacement}${title.slice(
+          end
+        )}`;
+        handleUpdateCurrentNote({ title: nextTitle }, false);
+        setContextMenuTarget(null);
+        return;
+      }
+
+      if (target.source === 'adf') {
+        lastDialogueTurnRef.current = null;
+        if (target.adfTargetId && jiraEditorRef.current) {
+          jiraEditorRef.current.replaceWordInTarget(
+            target.adfTargetId,
+            start,
+            end,
+            replacement
+          );
+        } else if (target.word) {
+          const { nextDoc } = replaceAllWordOccurrencesInAdfDoc(
+            currentAdfDoc,
+            target.word,
+            replacement
+          );
+          handleChangeAdfDoc(nextDoc, true);
+        }
+        setContextMenuTarget(null);
+        return;
+      }
+
+      // Markdown mode replacement
+      lastDialogueTurnRef.current = null;
+      const body = currentNote.body || '';
+      const nextBody = `${body.slice(0, start)}${replacement}${body.slice(
+        end
+      )}`;
+      handleUpdateCurrentNote({ body: nextBody }, true);
+      const nextCursor = start + replacement.length;
+      lastInsertPosMapRef.current[currentNote.id] = nextCursor;
+      setContextMenuTarget(null);
+
+      requestAnimationFrame(() => {
+        if (editorRef.current) {
+          editorRef.current.focus();
+          editorRef.current.setSelectionRange(nextCursor, nextCursor);
+        }
+      });
+    },
+    [
+      contextMenuTarget,
+      currentNote.title,
+      currentNote.body,
+      currentNote.id,
+      currentAdfDoc,
+    ]
+  );
+
+  const handleReplaceAllMisspellings = useCallback(
+    (wordToReplace: string, replacement: string) => {
+      if (!wordToReplace) return;
+      lastDialogueTurnRef.current = null;
+      if (currentFormat === 'adf') {
+        const { nextDoc } = replaceAllWordOccurrencesInAdfDoc(
+          currentAdfDoc,
+          wordToReplace,
+          replacement
+        );
+        handleChangeAdfDoc(nextDoc, true);
+      } else {
+        const { nextText } = replaceAllWordOccurrencesInText(
+          currentNote.body || '',
+          wordToReplace,
+          replacement,
+          { isMarkdown: true }
+        );
+        handleUpdateCurrentNote({ body: nextText }, true);
+      }
+      setContextMenuTarget(null);
+      onNotify(
+        'Replaced All Occurrences',
+        'check',
+        `Changed "${wordToReplace}" to "${replacement}"`
+      );
+    },
+    [currentFormat, currentAdfDoc, currentNote.body, onNotify]
+  );
+
+  const handleFixAllMisspellings = useCallback(() => {
+    if (activeMisspellings.length === 0) return;
+    lastDialogueTurnRef.current = null;
+    if (currentFormat === 'adf') {
+      let workingDoc = currentAdfDoc;
+      const seenWords = new Set<string>();
+      for (const issue of activeMisspellings) {
+        if (issue.suggestions.length === 0) continue;
+        const lower = issue.word.toLowerCase();
+        if (seenWords.has(lower)) continue;
+        seenWords.add(lower);
+        workingDoc = replaceAllWordOccurrencesInAdfDoc(
+          workingDoc,
+          issue.word,
+          issue.suggestions[0]
+        ).nextDoc;
+      }
+      handleChangeAdfDoc(workingDoc, true);
+    } else {
+      let workingBody = currentNote.body || '';
+      const seenWords = new Set<string>();
+      for (const issue of activeMisspellings) {
+        if (issue.suggestions.length === 0) continue;
+        const lower = issue.word.toLowerCase();
+        if (seenWords.has(lower)) continue;
+        seenWords.add(lower);
+        workingBody = replaceAllWordOccurrencesInText(
+          workingBody,
+          issue.word,
+          issue.suggestions[0],
+          { isMarkdown: true }
+        ).nextText;
+      }
+      handleUpdateCurrentNote({ body: workingBody }, true);
+    }
+    onNotify(
+      'Fixed Spelling Issues',
+      'check',
+      'Applied top suggestions across the note'
+    );
+  }, [activeMisspellings, currentFormat, currentAdfDoc, currentNote.body, onNotify]);
+
+  const handleTitleContextMenu = (e: React.MouseEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    const el = e.currentTarget;
+    const title = currentNote.title || '';
+    const selStart = el.selectionStart ?? 0;
+    const selEnd = el.selectionEnd ?? 0;
+    const hasSelection = selEnd > selStart;
+    const selectedText = hasSelection ? title.slice(selStart, selEnd) : '';
+
+    let word: string | undefined;
+    let isMisspelled = false;
+    let suggestions: string[] = [];
+    let wordStart = selStart;
+    let wordEnd = selEnd;
+
+    if (spellCheckEnabled && title.trim()) {
+      const candidate =
+        getWordAtCharacterOffset(title, selStart) ||
+        (e.clientX === 0 && e.clientY === 0
+          ? findMisspellingsInText(title, {
+              isMarkdown: false,
+              customDictionary: customDictSet,
+              ignoredWords: ignoredWordsSet,
+            })[0] || null
+          : null);
+      if (candidate) {
+        word = candidate.word;
+        wordStart = candidate.start;
+        wordEnd = candidate.end;
+        if (
+          !isWordSpelledCorrectly(
+            candidate.word,
+            customDictSet,
+            ignoredWordsSet
+          )
+        ) {
+          isMisspelled = true;
+          suggestions = getSpellingSuggestions(candidate.word, {
+            customDictionary: customDictSet,
+          });
+        }
+      }
+    }
+
+    setContextMenuTarget({
+      x: e.clientX || 120,
+      y: e.clientY || 100,
+      source: 'title',
+      word,
+      wordStart,
+      wordEnd,
+      isMisspelled,
+      suggestions,
+      hasSelection,
+      selectedText,
+      occurrenceCount:
+        isMisspelled && word ? countOccurrencesOfWord(word, 'title') : 0,
+    });
+  };
+
+  const handleMarkdownEditorContextMenu = (
+    e: React.MouseEvent<HTMLTextAreaElement>
+  ) => {
+    e.preventDefault();
+    const el = e.currentTarget;
+    const body = currentNote.body || '';
+    const selStart = el.selectionStart ?? 0;
+    const selEnd = el.selectionEnd ?? 0;
+    const hasSelection = selEnd > selStart;
+    const selectedText = hasSelection ? body.slice(selStart, selEnd) : '';
+
+    let word: string | undefined;
+    let isMisspelled = false;
+    let suggestions: string[] = [];
+    let wordStart = selStart;
+    let wordEnd = selEnd;
+
+    if (spellCheckEnabled && body.trim()) {
+      const caretMatch = activeMisspellings.find(
+        (m) => selStart >= m.start && selStart <= m.end
+      );
+      if (caretMatch) {
+        word = caretMatch.word;
+        isMisspelled = true;
+        suggestions = caretMatch.suggestions;
+        wordStart = caretMatch.start;
+        wordEnd = caretMatch.end;
+      } else {
+        const wordAtCaret = getWordAtCharacterOffset(body, selStart);
+        if (
+          wordAtCaret &&
+          !isWordSpelledCorrectly(
+            wordAtCaret.word,
+            customDictSet,
+            ignoredWordsSet
+          )
+        ) {
+          word = wordAtCaret.word;
+          isMisspelled = true;
+          suggestions = getSpellingSuggestions(wordAtCaret.word, {
+            customDictionary: customDictSet,
+          });
+          wordStart = wordAtCaret.start;
+          wordEnd = wordAtCaret.end;
+        } else if (
+          e.clientX === 0 &&
+          e.clientY === 0 &&
+          activeMisspellings.length > 0 &&
+          (selStart === 0 || selStart === body.length)
+        ) {
+          const firstIssue = activeMisspellings[0];
+          word = firstIssue.word;
+          isMisspelled = true;
+          suggestions = firstIssue.suggestions;
+          wordStart = firstIssue.start;
+          wordEnd = firstIssue.end;
+        } else if (wordAtCaret) {
+          word = wordAtCaret.word;
+          wordStart = wordAtCaret.start;
+          wordEnd = wordAtCaret.end;
+        }
+      }
+    }
+
+    setContextMenuTarget({
+      x: e.clientX || 160,
+      y: e.clientY || 180,
+      source: 'markdown',
+      word,
+      wordStart,
+      wordEnd,
+      isMisspelled,
+      suggestions,
+      hasSelection,
+      selectedText,
+      occurrenceCount:
+        isMisspelled && word ? countOccurrencesOfWord(word, 'markdown') : 0,
+    });
+  };
+
+  const handleAdfSpellCheckContextMenu = useCallback(
+    (
+      e: React.MouseEvent<HTMLDivElement>,
+      payload: JiraAdfSpellcheckContextMenuPayload
+    ) => {
+      let word = payload.word;
+      let wordStart = payload.wordStart ?? 0;
+      let wordEnd = payload.wordEnd ?? 0;
+      let isMisspelled = false;
+      let suggestions: string[] = [];
+
+      if (spellCheckEnabled) {
+        if (
+          word &&
+          !isWordSpelledCorrectly(word, customDictSet, ignoredWordsSet)
+        ) {
+          isMisspelled = true;
+          suggestions = getSpellingSuggestions(word, {
+            customDictionary: customDictSet,
+          });
+        } else if (
+          !word &&
+          e.clientX === 0 &&
+          e.clientY === 0 &&
+          activeMisspellings.length > 0
+        ) {
+          const firstForTarget =
+            activeMisspellings.find(
+              (m) => m.adfTargetId === payload.targetId
+            ) || activeMisspellings[0];
+          if (firstForTarget) {
+            word = firstForTarget.word;
+            wordStart = firstForTarget.start;
+            wordEnd = firstForTarget.end;
+            isMisspelled = true;
+            suggestions = firstForTarget.suggestions;
+          }
+        }
+      }
+
+      setContextMenuTarget({
+        x: e.clientX || 160,
+        y: e.clientY || 180,
+        source: 'adf',
+        adfTargetId: payload.targetId,
+        word,
+        wordStart,
+        wordEnd,
+        isMisspelled,
+        suggestions,
+        hasSelection: Boolean(payload.selectedText),
+        selectedText: payload.selectedText || '',
+        occurrenceCount:
+          isMisspelled && word ? countOccurrencesOfWord(word, 'adf') : 0,
+      });
+    },
+    [
+      spellCheckEnabled,
+      customDictSet,
+      ignoredWordsSet,
+      activeMisspellings,
+      countOccurrencesOfWord,
+    ]
+  );
+
+  const handleContextMenuCut = async () => {
+    if (!contextMenuTarget) return;
+    if (contextMenuTarget.source === 'title' && titleInputRef.current) {
+      const el = titleInputRef.current;
+      const start = el.selectionStart ?? 0;
+      const end = el.selectionEnd ?? 0;
+      if (end > start) {
+        const selected = currentNote.title.slice(start, end);
+        try {
+          await navigator.clipboard?.writeText?.(selected);
+        } catch {
+          // ignore
+        }
+        const nextTitle = `${currentNote.title.slice(
+          0,
+          start
+        )}${currentNote.title.slice(end)}`;
+        handleUpdateCurrentNote({ title: nextTitle }, false);
+      }
+    } else if (contextMenuTarget.source === 'markdown' && editorRef.current) {
+      const el = editorRef.current;
+      const start = el.selectionStart ?? 0;
+      const end = el.selectionEnd ?? 0;
+      if (end > start) {
+        const selected = currentNote.body.slice(start, end);
+        try {
+          await navigator.clipboard?.writeText?.(selected);
+        } catch {
+          // ignore
+        }
+        const nextBody = `${currentNote.body.slice(
+          0,
+          start
+        )}${currentNote.body.slice(end)}`;
+        handleUpdateCurrentNote({ body: nextBody }, true);
+      }
+    } else if (contextMenuTarget.source === 'adf' && jiraEditorRef.current) {
+      const cutText = jiraEditorRef.current.cutInActiveTarget();
+      if (cutText) {
+        try {
+          await navigator.clipboard?.writeText?.(cutText);
+        } catch {
+          // ignore
+        }
+      }
+    }
+    setContextMenuTarget(null);
+  };
+
+  const handleContextMenuCopy = async () => {
+    if (!contextMenuTarget) return;
+    let textToCopy = '';
+    if (contextMenuTarget.source === 'title' && titleInputRef.current) {
+      const el = titleInputRef.current;
+      const start = el.selectionStart ?? 0;
+      const end = el.selectionEnd ?? 0;
+      textToCopy =
+        end > start
+          ? currentNote.title.slice(start, end)
+          : contextMenuTarget.word || currentNote.title;
+    } else if (contextMenuTarget.source === 'markdown' && editorRef.current) {
+      const el = editorRef.current;
+      const start = el.selectionStart ?? 0;
+      const end = el.selectionEnd ?? 0;
+      textToCopy =
+        end > start
+          ? currentNote.body.slice(start, end)
+          : contextMenuTarget.word ||
+            window.getSelection()?.toString() ||
+            '';
+    } else if (contextMenuTarget.source === 'adf' && jiraEditorRef.current) {
+      textToCopy =
+        jiraEditorRef.current.getSelectedTextInActiveTarget() ||
+        contextMenuTarget.word ||
+        '';
+    }
+    if (textToCopy) {
+      try {
+        await navigator.clipboard?.writeText?.(textToCopy);
+      } catch {
+        // ignore
+      }
+    }
+    setContextMenuTarget(null);
+  };
+
+  const handleContextMenuPaste = async () => {
+    if (!contextMenuTarget) return;
+    let clipText = '';
+    try {
+      clipText = (await navigator.clipboard?.readText?.()) || '';
+    } catch {
+      // ignore
+    }
+    if (!clipText) {
+      setContextMenuTarget(null);
+      return;
+    }
+    if (contextMenuTarget.source === 'title' && titleInputRef.current) {
+      const el = titleInputRef.current;
+      const start = el.selectionStart ?? currentNote.title.length;
+      const end = el.selectionEnd ?? currentNote.title.length;
+      const nextTitle = `${currentNote.title.slice(
+        0,
+        start
+      )}${clipText}${currentNote.title.slice(end)}`;
+      handleUpdateCurrentNote({ title: nextTitle }, false);
+    } else if (contextMenuTarget.source === 'markdown') {
+      const el = editorRef.current;
+      const start = el
+        ? el.selectionStart ?? currentNote.body.length
+        : currentNote.body.length;
+      const end = el
+        ? el.selectionEnd ?? currentNote.body.length
+        : currentNote.body.length;
+      const nextBody = `${currentNote.body.slice(
+        0,
+        start
+      )}${clipText}${currentNote.body.slice(end)}`;
+      handleUpdateCurrentNote({ body: nextBody }, true);
+    } else if (contextMenuTarget.source === 'adf' && jiraEditorRef.current) {
+      jiraEditorRef.current.pasteTextInActiveTarget(clipText);
+    }
+    setContextMenuTarget(null);
+  };
+
+  const handleContextMenuSelectAll = () => {
+    if (!contextMenuTarget) return;
+    if (contextMenuTarget.source === 'title' && titleInputRef.current) {
+      titleInputRef.current.focus();
+      titleInputRef.current.select();
+    } else if (contextMenuTarget.source === 'markdown' && editorRef.current) {
+      editorRef.current.focus();
+      editorRef.current.select();
+    } else if (contextMenuTarget.source === 'adf' && jiraEditorRef.current) {
+      jiraEditorRef.current.selectAllInActiveTarget();
+    }
+    setContextMenuTarget(null);
+  };
+
+  const renderMarkdownSpellcheckBackdrop = () => {
+    const body = currentNote.body || '';
+    if (!spellCheckEnabled || !body) return null;
+    if (activeMisspellings.length === 0) {
+      return <span>{body}</span>;
+    }
+    const nodes: React.ReactNode[] = [];
+    let cursor = 0;
+    activeMisspellings.forEach((m, idx) => {
+      if (m.start > cursor) {
+        nodes.push(
+          <React.Fragment key={`bd-txt-${idx}`}>
+            {body.slice(cursor, m.start)}
+          </React.Fragment>
+        );
+      }
+      nodes.push(
+        <span
+          key={`bd-err-${idx}-${m.start}`}
+          data-spellcheck-error="true"
+          data-misspelled-word={m.word}
+          data-spellcheck-start={m.start}
+          data-spellcheck-end={m.end}
+          className="sf-misspelled-backdrop"
+        >
+          {body.slice(m.start, m.end)}
+        </span>
+      );
+      cursor = m.end;
+    });
+    if (cursor < body.length) {
+      nodes.push(
+        <React.Fragment key="bd-txt-end">{body.slice(cursor)}</React.Fragment>
+      );
+    }
+    if (body.endsWith('\n')) {
+      nodes.push('\n');
+    }
+    return nodes;
+  };
+
+  const renderSpellcheckedTextFragment = (
+    plainSegment: string,
+    keyPrefix: string
+  ): React.ReactNode => {
+    if (!spellCheckEnabled || !plainSegment) return plainSegment;
+    const wordRegex = /[A-Za-z][A-Za-z'’]*[A-Za-z]|[A-Za-z]+/g;
+    const pieces: React.ReactNode[] = [];
+    let lastIdx = 0;
+    let match: RegExpExecArray | null;
+    while ((match = wordRegex.exec(plainSegment)) !== null) {
+      const word = match[0];
+      const wStart = match.index;
+      const wEnd = wStart + word.length;
+      if (!isWordSpelledCorrectly(word, customDictSet, ignoredWordsSet)) {
+        if (wStart > lastIdx) {
+          pieces.push(plainSegment.slice(lastIdx, wStart));
+        }
+        pieces.push(
+          <span
+            key={`${keyPrefix}-sp-${wStart}`}
+            data-spellcheck-error="true"
+            data-misspelled-word={word}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const occ = activeMisspellings.find(
+                (m) => m.word.toLowerCase() === word.toLowerCase()
+              );
+              const suggestions = getSpellingSuggestions(word, {
+                customDictionary: customDictSet,
+              });
+              setContextMenuTarget({
+                x: e.clientX || 160,
+                y: e.clientY || 180,
+                source: 'markdown',
+                word,
+                wordStart: occ ? occ.start : 0,
+                wordEnd: occ ? occ.end : word.length,
+                isMisspelled: true,
+                suggestions,
+                hasSelection: false,
+                selectedText: '',
+                occurrenceCount: countOccurrencesOfWord(word, 'markdown'),
+              });
+            }}
+            className="sf-misspelled-word"
+          >
+            {word}
+          </span>
+        );
+        lastIdx = wEnd;
+      }
+    }
+    if (pieces.length === 0) return plainSegment;
+    if (lastIdx < plainSegment.length) {
+      pieces.push(plainSegment.slice(lastIdx));
+    }
+    return pieces;
+  };
+
   /**
    * Renders inline Markdown tokens (**bold**, *italic*, `code`, ~~strikethrough~~,
    * [links](url), and [HH:MM] timestamp badges) into styled React elements.
@@ -1078,7 +2075,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
       ) {
         return (
           <strong key={key} className="font-bold text-white">
-            {part.slice(2, -2)}
+            {renderSpellcheckedTextFragment(part.slice(2, -2), `${key}-b`)}
           </strong>
         );
       }
@@ -1086,7 +2083,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
       if (part.startsWith('~~') && part.endsWith('~~') && part.length > 4) {
         return (
           <span key={key} className="line-through text-slate-400">
-            {part.slice(2, -2)}
+            {renderSpellcheckedTextFragment(part.slice(2, -2), `${key}-s`)}
           </span>
         );
       }
@@ -1098,7 +2095,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
       ) {
         return (
           <em key={key} className="italic text-indigo-200">
-            {part.slice(1, -1)}
+            {renderSpellcheckedTextFragment(part.slice(1, -1), `${key}-i`)}
           </em>
         );
       }
@@ -1134,7 +2131,11 @@ export const NotesView: React.FC<NotesViewProps> = ({
         );
       }
 
-      return <React.Fragment key={key}>{part}</React.Fragment>;
+      return (
+        <React.Fragment key={key}>
+          {renderSpellcheckedTextFragment(part, key)}
+        </React.Fragment>
+      );
     });
   };
 
@@ -1163,13 +2164,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
           idx += 1;
         }
         const rawMermaid = blockLines.join('\n');
-        const parsed = parseMermaidCode(rawMermaid);
-        const laidOut: FlowchartState | null = parsed
-          ? { ...parsed, nodes: computeDagLayout(parsed) }
-          : null;
-        const svgMarkup = laidOut
-          ? generateStandaloneSVG(laidOut).replace(/^<\?xml[^>]*>\s*/i, '')
-          : null;
+        const { laidOut, svgMarkup } = renderCachedMermaidPreview(rawMermaid);
 
         elements.push(
           <div
@@ -1547,10 +2542,8 @@ export const NotesView: React.FC<NotesViewProps> = ({
                   <div
                     key={`switcher-card-${n.id}`}
                     data-testid={`note-switcher-card-${n.id}`}
-                    onClick={() => {
-                      setActiveNoteId(n.id);
-                    }}
-                    className={`text-left p-2.5 rounded-xl border transition cursor-pointer flex flex-col justify-between gap-1.5 ${
+                    onClick={() => setActiveNoteId(n.id)}
+                    className={`relative text-left p-2.5 rounded-xl border transition flex flex-col justify-between gap-1.5 cursor-pointer ${
                       isActive
                         ? 'bg-indigo-600/20 border-indigo-500/60 ring-1 ring-indigo-500/40'
                         : 'bg-slate-900/80 hover:bg-slate-900 border-slate-800/90'
@@ -1564,7 +2557,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
                           e.stopPropagation();
                           setActiveNoteId(n.id);
                         }}
-                        className="flex items-center gap-1.5 min-w-0 flex-1 text-left rounded px-0.5 py-0.5"
+                        className="flex items-center gap-1.5 min-w-0 flex-1 text-left rounded px-0.5 py-0.5 cursor-pointer after:content-[''] after:absolute after:inset-0 after:rounded-xl"
                       >
                         <span
                           className={`w-2 h-2 rounded-full shrink-0 ${accent.dotClass}`}
@@ -1582,7 +2575,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
                           {n.format === 'adf' ? 'ADF' : 'MD'}
                         </span>
                       </button>
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="relative z-10 flex items-center gap-1 shrink-0">
                         <button
                           type="button"
                           aria-label={`${n.pinned ? 'Unpin' : 'Pin'} ${
@@ -1637,13 +2630,16 @@ export const NotesView: React.FC<NotesViewProps> = ({
         {/* Note Header: Title + Color Accent + Pin + Copy/Export + Undo/Redo + Clear/Delete */}
         <div className="px-3.5 py-2 border-b border-slate-800/80 flex items-center justify-between gap-2 flex-wrap">
           <input
+            ref={titleInputRef}
             id="note-title-input"
             type="text"
             aria-label="Note Title"
+            spellCheck={spellCheckEnabled}
             value={currentNote.title}
             onChange={(e) =>
               handleUpdateCurrentNote({ title: e.target.value }, false)
             }
+            onContextMenu={handleTitleContextMenu}
             placeholder="Note Title..."
             className="bg-transparent text-sm font-semibold text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 rounded px-1 -mx-1 min-w-[110px] flex-1"
           />
@@ -1960,6 +2956,86 @@ export const NotesView: React.FC<NotesViewProps> = ({
                 </button>
               )}
             </div>
+
+            <div className="h-3.5 w-px bg-slate-800 mx-0.5" />
+
+            {/* Chrome / Word-Style Spellcheck & Proofing Button (F7) */}
+            <div className="relative inline-flex items-center">
+              <button
+                type="button"
+                data-testid="toggle-spellcheck-proofing-btn"
+                aria-label="Spellcheck & Proofing"
+                aria-expanded={isProofingOpen}
+                aria-pressed={spellCheckEnabled}
+                title={`Spelling & Dictionary Proofing (F7) — ${
+                  !spellCheckEnabled
+                    ? 'Spellcheck Disabled'
+                    : activeMisspellings.length === 0
+                    ? 'No spelling issues'
+                    : `${activeMisspellings.length} spelling issue${
+                        activeMisspellings.length === 1 ? '' : 's'
+                      }`
+                }`}
+                onClick={() => setIsProofingOpen((prev) => !prev)}
+                className={`min-h-[24px] px-2 py-0.5 rounded-md border text-[10px] font-medium flex items-center gap-1 transition ${
+                  isProofingOpen
+                    ? 'bg-indigo-600/25 border-indigo-500/60 text-indigo-200'
+                    : spellCheckEnabled && activeMisspellings.length > 0
+                    ? 'bg-rose-500/15 border-rose-500/40 text-rose-200 hover:bg-rose-500/25'
+                    : spellCheckEnabled
+                    ? 'bg-slate-900 border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800'
+                    : 'bg-slate-950 border-slate-800/80 text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                <SpellCheck
+                  className={`w-3 h-3 ${
+                    !spellCheckEnabled
+                      ? 'text-slate-500'
+                      : activeMisspellings.length > 0
+                      ? 'text-rose-400'
+                      : 'text-emerald-400'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span>ABC</span>
+                {spellCheckEnabled && activeMisspellings.length > 0 && (
+                  <span
+                    data-testid="spellcheck-issue-count-badge"
+                    className="px-1 py-0.2 rounded-full bg-rose-500 text-white font-mono text-[9px] font-bold leading-none"
+                  >
+                    {activeMisspellings.length}
+                  </span>
+                )}
+              </button>
+
+              {isProofingOpen && (
+                <div className="absolute left-0 top-full mt-1.5 z-50 w-80 sm:w-96">
+                  <SpellcheckProofingPopover
+                    spellCheckEnabled={spellCheckEnabled}
+                    onToggleSpellCheck={(next) => setSpellCheckEnabled(next)}
+                    misspellings={activeMisspellings}
+                    customDictionary={customDictionary}
+                    onApplyCorrection={(match, replacement) =>
+                      handleReplaceMisspelling(replacement, {
+                        source: currentFormat === 'adf' ? 'adf' : 'markdown',
+                        wordStart: match.start,
+                        wordEnd: match.end,
+                        adfTargetId: match.adfTargetId,
+                        word: match.word,
+                      })
+                    }
+                    onChangeAllOccurrences={(word, replacement) =>
+                      handleReplaceAllMisspellings(word, replacement)
+                    }
+                    onFixAllMisspellings={handleFixAllMisspellings}
+                    onIgnoreWord={handleIgnoreWord}
+                    onAddWordToDictionary={handleAddWordToDictionary}
+                    onRemoveWordFromDictionary={handleRemoveWordFromDictionary}
+                    onClose={() => setIsProofingOpen(false)}
+                  />
+                </div>
+              )}
+            </div>
           </div>
 
           {/* View Mode Switcher: Edit / Split / Preview (MD) OR Visual / Split / ADF JSON (Jira ADF) */}
@@ -2031,49 +3107,89 @@ export const NotesView: React.FC<NotesViewProps> = ({
               }`}
             >
               {viewMode !== 'preview' && (
-                <textarea
-                  ref={editorRef}
-                  id="note-body-input"
-                  aria-label="Note Body"
-                  value={currentNote.body}
-                  onChange={(e) => {
-                    const pos = e.target.selectionStart ?? e.target.value.length;
-                    lastInsertPosMapRef.current[currentNote.id] = pos;
-                    handleUpdateCurrentNote({ body: e.target.value }, true);
-                  }}
-                  onSelect={syncEditorCursor}
-                  onClick={syncEditorCursor}
-                  onKeyUp={syncEditorCursor}
-                  onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-                      if (e.shiftKey) {
-                        e.preventDefault();
-                        handleRedo();
-                      } else if (canUndo) {
-                        e.preventDefault();
-                        handleUndo();
-                      }
-                    } else if (
-                      (e.ctrlKey || e.metaKey) &&
-                      e.key.toLowerCase() === 'y' &&
-                      canRedo
-                    ) {
-                      e.preventDefault();
-                      handleRedo();
-                    }
-                  }}
-                  placeholder="Start typing or click the microphone above for real-time local voice dictation at your cursor..."
+                <div
                   className={`${
                     viewMode === 'split' ? 'cq-split-pane' : 'w-full h-full'
-                  } bg-transparent p-4 ${
-                    isNoteDictating &&
-                    (liveInterim.text ||
-                      liveInterim.isSpeaking ||
-                      liveInterim.isProcessing)
-                      ? 'pb-12'
-                      : ''
-                  } cq-note-prose text-slate-200 placeholder-slate-400 leading-relaxed focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500/40 resize-none select-text overflow-y-auto`}
-                />
+                  } relative flex flex-col min-h-0 overflow-hidden`}
+                >
+                  {spellCheckEnabled && (
+                    <div
+                      ref={markdownBackdropRef}
+                      data-testid="markdown-spellcheck-backdrop"
+                      aria-hidden="true"
+                      className={`pointer-events-none absolute inset-0 p-4 ${
+                        isNoteDictating &&
+                        (liveInterim.text ||
+                          liveInterim.isSpeaking ||
+                          liveInterim.isProcessing)
+                          ? 'pb-12'
+                          : ''
+                      } cq-note-prose leading-relaxed whitespace-pre-wrap break-words overflow-hidden text-transparent select-none`}
+                    >
+                      {renderMarkdownSpellcheckBackdrop()}
+                    </div>
+                  )}
+                  <textarea
+                    ref={editorRef}
+                    id="note-body-input"
+                    aria-label="Note Body"
+                    spellCheck={spellCheckEnabled}
+                    value={currentNote.body}
+                    onChange={(e) => {
+                      lastDialogueTurnRef.current = null;
+                      const pos =
+                        e.target.selectionStart ?? e.target.value.length;
+                      lastInsertPosMapRef.current[currentNote.id] = pos;
+                      handleUpdateCurrentNote(
+                        { body: e.target.value },
+                        true,
+                        true
+                      );
+                    }}
+                    onContextMenu={handleMarkdownEditorContextMenu}
+                    onScroll={(e) => {
+                      if (markdownBackdropRef.current) {
+                        markdownBackdropRef.current.scrollTop =
+                          e.currentTarget.scrollTop;
+                        markdownBackdropRef.current.scrollLeft =
+                          e.currentTarget.scrollLeft;
+                      }
+                    }}
+                    onSelect={syncEditorCursor}
+                    onClick={syncEditorCursor}
+                    onKeyUp={syncEditorCursor}
+                    onKeyDown={(e) => {
+                      if (
+                        (e.ctrlKey || e.metaKey) &&
+                        e.key.toLowerCase() === 'z'
+                      ) {
+                        if (e.shiftKey) {
+                          e.preventDefault();
+                          handleRedo();
+                        } else if (canUndo) {
+                          e.preventDefault();
+                          handleUndo();
+                        }
+                      } else if (
+                        (e.ctrlKey || e.metaKey) &&
+                        e.key.toLowerCase() === 'y' &&
+                        canRedo
+                      ) {
+                        e.preventDefault();
+                        handleRedo();
+                      }
+                    }}
+                    placeholder="Start typing or click the microphone above for real-time local voice dictation at your cursor..."
+                    className={`relative z-10 w-full h-full bg-transparent p-4 ${
+                      isNoteDictating &&
+                      (liveInterim.text ||
+                        liveInterim.isSpeaking ||
+                        liveInterim.isProcessing)
+                        ? 'pb-12'
+                        : ''
+                    } cq-note-prose text-slate-200 placeholder-slate-400 leading-relaxed focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500/40 resize-none select-text overflow-y-auto`}
+                  />
+                </div>
               )}
 
               {(viewMode === 'preview' || viewMode === 'split') && (
@@ -2120,13 +3236,20 @@ export const NotesView: React.FC<NotesViewProps> = ({
                     key={currentNote.id}
                     ref={jiraEditorRef}
                     doc={currentAdfDoc}
-                    onChangeDoc={(nextDoc) => handleChangeAdfDoc(nextDoc, true)}
+                    onChangeDoc={(nextDoc) => {
+                      lastDialogueTurnRef.current = null;
+                      handleChangeAdfDoc(nextDoc, true, true);
+                    }}
                     onUndo={handleUndo}
                     onRedo={handleRedo}
                     canUndo={canUndo}
                     canRedo={canRedo}
                     onNotify={onNotify}
                     onOpenMermaidInFlow={onOpenMermaidInFlow}
+                    spellCheckEnabled={spellCheckEnabled}
+                    customDictionary={customDictionary}
+                    ignoredWords={ignoredWords}
+                    onSpellCheckContextMenu={handleAdfSpellCheckContextMenu}
                   />
                 </div>
               )}
@@ -2214,25 +3337,52 @@ export const NotesView: React.FC<NotesViewProps> = ({
               <div
                 data-testid="note-live-interim-banner"
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-x-3 bottom-2.5 z-10 rounded-xl bg-slate-900/95 backdrop-blur-md border border-indigo-500/40 shadow-lg shadow-slate-950/70 px-3 py-1.5 flex items-center gap-2"
+                className={`pointer-events-none absolute inset-x-3 bottom-2.5 z-10 rounded-xl bg-slate-900/95 backdrop-blur-md border shadow-lg shadow-slate-950/70 px-3 py-1.5 flex items-center gap-2 ${
+                  liveInterim.isDialogue &&
+                  liveInterim.speakerRole === 'external'
+                    ? 'border-cyan-500/45'
+                    : 'border-indigo-500/40'
+                }`}
               >
-                <span className="inline-flex items-center gap-1.5 shrink-0">
+                <span className="inline-flex items-center gap-1.5 shrink-0 max-w-[130px] min-w-0">
                   <span
-                    className={`w-2 h-2 rounded-full ${
-                      liveInterim.isSpeaking
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      liveInterim.isDialogue
+                        ? liveInterim.speakerRole === 'external'
+                          ? 'bg-cyan-400 animate-pulse'
+                          : 'bg-indigo-400 animate-pulse'
+                        : liveInterim.isSpeaking
                         ? 'bg-rose-500 animate-pulse'
                         : 'bg-indigo-400 animate-pulse'
                     }`}
                   />
-                  <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-indigo-300">
-                    LIVE
+                  <span
+                    className={`text-[10px] font-mono font-semibold uppercase tracking-wider truncate ${
+                      liveInterim.isDialogue &&
+                      liveInterim.speakerRole === 'external'
+                        ? 'text-cyan-300'
+                        : 'text-indigo-300'
+                    }`}
+                  >
+                    {liveInterim.isDialogue && liveInterim.speakerLabel
+                      ? `LIVE • ${liveInterim.speakerLabel}`
+                      : 'LIVE'}
                   </span>
                 </span>
                 <div className="flex-1 min-w-0 overflow-hidden flex justify-end [mask-image:linear-gradient(to_right,transparent,black_18px)]">
-                  <span className="whitespace-nowrap text-xs italic text-indigo-100">
+                  <span
+                    className={`whitespace-nowrap text-xs italic ${
+                      liveInterim.isDialogue &&
+                      liveInterim.speakerRole === 'external'
+                        ? 'text-cyan-50'
+                        : 'text-indigo-100'
+                    }`}
+                  >
                     {liveInterim.text ||
                       (liveInterim.isSpeaking
-                        ? 'Listening at cursor…'
+                        ? liveInterim.isDialogue && liveInterim.speakerLabel
+                          ? `${liveInterim.speakerLabel} speaking…`
+                          : 'Listening at cursor…'
                         : 'Committing phrase…')}
                   </span>
                 </div>
@@ -2274,6 +3424,40 @@ export const NotesView: React.FC<NotesViewProps> = ({
           </span>
         </div>
       </div>
+
+      {/* Chrome & Word-Style Right-Click Spellcheck Context Menu */}
+      {contextMenuTarget && (
+        <SpellcheckContextMenu
+          target={contextMenuTarget}
+          spellCheckEnabled={spellCheckEnabled}
+          onSelectSuggestion={(replacement) =>
+            handleReplaceMisspelling(replacement)
+          }
+          onChangeAllOccurrences={(replacement) => {
+            if (contextMenuTarget.word) {
+              handleReplaceAllMisspellings(
+                contextMenuTarget.word,
+                replacement
+              );
+            }
+          }}
+          onIgnoreWord={(word) => handleIgnoreWord(word)}
+          onAddToDictionary={(word) => handleAddWordToDictionary(word)}
+          onToggleSpellCheck={() => {
+            setSpellCheckEnabled((prev) => !prev);
+            setContextMenuTarget(null);
+          }}
+          onOpenProofingPanel={() => {
+            setContextMenuTarget(null);
+            setIsProofingOpen(true);
+          }}
+          onCut={handleContextMenuCut}
+          onCopy={handleContextMenuCopy}
+          onPaste={handleContextMenuPaste}
+          onSelectAll={handleContextMenuSelectAll}
+          onClose={() => setContextMenuTarget(null)}
+        />
+      )}
     </section>
   );
 };

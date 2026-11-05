@@ -2565,7 +2565,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   key={d.id}
                   data-testid={`flow-diagram-card-${d.id}`}
                   onClick={() => handleSelectDiagram(d.id)}
-                  className={`group flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border cursor-pointer shrink-0 transition ${
+                  className={`group flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border shrink-0 cursor-pointer transition ${
                     isCurrent
                       ? 'bg-indigo-600/25 border-indigo-400 text-white'
                       : 'bg-slate-900/90 hover:bg-slate-800 border-slate-800 text-slate-300'
@@ -2578,7 +2578,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                       e.stopPropagation();
                       handleSelectDiagram(d.id);
                     }}
-                    className="min-w-0 text-left rounded px-0.5"
+                    className="min-w-0 flex-1 text-left rounded px-0.5 cursor-pointer"
                   >
                     <div className="text-[11px] font-medium truncate max-w-[140px]">
                       {d.title}
@@ -3738,7 +3738,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             aria-label="Insert step on connector"
                             title="Splice a new Process node into this connector"
                             onClick={() => handleInsertNodeOnEdge(idx)}
-                            className="min-h-[22px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-[10px] font-medium text-white flex items-center gap-0.5 transition"
+                            className="min-h-[24px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-[10px] font-medium text-white flex items-center gap-0.5 transition"
                           >
                             <Plus className="w-2.5 h-2.5" aria-hidden="true" />
                             <span>Insert Step</span>
@@ -3759,7 +3759,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                   preset
                                 );
                               }}
-                              className="min-h-[22px] px-2 py-0.5 rounded bg-slate-800 hover:bg-indigo-600 text-[10px] text-slate-300 hover:text-white transition"
+                              className="min-h-[24px] px-2 py-0.5 rounded bg-slate-800 hover:bg-indigo-600 text-[10px] text-slate-300 hover:text-white transition"
                             >
                               {preset}
                             </button>
@@ -3784,7 +3784,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 true
                               );
                             }}
-                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-slate-200 rounded px-1 py-0.5 text-[10px]"
+                            className="min-h-[24px] bg-slate-800 border border-slate-700 text-slate-200 rounded px-1 py-0.5 text-[10px]"
                           >
                             <option value="solid">Solid</option>
                             <option value="dotted">Dotted</option>
@@ -3807,7 +3807,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 true
                               );
                             }}
-                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-slate-200 rounded px-1 py-0.5 text-[10px]"
+                            className="min-h-[24px] bg-slate-800 border border-slate-700 text-slate-200 rounded px-1 py-0.5 text-[10px]"
                           >
                             <option value="arrow">--&gt;</option>
                             <option value="bidirectional">&lt;--&gt;</option>
@@ -3833,7 +3833,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 true
                               );
                             }}
-                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-cyan-200 rounded px-1 py-0.5 text-[10px]"
+                            className="min-h-[24px] bg-slate-800 border border-slate-700 text-cyan-200 rounded px-1 py-0.5 text-[10px]"
                           >
                             <option value="bezier">Curved</option>
                             <option value="orthogonal">Elbow</option>
@@ -3856,7 +3856,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 true
                               );
                             }}
-                            className="min-h-[22px] bg-slate-800 border border-indigo-500/40 text-cyan-300 font-mono rounded px-1 py-0.5 text-[10px]"
+                            className="min-h-[24px] bg-slate-800 border border-indigo-500/40 text-cyan-300 font-mono rounded px-1 py-0.5 text-[10px]"
                           >
                             <option value="">Standard</option>
                             <option value="<|--">&lt;|-- Inherits</option>
@@ -3996,7 +3996,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                               )
                             }
                             title="Switch node shape in-place"
-                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-indigo-200 rounded px-1.5 py-0.5 text-[10px] focus:outline-none"
+                            className="min-h-[24px] bg-slate-800 border border-slate-700 text-indigo-200 rounded px-1.5 py-0.5 text-[10px] focus:outline-none"
                           >
                             {ALL_NODE_SHAPES.map((s) => (
                               <option key={s.type} value={s.type}>
@@ -4032,7 +4032,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             e.stopPropagation();
                             handleQuickAddDirection(node, dir);
                           }}
-                          className={`pointer-events-auto absolute ${positionClass} w-5 h-5 rounded-full bg-indigo-600 hover:bg-cyan-400 text-white hover:text-slate-950 border border-indigo-300/80 shadow flex items-center justify-center transition-all z-20 focus:opacity-100 ${
+                          className={`pointer-events-auto absolute ${positionClass} w-6 h-6 rounded-full bg-indigo-600 hover:bg-cyan-400 text-white hover:text-slate-950 border border-indigo-300/80 shadow flex items-center justify-center transition-all z-20 focus:opacity-100 ${
                             isSelected
                               ? 'opacity-95 scale-100'
                               : 'opacity-0 group-hover:opacity-95 group-focus-within:opacity-95 scale-90 group-hover:scale-100'
@@ -4254,7 +4254,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onChange={(e) =>
                               handleSetNodeStereotype(node.id, e.target.value)
                             }
-                            className="min-h-[22px] bg-slate-800 border border-slate-700 text-amber-300 font-mono rounded px-1.5 py-0.5 text-[10px] focus:outline-none focus:border-indigo-500"
+                            className="min-h-[24px] bg-slate-800 border border-slate-700 text-amber-300 font-mono rounded px-1.5 py-0.5 text-[10px] focus:outline-none focus:border-indigo-500"
                           >
                             <option value="">None</option>
                             <option value="interface">
@@ -4301,7 +4301,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                       e.target.value
                                     )
                                   }
-                                  className="flex-1 min-h-[22px] bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 font-mono text-[10px] text-slate-200 focus:outline-none focus:border-indigo-500"
+                                  className="flex-1 min-h-[24px] bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 font-mono text-[10px] text-slate-200 focus:outline-none focus:border-indigo-500"
                                 />
                                 <button
                                   type="button"
@@ -4358,7 +4358,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onClick={() =>
                               handleAddNodeMember(node.id, '+String id')
                             }
-                            className="min-h-[22px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-sky-300"
+                            className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-sky-300"
                           >
                             +Field
                           </button>
@@ -4367,7 +4367,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onClick={() =>
                               handleAddNodeMember(node.id, '+execute() bool')
                             }
-                            className="min-h-[22px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-indigo-300"
+                            className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-indigo-300"
                           >
                             +Method()
                           </button>
@@ -4376,7 +4376,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onClick={() =>
                               handleAddNodeMember(node.id, 'uuid id PK')
                             }
-                            className="min-h-[22px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-purple-300"
+                            className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-purple-300"
                           >
                             +PK
                           </button>
@@ -4385,7 +4385,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             onClick={() =>
                               handleAddNodeMember(node.id, 'uuid ref_id FK')
                             }
-                            className="min-h-[22px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-amber-300"
+                            className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-amber-300"
                           >
                             +FK
                           </button>

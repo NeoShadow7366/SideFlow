@@ -2627,3 +2627,42 @@ export async function renderFlowchartToPngData(
   });
 }
 
+const MAX_MERMAID_PREVIEW_CACHE_ENTRIES = 32;
+const mermaidPreviewCache = new Map<
+  string,
+  { laidOut: FlowchartState | null; svgMarkup: string | null }
+>();
+
+/**
+ * Memoized helper that parses Mermaid source code, computes the Sugiyama/Kahn
+ * DAG layout, and generates the standalone SVG preview string.
+ */
+export function renderCachedMermaidPreview(rawCode: string): {
+  laidOut: FlowchartState | null;
+  svgMarkup: string | null;
+} {
+  const key = (rawCode || '').trim();
+  if (!key) {
+    return { laidOut: null, svgMarkup: null };
+  }
+  const cached = mermaidPreviewCache.get(key);
+  if (cached) {
+    return cached;
+  }
+  const parsed = parseMermaidCode(rawCode);
+  const laidOut: FlowchartState | null = parsed
+    ? { ...parsed, nodes: computeDagLayout(parsed) }
+    : null;
+  const svgMarkup = laidOut
+    ? generateStandaloneSVG(laidOut).replace(/^<\?xml[^>]*>\s*/i, '')
+    : null;
+  const result = { laidOut, svgMarkup };
+  if (mermaidPreviewCache.size >= MAX_MERMAID_PREVIEW_CACHE_ENTRIES) {
+    const oldestKey = mermaidPreviewCache.keys().next().value;
+    if (oldestKey !== undefined) mermaidPreviewCache.delete(oldestKey);
+  }
+  mermaidPreviewCache.set(key, result);
+  return result;
+}
+
+

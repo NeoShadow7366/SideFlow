@@ -59,7 +59,7 @@ interface DrawerCardProps {
   onEditApp: (app: AppItem, drawerId: string) => void;
 }
 
-export const DrawerCard: React.FC<DrawerCardProps> = ({
+export const DrawerCard: React.FC<DrawerCardProps> = React.memo(({
   drawer,
   filteredApps,
   isFiltering = false,
@@ -405,4 +405,4 @@ export const DrawerCard: React.FC<DrawerCardProps> = ({
       )}
     </div>
   );
-};
+});

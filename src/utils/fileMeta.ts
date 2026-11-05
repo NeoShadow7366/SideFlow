@@ -424,24 +424,7 @@ export async function executeAppCommand(
     }
   }
 
-  // 2. Legacy Electron window.require fallback
-  if (typeof window.require === 'function') {
-    try {
-      const electron = window.require('electron');
-      if (electron.ipcRenderer?.send) {
-        if (args && args.length > 0) {
-          electron.ipcRenderer.send('launch-native-app', trimmed, args);
-        } else {
-          electron.ipcRenderer.send('launch-native-app', trimmed);
-        }
-        return { success: true };
-      }
-    } catch {
-      // Fall through to browser handling
-    }
-  }
-
-  // 3. Browser environment fallback with protocol validation
+  // 2. Browser environment fallback with protocol validation
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
     window.open(trimmed, '_blank', 'noopener,noreferrer');
     return { success: true };

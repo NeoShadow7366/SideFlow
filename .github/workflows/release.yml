@@ -46,11 +46,17 @@ jobs:
       - name: Bump Version & Push Tag (when triggered via workflow_dispatch)
         id: version_step
         shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.release_type }}" -ne "current") {
+          if ($env:EVENT_NAME -eq "workflow_dispatch" -and $env:RELEASE_TYPE -ne "current") {
+            if ($env:RELEASE_TYPE -notin @("patch", "minor", "major")) {
+              throw "Invalid release_type: $env:RELEASE_TYPE"
+            }
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            npm version ${{ inputs.release_type }} -m "chore(release): v%s"
+            npm version $env:RELEASE_TYPE -m "chore(release): v%s"
             git push origin HEAD --follow-tags
           }
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json

@@ -20,6 +20,107 @@ export function computeRmsLevel(samples: Float32Array): number {
   return Math.min(1, Math.max(0, rms * 4.2));
 }
 
+export interface ExternalBleedState {
+  peakRms: number;
+  lastActiveMs: number;
+}
+
+/**
+ * Updates the frame-rate-independent peak-hold envelope for External audio (Source 2)
+ * so room propagation + speaker-to-mic buffer lag (~30-140ms) remain covered during hangover.
+ */
+export function updateExternalBleedState(
+  prev: ExternalBleedState,
+  externalRms: number,
+  nowMs: number,
+  activeThreshold = 0.022,
+  hangoverMs = 240
+): ExternalBleedState {
+  if (externalRms >= activeThreshold) {
+    const dtMs = Math.max(0, nowMs - prev.lastActiveMs);
+    const withinHangover = prev.peakRms > 0 && dtMs <= hangoverMs;
+    const decayFactor = Math.pow(0.92, dtMs / 32);
+    return {
+      peakRms: withinHangover
+        ? Math.max(externalRms, prev.peakRms * decayFactor)
+        : externalRms,
+      lastActiveMs: nowMs,
+    };
+  }
+  if (prev.peakRms > 0 && nowMs - prev.lastActiveMs > hangoverMs) {
+    return { peakRms: 0, lastActiveMs: prev.lastActiveMs };
+  }
+  return prev;
+}
+
+/**
+ * Computes the effective External RMS level at `nowMs`, accounting for a decaying
+ * acoustic hangover window after External audio stops playing through speakers.
+ */
+export function getEffectiveExternalRms(
+  state: ExternalBleedState,
+  currentExternalRms: number,
+  nowMs: number,
+  activeThreshold = 0.022,
+  hangoverMs = 240
+): number {
+  if (currentExternalRms >= activeThreshold) {
+    return Math.max(currentExternalRms, state.peakRms * 0.9);
+  }
+  if (state.peakRms > 0 && nowMs - state.lastActiveMs <= hangoverMs) {
+    const progress = Math.max(
+      0,
+      Math.min(1, (nowMs - state.lastActiveMs) / hangoverMs)
+    );
+    return state.peakRms * (1 - 0.65 * progress);
+  }
+  return 0;
+}
+
+/**
+ * Cross-channel acoustic speaker-bleed suppression gate for Dual-Source Dialogue Mode.
+ * Raises Primary Mic's VAD threshold dynamically while External audio is playing so attenuated
+ * laptop speaker bleed is not double-transcribed as the Primary user, while capping the ceiling
+ * (`maxBleedThreshold`) so genuine direct user speech / barge-in always passes through.
+ */
+export function shouldSuppressPrimaryMicBleed(params: {
+  primaryRms: number;
+  effectiveExternalRms: number;
+  baseVadThreshold?: number;
+  bleedRatio?: number;
+  bargeInMinRms?: number;
+  maxBleedThreshold?: number;
+  primaryAlreadySpeaking?: boolean;
+}): { suppressed: boolean; effectiveThreshold: number } {
+  const baseVadThreshold = params.baseVadThreshold ?? 0.026;
+  const bleedRatio = params.bleedRatio ?? 0.36;
+  const bargeInMinRms = params.bargeInMinRms ?? 0.052;
+  const maxBleedThreshold = params.maxBleedThreshold ?? 0.22;
+
+  if (params.effectiveExternalRms < 0.022) {
+    return { suppressed: false, effectiveThreshold: baseVadThreshold };
+  }
+
+  let dynamicThreshold = Math.min(
+    maxBleedThreshold,
+    Math.max(
+      baseVadThreshold,
+      bargeInMinRms,
+      params.effectiveExternalRms * bleedRatio
+    )
+  );
+
+  // Hysteresis once Primary speaker has genuinely barged in so trailing syllables are not clipped
+  if (params.primaryAlreadySpeaking) {
+    dynamicThreshold = Math.max(baseVadThreshold, dynamicThreshold * 0.78);
+  }
+
+  return {
+    suppressed: params.primaryRms < dynamicThreshold,
+    effectiveThreshold: dynamicThreshold,
+  };
+}
+
 /**
  * Removes DC offset and normalizes audio peak amplitude to targetPeak (default 0.85, max 8x gain).
  * Dramatically improves CPU INT8 / WASM transcription accuracy on quiet laptop microphones.

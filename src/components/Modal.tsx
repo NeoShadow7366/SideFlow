@@ -24,6 +24,8 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
+let openModalCount = 0;
+
 function getVisibleFocusables(panel: HTMLElement): HTMLElement[] {
   return Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
     (el) => {
@@ -67,6 +69,7 @@ export const Modal: React.FC<ModalProps> = ({
     if (!isOpen) return;
 
     previousFocusRef.current = document.activeElement as HTMLElement | null;
+    openModalCount += 1;
     document.body.setAttribute('data-sideflow-modal-open', 'true');
 
     // Ensure initial focus lands on initialFocusRef (if provided) or inside the modal
@@ -134,7 +137,10 @@ export const Modal: React.FC<ModalProps> = ({
     return () => {
       window.cancelAnimationFrame(rafId);
       window.removeEventListener('keydown', handleKeyDownCapture, true);
-      document.body.removeAttribute('data-sideflow-modal-open');
+      openModalCount = Math.max(0, openModalCount - 1);
+      if (openModalCount === 0) {
+        document.body.removeAttribute('data-sideflow-modal-open');
+      }
       const prevEl = previousFocusRef.current;
       if (prevEl && document.body.contains(prevEl)) {
         try {
