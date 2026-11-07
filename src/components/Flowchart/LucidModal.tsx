@@ -1,7 +1,19 @@
-import React, { useState, useEffect } from 'react';
-import { Share2, X, Copy, ExternalLink, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Share2,
+  X,
+  Copy,
+  ExternalLink,
+  RefreshCw,
+  Download,
+  Eye,
+} from 'lucide-react';
 import { FlowchartState, NotifyFn } from '../../types/sideflow';
-import { generateMermaidCode, parseMermaidCode } from '../../utils/mermaid';
+import {
+  generateMermaidCode,
+  parseMermaidCode,
+  renderCachedMermaidPreview,
+} from '../../utils/mermaid';
 import { executeAppCommand } from '../../utils/fileMeta';
 import { Modal } from '../Modal';
 
@@ -30,6 +42,35 @@ export const LucidModal: React.FC<LucidModalProps> = ({
       setParseError(null);
     }
   }, [isOpen, flowData]);
+
+  const livePreview = useMemo(
+    () => renderCachedMermaidPreview(mermaidText),
+    [mermaidText]
+  );
+
+  const handleDownloadMermaid = () => {
+    try {
+      const blob = new Blob([mermaidText], {
+        type: 'text/plain;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'sideflow-diagram.mmd';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch {
+      // Fallback in non-DOM test env
+    }
+    onNotify(
+      'Downloaded Mermaid File (.mmd)',
+      'download',
+      'sideflow-diagram.mmd saved',
+      { variant: 'success' }
+    );
+  };
 
   const handleCopyMermaid = async () => {
     try {
@@ -148,6 +189,15 @@ export const LucidModal: React.FC<LucidModalProps> = ({
             )}
             <button
               type="button"
+              data-testid="lucid-download-mmd-btn"
+              onClick={handleDownloadMermaid}
+              title="Download diagram as a standalone .mmd Mermaid file"
+              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200 hover:text-white flex items-center gap-1 transition"
+            >
+              <Download className="w-3 h-3" aria-hidden="true" /> .mmd
+            </button>
+            <button
+              type="button"
               onClick={handleCopyMermaid}
               className="px-2 py-1 rounded-lg bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-500/30 text-xs text-indigo-300 hover:text-indigo-200 flex items-center gap-1 transition"
             >
@@ -178,6 +228,29 @@ export const LucidModal: React.FC<LucidModalProps> = ({
           >
             {parseError}
           </p>
+        )}
+
+        {/* Live Rendered SVG Preview */}
+        {livePreview.svgMarkup && livePreview.laidOut && (
+          <div
+            data-testid="lucid-live-svg-preview"
+            className="rounded-xl bg-slate-950 border border-slate-800 overflow-hidden"
+          >
+            <div className="px-2.5 py-1 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between text-[10px] text-slate-300">
+              <span className="flex items-center gap-1 font-medium text-indigo-300">
+                <Eye className="w-3 h-3" aria-hidden="true" />
+                <span>Live Diagram Preview</span>
+              </span>
+              <span className="font-mono text-slate-400">
+                {livePreview.laidOut.nodes.length} nodes •{' '}
+                {livePreview.laidOut.edges.length} links
+              </span>
+            </div>
+            <div
+              className="max-h-36 overflow-auto p-2 flex items-center justify-center [&>svg]:max-h-32 [&>svg]:w-auto"
+              dangerouslySetInnerHTML={{ __html: livePreview.svgMarkup }}
+            />
+          </div>
         )}
       </div>
 

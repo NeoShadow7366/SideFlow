@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Pencil } from 'lucide-react';
+import { X, Pencil, Star } from 'lucide-react';
 import {
   AccentColor,
   AppItem,
@@ -40,6 +40,7 @@ interface AppTileProps {
   ) => void;
   onDelete: (drawerId: string, appId: string) => void;
   onEdit?: (app: AppItem, drawerId: string) => void;
+  onToggleFavorite?: (drawerId: string, appId: string) => void;
 }
 
 export const AppTile: React.FC<AppTileProps> = React.memo(({
@@ -55,6 +56,7 @@ export const AppTile: React.FC<AppTileProps> = React.memo(({
   onReorderApp,
   onDelete,
   onEdit,
+  onToggleFavorite,
 }) => {
   const [isDragOverTile, setIsDragOverTile] = useState(false);
   const styleClass = colorMap[app.color] || colorMap.indigo;
@@ -243,6 +245,35 @@ export const AppTile: React.FC<AppTileProps> = React.memo(({
         }}
         className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 absolute top-1 right-1 flex items-center gap-1 transition z-30 pointer-events-auto"
       >
+        {onToggleFavorite && (
+          <button
+            type="button"
+            draggable={false}
+            data-testid={`app-favorite-btn-${app.id}`}
+            aria-pressed={Boolean(app.favorite)}
+            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggleFavorite(drawerId, app.id);
+            }}
+            aria-label={`${app.favorite ? 'Unstar' : 'Star'} ${app.name}`}
+            title={`${app.favorite ? 'Remove from' : 'Pin to'} Quick Favorites`}
+            className={`w-6 h-6 rounded-full bg-slate-950/95 border flex items-center justify-center shadow-md transition cursor-pointer ${
+              app.favorite
+                ? 'border-amber-400 text-amber-300 bg-amber-950/90'
+                : 'border-slate-700/80 hover:border-amber-400 text-slate-300 hover:text-amber-300 hover:bg-amber-950/90'
+            }`}
+          >
+            <Star
+              className={`w-3 h-3 pointer-events-none ${
+                app.favorite ? 'fill-current' : ''
+              }`}
+              aria-hidden="true"
+            />
+          </button>
+        )}
         {onEdit && (
           <button
             type="button"

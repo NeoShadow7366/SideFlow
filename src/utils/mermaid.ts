@@ -31,6 +31,7 @@ export interface SubgraphBounds {
   height: number;
   collapsed?: boolean;
   memberCount?: number;
+  color?: AccentColor;
 }
 
 export type MermaidTemplateId =
@@ -327,6 +328,7 @@ export function computeSubgraphBounds(
     height: subgraph.collapsed ? 40 : Math.max(96, maxY - minY),
     collapsed: Boolean(subgraph.collapsed),
     memberCount: members.length,
+    ...(subgraph.color ? { color: subgraph.color } : {}),
   };
 }
 
@@ -3316,6 +3318,106 @@ export function computeConnectedPath(
     highlightedEdgeIndices,
   };
 }
+
+/**
+ * Converts a Markdown note's bullet list, numbered steps, or task checklist
+ * directly into a laid-out FlowchartState.
+ */
+export function convertMarkdownListToFlowchart(
+  markdown: string,
+  fallbackTitle?: string
+): FlowchartState | null {
+  const rawLines = (markdown || '')
+    .replace(/```[\s\S]*?```/g, '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const listStepLines: { text: string; checked?: boolean }[] = [];
+  for (const line of rawLines) {
+    const taskMatch = line.match(/^[-*+]\s+\[([ xX])\]\s+(.+)$/);
+    if (taskMatch) {
+      listStepLines.push({
+        text: taskMatch[2].replace(/[*_`~]/g, '').trim(),
+        checked: taskMatch[1].toLowerCase() === 'x',
+      });
+      continue;
+    }
+    const bulletMatch = line.match(/^(?:[-*+]|\d+[.)])\s+(.+)$/);
+    if (bulletMatch) {
+      listStepLines.push({
+        text: bulletMatch[1].replace(/[*_`~]/g, '').trim(),
+      });
+    }
+  }
+
+  const effectiveSteps: { text: string; checked?: boolean }[] =
+    listStepLines.length > 0
+      ? listStepLines
+      : rawLines
+          .filter((l) => !/^#{1,6}\s*$/.test(l))
+          .slice(0, 12)
+          .map((l) => ({
+            text: l.replace(/^#{1,6}\s+/, '').replace(/[*_`~]/g, '').trim(),
+          }))
+          .filter((item) => item.text.length > 0);
+
+  if (effectiveSteps.length === 0 && fallbackTitle?.trim()) {
+    effectiveSteps.push({ text: fallbackTitle.trim() });
+  }
+
+  if (effectiveSteps.length === 0) return null;
+
+  const nodes: FlowNode[] = effectiveSteps.map((step, idx) => {
+    const cleanText = step.text.slice(0, 48);
+    const isQuestion = cleanText.endsWith('?');
+    const isStartOrEnd =
+      idx === 0 && /^(start|begin|launch|open|init)/i.test(cleanText);
+    const type: FlowNodeType = isQuestion
+      ? 'decision'
+      : isStartOrEnd
+        ? 'start'
+        : 'process';
+    const color: AccentColor | undefined =
+      step.checked === true
+        ? 'emerald'
+        : isQuestion
+          ? 'amber'
+          : idx === 0
+            ? 'indigo'
+            : undefined;
+    return {
+      id: `n${idx + 1}`,
+      type,
+      text: cleanText,
+      x: 80,
+      y: 40 + idx * 96,
+      ...(color ? { color } : {}),
+    };
+  });
+
+  const edges: FlowEdge[] = [];
+  for (let i = 0; i < nodes.length - 1; i++) {
+    edges.push({
+      from: nodes[i].id,
+      to: nodes[i + 1].id,
+      ...(nodes[i].type === 'decision' ? { label: 'Next' } : {}),
+    });
+  }
+
+  const state: FlowchartState = {
+    nodes,
+    edges,
+    direction: 'TD',
+    diagramType: 'flowchart',
+  };
+
+  return {
+    ...state,
+    nodes: computeDagLayout(state),
+  };
+}
+
 
 
 

@@ -20,6 +20,7 @@ import {
   computeEdgeGeometry,
   computeParallelEdgeOffsets,
   computeSubgraphBounds,
+  convertMarkdownListToFlowchart,
   formatMermaidEdgeOperator,
   formatSequenceMessageOperator,
   generateMermaidCode,
@@ -1835,6 +1836,27 @@ describe('Shared Storage Sync, Spellcheck Cache & WhisperWorker Pipeline Cache',
     const svg = generateStandaloneSVG(flowWith14Shapes);
     expect(svg).toContain('Spec Doc');
     expect(svg).toContain('Audit Note');
+  });
+
+  it('converts Markdown bullet lists and checklists into a laid-out FlowchartState via convertMarkdownListToFlowchart', () => {
+    const md = [
+      '# Deployment Checklist',
+      '- [x] Start Build Pipeline',
+      '- [ ] Tests Passing?',
+      '- [ ] Deploy to Production',
+    ].join('\n');
+
+    const flow = convertMarkdownListToFlowchart(md, 'Deploy');
+    expect(flow).not.toBeNull();
+    expect(flow!.nodes.map((n) => ({ text: n.text, type: n.type, color: n.color }))).toEqual([
+      { text: 'Start Build Pipeline', type: 'start', color: 'emerald' },
+      { text: 'Tests Passing?', type: 'decision', color: 'amber' },
+      { text: 'Deploy to Production', type: 'process', color: undefined },
+    ]);
+    expect(flow!.edges).toEqual([
+      { from: 'n1', to: 'n2' },
+      { from: 'n2', to: 'n3', label: 'Next' },
+    ]);
   });
 });
 

@@ -1992,6 +1992,12 @@ export const App: React.FC = () => {
           shortcutLabel={shortcut.label}
           isDictating={isDictating}
           effectiveEdge={activeEffectiveEdge}
+          isWideStudio={clampPanelWidthPercent(panelWidthPercent) >= 55}
+          onToggleWideStudio={() => {
+            const currentW = clampPanelWidthPercent(panelWidthPercent);
+            const nextW = currentW >= 55 ? DEFAULT_PANEL_WIDTH_PERCENT : 65;
+            handleChangePanelWidthPercent(nextW, true);
+          }}
         />
 
         {activeTab === 'drawers' && (

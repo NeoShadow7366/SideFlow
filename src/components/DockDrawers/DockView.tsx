@@ -19,6 +19,7 @@ import {
   ChevronsUpDown,
   AlertTriangle,
   Keyboard,
+  Star,
 } from 'lucide-react';
 import {
   AccentColor,
@@ -43,6 +44,7 @@ import {
   formatQuickHotkeyBadge,
   generateShortcutIconDataUrl,
   inferAppMetaFromFilename,
+  isAppProcessRunning,
   resolveDroppedFilePath,
   resolveShortcutMetadata,
   sortDrawerApps,
@@ -71,6 +73,7 @@ export const DockView: React.FC<DockViewProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<string>('all');
+  const [onlyRunningFilter, setOnlyRunningFilter] = useState<boolean>(false);
   const [internalLocked, setInternalLocked] = useState(false);
   const [showDocklets, setShowDocklets] = useLocalStorage<boolean>(
     'sideflow_show_docklets',
@@ -182,16 +185,36 @@ export const DockView: React.FC<DockViewProps> = ({
 
   const filterText = searchQuery.toLowerCase().trim();
 
+  const matchesAppFilter = useCallback(
+    (app: AppItem) => {
+      const matchesText =
+        !filterText ||
+        app.name.toLowerCase().includes(filterText) ||
+        app.cmd.toLowerCase().includes(filterText);
+      if (!matchesText) return false;
+      if (onlyRunningFilter) {
+        return isAppProcessRunning(app, runningProcesses, launchedAppIds);
+      }
+      return true;
+    },
+    [filterText, onlyRunningFilter, runningProcesses, launchedAppIds]
+  );
+
+  const favoriteApps: { app: AppItem; drawerId: string }[] = [];
+  drawers.forEach((d) => {
+    d.apps.forEach((a) => {
+      if (a.favorite) {
+        favoriteApps.push({ app: a, drawerId: d.id });
+      }
+    });
+  });
+
   // Calculate visible drawers and total matching apps
   const visibleDrawers = drawers.filter(
     (d) => activeFilter === 'all' || activeFilter === d.id
   );
   const totalApps = visibleDrawers.reduce((sum, d) => {
-    const matched = d.apps.filter(
-      (a) =>
-        a.name.toLowerCase().includes(filterText) ||
-        a.cmd.toLowerCase().includes(filterText)
-    );
+    const matched = d.apps.filter(matchesAppFilter);
     return sum + matched.length;
   }, 0);
 
@@ -199,11 +222,7 @@ export const DockView: React.FC<DockViewProps> = ({
   const orderedVisibleApps: AppItem[] = [];
   visibleDrawers.forEach((d) => {
     if (d.collapsed) return;
-    const matched = d.apps.filter(
-      (a) =>
-        a.name.toLowerCase().includes(filterText) ||
-        a.cmd.toLowerCase().includes(filterText)
-    );
+    const matched = d.apps.filter(matchesAppFilter);
     const sorted = sortDrawerApps(matched, d.sortBy);
     orderedVisibleApps.push(...sorted);
   });
@@ -376,6 +395,74 @@ export const DockView: React.FC<DockViewProps> = ({
         'check',
         'Updated drawer tab order'
       );
+    }
+  };
+
+  const handleMoveDrawer = (drawerId: string, direction: 'up' | 'down') => {
+    if (isLocked) return;
+    const targetDrawer = drawers.find((d) => d.id === drawerId);
+    onChangeDrawers((prev) => {
+      const idx = prev.findIndex((d) => d.id === drawerId);
+      if (idx === -1) return prev;
+      const nextIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (nextIdx < 0 || nextIdx >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(idx, 1);
+      next.splice(nextIdx, 0, moved);
+      return next;
+    });
+    if (targetDrawer) {
+      onNotify(
+        `Moved "${targetDrawer.title}" ${direction === 'up' ? 'Up' : 'Down'}`,
+        'check',
+        'Updated drawer order'
+      );
+    }
+  };
+
+  const handleToggleFavoriteApp = (drawerId: string, appId: string) => {
+    let targetAppName = 'App';
+    let nextFav = false;
+    onChangeDrawers((prev) =>
+      prev.map((d) => {
+        if (d.id !== drawerId) return d;
+        return {
+          ...d,
+          apps: d.apps.map((a) => {
+            if (a.id !== appId) return a;
+            targetAppName = a.name;
+            nextFav = !a.favorite;
+            return { ...a, favorite: nextFav };
+          }),
+        };
+      })
+    );
+    onNotify(
+      nextFav
+        ? `Pinned ${targetAppName} to Favorites`
+        : `Removed ${targetAppName} from Favorites`,
+      'star',
+      nextFav ? 'Available in Quick Favorites bar' : 'Unstarred from top bar'
+    );
+  };
+
+  const handleLaunchAllInDrawer = async (
+    drawerId: string,
+    appsToLaunch: AppItem[]
+  ) => {
+    if (appsToLaunch.length === 0) return;
+    const targetDrawer = drawers.find((d) => d.id === drawerId);
+    const idsToAdd = appsToLaunch.map((a) => a.id);
+    setLaunchedAppIds((prev) => Array.from(new Set([...prev, ...idsToAdd])));
+    onNotify(
+      `Launched ${appsToLaunch.length} Apps from "${
+        targetDrawer?.title || 'Drawer'
+      }"`,
+      'rocket',
+      appsToLaunch.map((a) => a.name).join(', ')
+    );
+    for (const app of appsToLaunch) {
+      await executeAppCommand(app.cmd);
     }
   };
 
@@ -1349,6 +1436,22 @@ export const DockView: React.FC<DockViewProps> = ({
 
         <button
           type="button"
+          data-testid="filter-running-apps-btn"
+          aria-pressed={onlyRunningFilter}
+          onClick={() => setOnlyRunningFilter((prev) => !prev)}
+          title="Filter drawers to show only currently running applications"
+          className={`px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 transition shrink-0 ${
+            onlyRunningFilter
+              ? 'bg-emerald-600/30 border border-emerald-400/50 text-emerald-200'
+              : 'bg-slate-800/80 text-slate-400 hover:text-white'
+          }`}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+          <span>Running</span>
+        </button>
+
+        <button
+          type="button"
           data-testid="collapse-all-drawers-btn"
           aria-pressed={allDrawersCollapsed}
           aria-label={
@@ -1376,12 +1479,46 @@ export const DockView: React.FC<DockViewProps> = ({
         </button>
       </div>
 
+      {/* Quick Favorites Strip (Shown when 1+ apps are starred) */}
+      {favoriteApps.length > 0 && (
+        <div
+          data-testid="dock-favorites-bar"
+          role="region"
+          aria-label="Quick Favorites"
+          className="px-3 py-2 rounded-2xl bg-amber-950/20 border border-amber-500/30 flex items-center gap-2 overflow-x-auto shrink-0"
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-300 flex items-center gap-1 shrink-0">
+            <Star className="w-3 h-3 fill-current" aria-hidden="true" />
+            <span>Favorites</span>
+          </span>
+          <div className="flex items-center gap-1.5">
+            {favoriteApps.map(({ app }) => (
+              <button
+                key={`fav-chip-${app.id}`}
+                type="button"
+                data-testid={`favorite-chip-${app.id}`}
+                onClick={() => handleLaunchApp(app)}
+                title={`Quick Launch ${app.name} (${app.cmd})`}
+                className="px-2.5 py-1 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 hover:border-amber-400/50 text-xs text-slate-100 flex items-center gap-1.5 transition shrink-0"
+              >
+                <DynamicIcon
+                  name={app.icon || 'app-window'}
+                  className="w-3.5 h-3.5 text-amber-300"
+                  aria-hidden="true"
+                />
+                <span>{app.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Drawers Container */}
       <div
         id="drawers-list-container"
         className="flex-1 overflow-y-auto space-y-4 pr-1"
       >
-        {filterText && totalApps === 0 && (
+        {(filterText || onlyRunningFilter) && totalApps === 0 && (
           <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center justify-between gap-3">
             <div className="text-xs text-slate-300">
               No applications match <span className="font-mono text-indigo-300">"{searchQuery}"</span>.
@@ -1402,18 +1539,15 @@ export const DockView: React.FC<DockViewProps> = ({
         )}
 
         {visibleDrawers.map((drawer) => {
-          const matchedApps = drawer.apps.filter(
-            (a) =>
-              a.name.toLowerCase().includes(filterText) ||
-              a.cmd.toLowerCase().includes(filterText)
-          );
+          const matchedApps = drawer.apps.filter(matchesAppFilter);
           const sortedApps = sortDrawerApps(matchedApps, drawer.sortBy);
+          const drawerIndex = drawers.findIndex((d) => d.id === drawer.id);
           return (
             <DrawerCard
               key={drawer.id}
               drawer={drawer}
               filteredApps={sortedApps}
-              isFiltering={Boolean(filterText)}
+              isFiltering={Boolean(filterText || onlyRunningFilter)}
               canDeleteDrawer={drawers.length > 1}
               isLocked={isLocked}
               dockEffect={dockEffect}
@@ -1433,6 +1567,11 @@ export const DockView: React.FC<DockViewProps> = ({
               onReorderApp={handleReorderApp}
               onDeleteApp={handleDeleteApp}
               onEditApp={openEditAppModal}
+              onLaunchAll={handleLaunchAllInDrawer}
+              onToggleFavoriteApp={handleToggleFavoriteApp}
+              canMoveUp={drawerIndex > 0}
+              canMoveDown={drawerIndex !== -1 && drawerIndex < drawers.length - 1}
+              onMoveDrawer={handleMoveDrawer}
             />
           );
         })}

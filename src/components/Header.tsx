@@ -8,6 +8,8 @@ import {
   Search,
   PanelLeftClose,
   PanelRightClose,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 import { PanelEdge, TabId } from '../types/sideflow';
 import { SideFlowIcon } from './SideFlowIcon';
@@ -22,6 +24,8 @@ interface HeaderProps {
   shortcutLabel: string;
   isDictating?: boolean;
   effectiveEdge?: PanelEdge;
+  isWideStudio?: boolean;
+  onToggleWideStudio?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -34,6 +38,8 @@ export const Header: React.FC<HeaderProps> = ({
   shortcutLabel,
   isDictating = false,
   effectiveEdge = 'right',
+  isWideStudio = false,
+  onToggleWideStudio,
 }) => {
   const navTabs: {
     id: TabId;
@@ -204,6 +210,35 @@ export const Header: React.FC<HeaderProps> = ({
             <kbd className="cq-header-cmdk font-mono text-[10px] text-slate-300 bg-slate-950/90 border border-slate-700/80 px-1.5 py-0.5 rounded-md">
               Ctrl+K
             </kbd>
+          </button>
+        )}
+        {onToggleWideStudio && (
+          <button
+            type="button"
+            data-testid="toggle-wide-studio-btn"
+            aria-pressed={isWideStudio}
+            onClick={onToggleWideStudio}
+            aria-label={
+              isWideStudio
+                ? 'Compact Panel Width (35%)'
+                : 'Expand Wide Studio Width (65%)'
+            }
+            title={
+              isWideStudio
+                ? 'Switch to Compact Dock Width (35%)'
+                : 'Expand to Wide Studio Width (65%)'
+            }
+            className={`w-8 h-8 rounded-xl flex items-center justify-center border transition ${
+              isWideStudio
+                ? 'bg-indigo-600/25 border-indigo-500/50 text-indigo-200 hover:text-white'
+                : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800'
+            }`}
+          >
+            {isWideStudio ? (
+              <Minimize2 className="w-3.5 h-3.5" aria-hidden="true" />
+            ) : (
+              <Maximize2 className="w-3.5 h-3.5" aria-hidden="true" />
+            )}
           </button>
         )}
         <button

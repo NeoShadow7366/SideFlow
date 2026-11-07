@@ -9,6 +9,8 @@ import {
   Pencil,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
+  Play,
   UploadCloud,
   SearchX,
 } from 'lucide-react';
@@ -57,6 +59,11 @@ interface DrawerCardProps {
   ) => void;
   onDeleteApp: (drawerId: string, appId: string) => void;
   onEditApp: (app: AppItem, drawerId: string) => void;
+  onLaunchAll?: (drawerId: string, apps: AppItem[]) => void;
+  onToggleFavoriteApp?: (drawerId: string, appId: string) => void;
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
+  onMoveDrawer?: (drawerId: string, direction: 'up' | 'down') => void;
 }
 
 export const DrawerCard: React.FC<DrawerCardProps> = React.memo(({
@@ -82,6 +89,11 @@ export const DrawerCard: React.FC<DrawerCardProps> = React.memo(({
   onReorderApp,
   onDeleteApp,
   onEditApp,
+  onLaunchAll,
+  onToggleFavoriteApp,
+  canMoveUp = false,
+  canMoveDown = false,
+  onMoveDrawer,
 }) => {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -278,6 +290,19 @@ export const DrawerCard: React.FC<DrawerCardProps> = React.memo(({
         )}
 
         <div className="flex items-center gap-1 shrink-0">
+          {onLaunchAll && filteredApps.length > 0 && (
+            <button
+              type="button"
+              data-testid={`drawer-launch-all-${drawer.id}`}
+              onClick={() => onLaunchAll(drawer.id, filteredApps)}
+              aria-label={`Launch all apps in ${drawer.title}`}
+              title={`Launch all ${filteredApps.length} apps in "${drawer.title}"`}
+              className="min-h-[24px] px-2 py-0.5 rounded-lg bg-indigo-600/25 hover:bg-indigo-600/40 border border-indigo-500/40 text-[10px] text-indigo-200 hover:text-white flex items-center gap-1 transition"
+            >
+              <Play className="w-2.5 h-2.5 fill-current" aria-hidden="true" />
+              <span className="cq-show-440">Launch All</span>
+            </button>
+          )}
           {drawer.folderPath && onSyncFolder && (
             <button
               type="button"
@@ -328,6 +353,32 @@ export const DrawerCard: React.FC<DrawerCardProps> = React.memo(({
           >
             <Pencil className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
+          {onMoveDrawer && !isLocked && (canMoveUp || canMoveDown) && (
+            <>
+              <button
+                type="button"
+                data-testid={`drawer-move-up-${drawer.id}`}
+                disabled={!canMoveUp}
+                onClick={() => onMoveDrawer(drawer.id, 'up')}
+                aria-label={`Move ${drawer.title} drawer up`}
+                title="Move Drawer Up"
+                className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:text-indigo-300 hover:bg-slate-800 disabled:opacity-30 disabled:pointer-events-none transition"
+              >
+                <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                data-testid={`drawer-move-down-${drawer.id}`}
+                disabled={!canMoveDown}
+                onClick={() => onMoveDrawer(drawer.id, 'down')}
+                aria-label={`Move ${drawer.title} drawer down`}
+                title="Move Drawer Down"
+                className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:text-indigo-300 hover:bg-slate-800 disabled:opacity-30 disabled:pointer-events-none transition"
+              >
+                <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </>
+          )}
           <button
             type="button"
             disabled={!canDeleteDrawer || isLocked}
@@ -369,6 +420,7 @@ export const DrawerCard: React.FC<DrawerCardProps> = React.memo(({
                 onReorderApp={onReorderApp}
                 onDelete={onDeleteApp}
                 onEdit={onEditApp}
+                onToggleFavorite={onToggleFavoriteApp}
               />
             ))
           ) : isFiltering && drawer.apps.length > 0 ? (

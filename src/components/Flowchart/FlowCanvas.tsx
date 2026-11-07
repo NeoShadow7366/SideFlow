@@ -2757,6 +2757,15 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     }));
   };
 
+  const handleSetSubgraphColor = (subgraphId: string, color: AccentColor) => {
+    commitFlowUpdate((prev) => ({
+      ...prev,
+      subgraphs: (prev.subgraphs || []).map((sg) =>
+        sg.id === subgraphId ? { ...sg, color } : sg
+      ),
+    }));
+  };
+
   const handleAutoFitSubgraph = (subgraphId: string) => {
     commitFlowUpdate((prev) => autoFitSubgraphNodes(prev, subgraphId));
     onNotify(
@@ -4940,17 +4949,28 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               id="flow-subgraphs-layer"
               className="absolute inset-0 w-full h-full pointer-events-none"
             >
-              {subgraphBoundsList.map((bounds) => (
+              {subgraphBoundsList.map((bounds) => {
+                const sgColor = bounds.color || 'indigo';
+                const sgBorderMap: Record<AccentColor, string> = {
+                  indigo: 'border-indigo-400/40 bg-slate-900/45',
+                  cyan: 'border-cyan-400/50 bg-cyan-950/20',
+                  emerald: 'border-emerald-400/50 bg-emerald-950/20',
+                  amber: 'border-amber-400/50 bg-amber-950/20',
+                  rose: 'border-rose-400/50 bg-rose-950/20',
+                  purple: 'border-purple-400/50 bg-purple-950/20',
+                };
+                return (
                 <div
                   key={bounds.id}
                   data-testid={`flow-subgraph-${bounds.id}`}
+                  data-subgraph-color={sgColor}
                   style={{
                     left: `${bounds.x}px`,
                     top: `${bounds.y}px`,
                     width: `${bounds.width}px`,
                     height: `${bounds.height}px`,
                   }}
-                  className="absolute rounded-2xl bg-slate-900/45 border border-dashed border-indigo-400/40 pointer-events-none"
+                  className={`absolute rounded-2xl border border-dashed pointer-events-none ${sgBorderMap[sgColor]}`}
                 >
                   <div
                     onMouseDown={(e) => {
@@ -5037,6 +5057,33 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                       </button>
                     )}
                     <div className="flex items-center gap-1">
+                      <div
+                        role="group"
+                        aria-label={`Color theme for subgraph ${bounds.title}`}
+                        className="flex items-center gap-0.5 mr-0.5"
+                      >
+                        {(
+                          ['indigo', 'cyan', 'emerald', 'amber', 'rose'] as const
+                        ).map((c) => (
+                          <button
+                            key={`sg-color-${bounds.id}-${c}`}
+                            type="button"
+                            data-testid={`subgraph-color-${bounds.id}-${c}`}
+                            aria-label={`Set subgraph ${bounds.title} color to ${c}`}
+                            aria-pressed={sgColor === c}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSetSubgraphColor(bounds.id, c);
+                            }}
+                            className={`w-2.5 h-2.5 rounded-full border ${ACCENT_SWATCH_CLASSES[c]} ${
+                              sgColor === c
+                                ? 'ring-1 ring-white scale-110'
+                                : 'opacity-60 hover:opacity-100'
+                            } transition`}
+                          />
+                        ))}
+                      </div>
                       {bounds.collapsed && (
                         <span
                           data-testid={`subgraph-collapsed-badge-${bounds.id}`}
@@ -5098,7 +5145,8 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                     </div>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
 
             {/* SVG Layer for Sequence Lifelines, Snap Guides, Draft Line & Directed Arrows */}

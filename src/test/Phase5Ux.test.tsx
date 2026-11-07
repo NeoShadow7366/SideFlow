@@ -618,6 +618,87 @@ describe('SideFlow Phase 5 UX Suite — Global Command Palette & Flowchart Minim
       // Expand subgraph back
       fireEvent.click(screen.getByTestId('subgraph-collapse-sg_auth'));
       expect(screen.getByTestId('flow-node-n1')).toBeInTheDocument();
+
+      // 6. Custom Subgraph Accent Color Swatches (v1.9.0)
+      fireEvent.click(screen.getByTestId('subgraph-color-sg_auth-emerald'));
+      expect(currentFlow.subgraphs?.[0]?.color).toBe('emerald');
+      expect(screen.getByTestId('flow-subgraph-sg_auth')).toHaveAttribute(
+        'data-subgraph-color',
+        'emerald'
+      );
+    });
+
+    it('supports v1.9.0 cross-module enhancements: Dock Launch All, Favorites, Drawer Move, Running Filter, Notes List->Flow, Tag Filter, Duplicate, Checklist Progress, LucidModal Preview, and Wide Studio Toggle', () => {
+      render(<App />);
+
+      // Area 4: Global Panel & Header Wide Studio Toggle (35% <-> 65%)
+      const sidePanel = screen.getByTestId('side-panel');
+      expect(sidePanel).toHaveAttribute('data-width-percent', '35');
+      const studioToggleBtn = screen.getByTestId('toggle-wide-studio-btn');
+      fireEvent.click(studioToggleBtn);
+      expect(sidePanel).toHaveAttribute('data-width-percent', '65');
+      fireEvent.click(studioToggleBtn);
+      expect(sidePanel).toHaveAttribute('data-width-percent', '35');
+
+      // Area 1: ObjectDock Drawers — Star Favorite App, Launch All, Move Drawer, Running Filter
+      fireEvent.click(screen.getByTestId('app-favorite-btn-app-1'));
+      expect(screen.getByTestId('dock-favorites-bar')).toBeInTheDocument();
+      expect(screen.getByTestId('favorite-chip-app-1')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('drawer-launch-all-drawer-dev'));
+      fireEvent.click(screen.getByTestId('drawer-move-down-drawer-dev'));
+
+      const runningFilterBtn = screen.getByTestId('filter-running-apps-btn');
+      fireEvent.click(runningFilterBtn);
+      expect(runningFilterBtn).toHaveAttribute('aria-pressed', 'true');
+      fireEvent.click(runningFilterBtn);
+
+      // Area 2: Voice & Markdown Notes — Checklist Progress, Reset Tasks, Tag Filter, Duplicate Note, and List -> Flow
+      fireEvent.click(screen.getByRole('tab', { name: /Notes/i }));
+      const noteEditor = screen.getByLabelText(/Note Body/i);
+      fireEvent.change(noteEditor, {
+        target: {
+          value: '- [x] Start Release\n- [ ] Smoke Test Pass?\n- [ ] Ship v1.9.0',
+        },
+      });
+      expect(screen.getByTestId('md-task-progress-badge')).toHaveTextContent(
+        '1/3 Done'
+      );
+      fireEvent.click(screen.getByTestId('reset-md-tasks-btn'));
+      expect(screen.getByTestId('md-task-progress-badge')).toHaveTextContent(
+        '0/3 Done'
+      );
+
+      // Add a tag and filter by clicking the #tag pill
+      fireEvent.click(screen.getByRole('button', { name: /Add Tag/i }));
+      const tagInput = screen.getByLabelText(/New Note Tag/i);
+      fireEvent.change(tagInput, { target: { value: 'release' } });
+      fireEvent.submit(tagInput.closest('form')!);
+      fireEvent.click(screen.getByTestId('note-tag-filter-release'));
+      expect(screen.getByTestId('active-tag-filter-pill')).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('active-tag-filter-pill'));
+
+      // Duplicate Note
+      fireEvent.click(screen.getByTestId('duplicate-note-btn'));
+      expect(
+        (screen.getByLabelText(/Note Title/i) as HTMLInputElement).value
+      ).toContain('(Copy)');
+
+      // Convert List -> Flow (switches to Flow tab and loads 3 nodes onto canvas)
+      fireEvent.click(screen.getByTestId('convert-note-to-flow-btn'));
+      expect(screen.getByTestId('flow-node-n1')).toHaveTextContent(
+        'Start Release'
+      );
+      expect(screen.getByTestId('flow-node-n2')).toHaveTextContent(
+        'Smoke Test Pass?'
+      );
+
+      // Area 3: LucidModal Live SVG Preview & .mmd Download
+      fireEvent.click(
+        screen.getByRole('button', { name: /Lucidchart Sync/i })
+      );
+      expect(screen.getByTestId('lucid-live-svg-preview')).toBeInTheDocument();
+      expect(screen.getByTestId('lucid-download-mmd-btn')).toBeInTheDocument();
     });
   });
 });

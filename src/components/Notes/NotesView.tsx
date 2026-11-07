@@ -24,6 +24,8 @@ import {
   ChevronUp,
   FolderOpen,
   Copy,
+  CopyPlus,
+  RotateCcw,
   Download,
   Braces,
   FileCode2,
@@ -55,6 +57,7 @@ import {
 } from '../../utils/adf';
 import {
   computeDagLayout,
+  convertMarkdownListToFlowchart,
   generateStandaloneSVG,
   parseMermaidCode,
   renderCachedMermaidPreview,
@@ -172,6 +175,9 @@ export const NotesView: React.FC<NotesViewProps> = ({
   const activeNoteId = controlledActiveNoteId ?? internalActiveNoteId;
   const setActiveNoteId = onChangeActiveNoteId ?? setInternalActiveNoteId;
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [selectedTagFilter, setSelectedTagFilter] = useState<string | null>(
+    null
+  );
   const [viewMode, setViewMode] = useLocalStorage<EditorViewMode>(
     'sideflow_notes_view_mode',
     'edit'
@@ -1013,6 +1019,75 @@ export const NotesView: React.FC<NotesViewProps> = ({
     handleUpdateCurrentNote({ body: lines.join('\n') }, true);
   };
 
+  const handleResetMarkdownChecklist = () => {
+    const nextBody = (currentNote.body || '').replace(
+      /^(\s*[-*]\s+)\[[xX]\]/gm,
+      '$1[ ]'
+    );
+    if (nextBody === currentNote.body) return;
+    lastDialogueTurnRef.current = null;
+    handleUpdateCurrentNote({ body: nextBody }, true);
+    onNotify(
+      'Reset Checklist Tasks',
+      'check',
+      `Unchecked all tasks in "${currentNote.title || 'Untitled'}"`
+    );
+  };
+
+  const handleDuplicateCurrentNote = () => {
+    lastDialogueTurnRef.current = null;
+    const clonedAdf = currentNote.adfDoc
+      ? (JSON.parse(JSON.stringify(currentNote.adfDoc)) as AdfDocNode)
+      : undefined;
+    const duplicated: NoteItem = {
+      id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      title: `${currentNote.title || 'Untitled'} (Copy)`,
+      body: currentNote.body || '',
+      format: currentFormat,
+      ...(clonedAdf ? { adfDoc: clonedAdf } : {}),
+      updatedAt: Date.now(),
+      color: currentNote.color || 'indigo',
+      pinned: false,
+      tags: [...(currentNote.tags || [])],
+    };
+    latestNotesRef.current = [...latestNotesRef.current, duplicated];
+    onChangeNotes((prev) => [...prev, duplicated]);
+    setActiveNoteId(duplicated.id);
+    onNotify(
+      `Duplicated "${currentNote.title || 'Untitled'}"`,
+      'copy',
+      `Created "${duplicated.title}"`
+    );
+  };
+
+  const handleConvertNoteToFlow = () => {
+    if (!onOpenMermaidInFlow) return;
+    const el = editorRef.current;
+    const selectedText =
+      currentFormat === 'markdown' &&
+      el &&
+      typeof el.selectionStart === 'number' &&
+      typeof el.selectionEnd === 'number' &&
+      el.selectionEnd > el.selectionStart
+        ? el.value.slice(el.selectionStart, el.selectionEnd)
+        : '';
+    const sourceMarkdown = (selectedText || effectiveTextForStats || '').trim();
+    const generatedFlow = convertMarkdownListToFlowchart(
+      sourceMarkdown,
+      currentNote.title || 'Note Steps'
+    );
+    if (!generatedFlow) {
+      onNotify(
+        'Nothing to Convert',
+        'zap',
+        'Add bullet items (- Step) or checklist items (- [ ] Task) first',
+        { variant: 'warning' }
+      );
+      return;
+    }
+    onOpenMermaidInFlow(generatedFlow);
+  };
+
   const handleCreateNewNote = () => {
     lastDialogueTurnRef.current = null;
     const newNote: NoteItem = {
@@ -1297,7 +1372,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
   // Sort pinned notes first and filter by search query
   const sortedAndFilteredNotes = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    const filtered = q
+    const byQuery = q
       ? notes.filter(
           (n) =>
             (n.title || '').toLowerCase().includes(q) ||
@@ -1306,13 +1381,21 @@ export const NotesView: React.FC<NotesViewProps> = ({
         )
       : notes;
 
+    const filtered = selectedTagFilter
+      ? byQuery.filter((n) =>
+          (n.tags || []).some(
+            (t) => t.toLowerCase() === selectedTagFilter.toLowerCase()
+          )
+        )
+      : byQuery;
+
     return [...filtered].sort((a, b) => {
       if (Boolean(a.pinned) !== Boolean(b.pinned)) {
         return a.pinned ? -1 : 1;
       }
       return 0;
     });
-  }, [notes, searchQuery]);
+  }, [notes, searchQuery, selectedTagFilter]);
 
   // Calculate word/char counts and task checklist progress across both MD & ADF modes
   const effectiveTextForStats =
@@ -2482,6 +2565,19 @@ export const NotesView: React.FC<NotesViewProps> = ({
               />
             </div>
 
+            {selectedTagFilter && (
+              <button
+                type="button"
+                data-testid="active-tag-filter-pill"
+                onClick={() => setSelectedTagFilter(null)}
+                title={`Filtering notes by #${selectedTagFilter} (Click to clear)`}
+                className="px-2 py-1 rounded-xl bg-indigo-600/25 border border-indigo-400/50 text-[10px] font-medium text-indigo-200 flex items-center gap-1 shrink-0"
+              >
+                <span>#{selectedTagFilter}</span>
+                <X className="w-2.5 h-2.5" aria-hidden="true" />
+              </button>
+            )}
+
             <button
               type="button"
               aria-label="New Note"
@@ -2709,6 +2805,17 @@ export const NotesView: React.FC<NotesViewProps> = ({
               <Copy className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
 
+            <button
+              type="button"
+              data-testid="duplicate-note-btn"
+              onClick={handleDuplicateCurrentNote}
+              aria-label="Duplicate Note"
+              title="Duplicate Note (Create a copy of this note)"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-indigo-300 hover:bg-slate-900 transition"
+            >
+              <CopyPlus className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+
             {currentFormat === 'adf' && (
               <button
                 type="button"
@@ -2904,6 +3011,41 @@ export const NotesView: React.FC<NotesViewProps> = ({
                   >
                     <GitBranch className="w-3.5 h-3.5" aria-hidden="true" />
                   </button>
+                  {onOpenMermaidInFlow && (
+                    <button
+                      type="button"
+                      data-testid="convert-note-to-flow-btn"
+                      onClick={handleConvertNoteToFlow}
+                      aria-label="Convert List to Flowchart"
+                      title="Convert note bullets or checklist items into an interactive Flowchart on the Flow tab"
+                      className="min-h-[24px] px-2 py-0.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/30 text-[10px] font-medium text-emerald-300 hover:text-white flex items-center gap-1 transition ml-0.5"
+                    >
+                      <GitBranch className="w-3 h-3" aria-hidden="true" />
+                      <span>List → Flow</span>
+                    </button>
+                  )}
+                  {taskStats.total > 0 && (
+                    <div className="inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded-lg bg-slate-950/90 border border-slate-800 text-[10px]">
+                      <span
+                        data-testid="md-task-progress-badge"
+                        className="font-mono text-indigo-300"
+                      >
+                        {taskStats.completed}/{taskStats.total} Done
+                      </span>
+                      {taskStats.completed > 0 && (
+                        <button
+                          type="button"
+                          data-testid="reset-md-tasks-btn"
+                          onClick={handleResetMarkdownChecklist}
+                          aria-label="Reset completed checklist tasks"
+                          title="Uncheck all completed tasks (- [x] → - [ ])"
+                          className="p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-amber-300 transition"
+                        >
+                          <RotateCcw className="w-2.5 h-2.5" aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </>
             )}
@@ -2912,22 +3054,43 @@ export const NotesView: React.FC<NotesViewProps> = ({
 
             {/* Tags Pills & Add Tag */}
             <div className="flex items-center gap-1 flex-wrap">
-              {(currentNote.tags || []).map((tag) => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center gap-0.5 pl-1.5 pr-0.5 py-0.5 rounded-md bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 text-[10px]"
-                >
-                  #{tag}
-                  <button
-                    type="button"
-                    aria-label={`Remove tag ${tag}`}
-                    onClick={() => handleRemoveTag(tag)}
-                    className="w-6 h-6 inline-flex items-center justify-center rounded hover:bg-indigo-500/20 hover:text-white transition"
+              {(currentNote.tags || []).map((tag) => {
+                const isTagFiltered =
+                  selectedTagFilter?.toLowerCase() === tag.toLowerCase();
+                return (
+                  <span
+                    key={tag}
+                    className={`inline-flex items-center gap-0.5 pl-1.5 pr-0.5 py-0.5 rounded-md border text-[10px] transition ${
+                      isTagFiltered
+                        ? 'bg-indigo-600/35 text-white border-indigo-400'
+                        : 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'
+                    }`}
                   >
-                    <X className="w-2.5 h-2.5" aria-hidden="true" />
-                  </button>
-                </span>
-              ))}
+                    <button
+                      type="button"
+                      data-testid={`note-tag-filter-${tag}`}
+                      aria-pressed={isTagFiltered}
+                      onClick={() =>
+                        setSelectedTagFilter((prev) =>
+                          prev?.toLowerCase() === tag.toLowerCase() ? null : tag
+                        )
+                      }
+                      title={`Filter notes by #${tag}`}
+                      className="hover:underline cursor-pointer"
+                    >
+                      #{tag}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Remove tag ${tag}`}
+                      onClick={() => handleRemoveTag(tag)}
+                      className="w-6 h-6 inline-flex items-center justify-center rounded hover:bg-indigo-500/20 hover:text-white transition"
+                    >
+                      <X className="w-2.5 h-2.5" aria-hidden="true" />
+                    </button>
+                  </span>
+                );
+              })}
               {showTagInput ? (
                 <form
                   onSubmit={handleAddTag}

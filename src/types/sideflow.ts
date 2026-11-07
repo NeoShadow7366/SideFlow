@@ -47,6 +47,7 @@ export interface AppItem {
   color: AccentColor;
   customIconUrl?: string;
   hotkey?: string;   // Optional custom shortcut (e.g. "Alt+1" or "Ctrl+Shift+V")
+  favorite?: boolean;
 }
 
 export interface SystemMetrics {
@@ -138,6 +139,7 @@ export interface FlowSubgraph {
   title: string;
   nodeIds: string[];
   collapsed?: boolean;
+  color?: AccentColor;
 }
 
 export interface FlowchartState {
