@@ -37,6 +37,11 @@ import {
   Map as MapIcon,
   Search,
   ArrowLeftRight,
+  GitBranch,
+  Activity,
+  ChevronDown,
+  ChevronRight,
+  Minimize2,
 } from 'lucide-react';
 import {
   AccentColor,
@@ -61,11 +66,16 @@ import {
 import {
   ACCENT_HEX_PALETTE,
   alignOrDistributeNodes,
+  analyzeFlowchartHealth,
+  autoFitSubgraphNodes,
+  branchDecisionYesNo,
+  computeConnectedPath,
   computeDagLayout,
   computeEdgeGeometry,
   computeParallelEdgeOffsets,
   computeSubgraphBounds,
   FlowAlignmentMode,
+  FlowchartHealthIssue,
   formatMermaidEdgeOperator,
   formatSequenceMessageOperator,
   generateMermaidCode,
@@ -957,6 +967,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   const [shapeCategory, setShapeCategory] = useState<ShapeCategoryId>('all');
   const [nodeSearchQuery, setNodeSearchQuery] = useState<string>('');
   const [nodeSearchFocusIdx, setNodeSearchFocusIdx] = useState<number>(0);
+  const [tracePathMode, setTracePathMode] = useState<boolean>(false);
+  const [isHealthPopoverOpen, setIsHealthPopoverOpen] = useState<boolean>(false);
+  const draggingWaypointRef = useRef<{ edgeIdx: number } | null>(null);
 
   // Transient drag coordinate map to prevent localStorage/IPC thrashing on mousemove
   const [dragNodePositions, setDragNodePositions] = useState<Record<
@@ -1081,16 +1094,19 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         };
       }
 
+      const activeCurve = edge.curve || currentEdgeCurve;
       const geom = computeEdgeGeometry(
         fromEntry.node,
         toEntry.node,
         fromEntry.width,
         fromEntry.height,
         flowData.direction,
-        edge.curve || currentEdgeCurve,
+        activeCurve,
         toEntry.width,
         toEntry.height,
-        parallelOffsets[idx] || 0
+        parallelOffsets[idx] || 0,
+        edge.waypoint,
+        activeCurve === 'orthogonal' ? effectiveNodes : undefined
       );
       return {
         edge,
@@ -1336,6 +1352,56 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   );
 
   // One-click directional quick-add & auto-connect (Lucidchart / draw.io style)
+  const handleSplitDecisionYesNo = useCallback(
+    (decisionNodeId: string) => {
+      let spawnedYesId = '';
+      commitFlowUpdate((prev) => {
+        const yesId = allocateUniqueNodeId(prev.nodes);
+        const noId = allocateUniqueNodeId([
+          ...prev.nodes,
+          { id: yesId, type: 'process', text: '', x: 0, y: 0 },
+        ]);
+        const res = branchDecisionYesNo(prev, decisionNodeId, yesId, noId);
+        if (!res) return prev;
+        spawnedYesId = res.yesId;
+        return res.state;
+      });
+      if (spawnedYesId) {
+        setSelectedNodeId(spawnedYesId);
+        setSelectedNodeIds([spawnedYesId]);
+        onNotify(
+          'Split Decision into Yes / No',
+          'check',
+          'Created Yes and No branch steps'
+        );
+      }
+    },
+    [commitFlowUpdate, onNotify]
+  );
+
+  const handleQuickAddSibling = useCallback(
+    (node: FlowNode) => {
+      const parentEdge = flowDataRef.current.edges.find((e) => e.to === node.id);
+      const parentNode = parentEdge
+        ? flowDataRef.current.nodes.find((n) => n.id === parentEdge.from)
+        : null;
+      if (parentNode) {
+        handleQuickAddDirection(
+          parentNode,
+          directionToPort(flowDataRef.current.direction || 'TD'),
+          node.type
+        );
+        return;
+      }
+      const isHoriz =
+        flowDataRef.current.direction === 'LR' ||
+        flowDataRef.current.direction === 'RL';
+      handleQuickAddDirection(node, isHoriz ? 'bottom' : 'right', node.type);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [commitFlowUpdate]
+  );
+
   const handleQuickAddDirection = useCallback(
     (
       sourceNode: FlowNode,
@@ -1443,6 +1509,30 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   // Unified high-performance pointer move & up listeners (zero localStorage/IPC writes during drag)
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
+      if (draggingWaypointRef.current && canvasWrapperRef.current) {
+        const { edgeIdx } = draggingWaypointRef.current;
+        const rect =
+          cachedWrapperRectRef.current ||
+          canvasWrapperRef.current.getBoundingClientRect();
+        const wx = Math.round(
+          (e.clientX - rect.left - panRef.current.x) / zoomRef.current
+        );
+        const wy = Math.round(
+          (e.clientY - rect.top - panRef.current.y) / zoomRef.current
+        );
+        const snappedX = snapToGridRef.current ? Math.round(wx / 8) * 8 : wx;
+        const snappedY = snapToGridRef.current ? Math.round(wy / 8) * 8 : wy;
+        commitFlowUpdate((prev) => ({
+          ...prev,
+          edges: prev.edges.map((ed, idx) =>
+            idx === edgeIdx
+              ? { ...ed, waypoint: { x: snappedX, y: snappedY } }
+              : ed
+          ),
+        }));
+        return;
+      }
+
       if (panningCanvasRef.current) {
         const pan = panningCanvasRef.current;
         const dx = Math.round(e.clientX - pan.lastClientX);
@@ -1732,6 +1822,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
 
       draggingNodeIdRef.current = null;
       draggingSubgraphRef.current = null;
+      draggingWaypointRef.current = null;
       panningCanvasRef.current = null;
       cachedWrapperRectRef.current = null;
     };
@@ -2657,6 +2748,24 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     setEditingSubgraphId(null);
   };
 
+  const handleToggleCollapseSubgraph = (subgraphId: string) => {
+    commitFlowUpdate((prev) => ({
+      ...prev,
+      subgraphs: (prev.subgraphs || []).map((sg) =>
+        sg.id === subgraphId ? { ...sg, collapsed: !sg.collapsed } : sg
+      ),
+    }));
+  };
+
+  const handleAutoFitSubgraph = (subgraphId: string) => {
+    commitFlowUpdate((prev) => autoFitSubgraphNodes(prev, subgraphId));
+    onNotify(
+      'Auto-Fitted Subgraph',
+      'check',
+      'Compacted and aligned member nodes inside container'
+    );
+  };
+
   const handleCycleNodeColor = (nodeId: string) => {
     commitFlowUpdate((prev) => ({
       ...prev,
@@ -2872,6 +2981,30 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     );
   };
 
+  const handleSetEdgeWaypoint = (
+    index: number,
+    waypoint?: { x: number; y: number }
+  ) => {
+    commitFlowUpdate((prev) => ({
+      ...prev,
+      edges: prev.edges.map((edge, idx) => {
+        if (idx !== index) return edge;
+        if (!waypoint) {
+          const { waypoint: _removed, ...rest } = edge;
+          return rest;
+        }
+        return { ...edge, waypoint };
+      }),
+    }));
+    onNotify(
+      waypoint ? 'Added Connector Bend Waypoint' : 'Reset Connector Waypoint',
+      'check',
+      waypoint
+        ? 'Drag the cyan midpoint handle to customize routing'
+        : 'Restored automatic connector routing'
+    );
+  };
+
   const startEditingEdge = (
     index: number,
     currentLabel?: string,
@@ -3045,11 +3178,29 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   ) => {
     if (editingNodeId === node.id || e.target !== e.currentTarget) return;
 
+    // Alt+Shift+Enter spawns a connected sibling step sharing the same parent
+    if (
+      e.key === 'Enter' &&
+      e.shiftKey &&
+      (e.altKey || e.ctrlKey || e.metaKey)
+    ) {
+      e.preventDefault();
+      handleQuickAddSibling(node);
+      return;
+    }
+
     // Alt+Enter or Ctrl/Cmd+Enter quick-branches a connected node in the current flow direction
     // (Plain Tab / Shift+Tab navigates focus naturally across nodes & controls per WCAG 2.1.2)
     if (e.key === 'Enter' && (e.altKey || e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       handleQuickAddDirection(node, directionToPort(currentDirection));
+      return;
+    }
+
+    // Alt+B splits node into Yes / No decision branches
+    if (e.altKey && e.key.toLowerCase() === 'b') {
+      e.preventDefault();
+      handleSplitDecisionYesNo(node.id);
       return;
     }
 
@@ -3262,6 +3413,78 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         .filter((b): b is NonNullable<typeof b> => b !== null),
     [flowData.subgraphs, effectiveNodes]
   );
+
+  const collapsedSubgraphNodeIds = useMemo(() => {
+    const hidden = new Set<string>();
+    for (const sg of flowData.subgraphs || []) {
+      if (sg.collapsed) {
+        for (const id of sg.nodeIds) {
+          hidden.add(id);
+        }
+      }
+    }
+    return hidden;
+  }, [flowData.subgraphs]);
+
+  const healthReport = useMemo(
+    () => analyzeFlowchartHealth(flowData),
+    [flowData]
+  );
+
+  const connectedPath = useMemo(() => {
+    if (!tracePathMode || !selectedNodeId) return null;
+    return computeConnectedPath(flowData, selectedNodeId);
+  }, [tracePathMode, selectedNodeId, flowData]);
+
+  const handleFocusHealthIssue = (issue: FlowchartHealthIssue) => {
+    const targetNode = flowData.nodes.find((n) => n.id === issue.nodeId);
+    if (!targetNode) return;
+    setSelectedNodeId(targetNode.id);
+    setSelectedNodeIds([targetNode.id]);
+    const rect = canvasWrapperRef.current?.getBoundingClientRect();
+    const viewW = rect && rect.width > 80 ? rect.width : 540;
+    const viewH = rect && rect.height > 80 ? rect.height : 340;
+    setPanOffset({
+      x: Math.round(viewW / 2 - (targetNode.x + 72) * zoomLevel),
+      y: Math.round(viewH / 2 - (targetNode.y + 26) * zoomLevel),
+    });
+  };
+
+  const handleFixHealthIssue = (issue: FlowchartHealthIssue) => {
+    if (issue.kind === 'unbranched-decision') {
+      handleSplitDecisionYesNo(issue.nodeId);
+      return;
+    }
+    if (issue.kind === 'dead-end') {
+      commitFlowUpdate((prev) => ({
+        ...prev,
+        nodes: prev.nodes.map((n) =>
+          n.id === issue.nodeId ? { ...n, type: 'start', color: 'emerald' } : n
+        ),
+      }));
+      onNotify(
+        'Converted Dead-End to Terminal',
+        'check',
+        'Marked end step as a Terminal shape'
+      );
+      return;
+    }
+    if (issue.kind === 'orphan') {
+      commitFlowUpdate((prev) => {
+        const anchor = prev.nodes.find((n) => n.id !== issue.nodeId);
+        if (!anchor) return prev;
+        return {
+          ...prev,
+          edges: [...prev.edges, { from: anchor.id, to: issue.nodeId }],
+        };
+      });
+      onNotify(
+        'Connected Orphan Node',
+        'check',
+        'Linked isolated node into diagram flow'
+      );
+    }
+  };
 
   const canUndo = historyRef.current.past.length > 0;
   const canRedo = historyRef.current.future.length > 0;
@@ -3834,6 +4057,114 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   >
                     Jump
                   </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          <button
+            type="button"
+            data-testid="toggle-critical-path-btn"
+            aria-pressed={tracePathMode}
+            onClick={() => setTracePathMode((prev) => !prev)}
+            title="Highlight upstream & downstream dependency chain for the selected node"
+            className={`min-h-[24px] flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] transition ${
+              tracePathMode
+                ? 'bg-emerald-600/35 border-emerald-400/70 text-emerald-100 shadow'
+                : 'bg-slate-900/80 hover:bg-slate-800 border-indigo-500/30 text-indigo-200'
+            }`}
+          >
+            <GitBranch className="w-3 h-3 text-emerald-300" aria-hidden="true" />
+            <span>Trace Path</span>
+          </button>
+
+          <div className="relative">
+            <button
+              type="button"
+              data-testid="toggle-flow-health-btn"
+              aria-expanded={isHealthPopoverOpen}
+              onClick={() => setIsHealthPopoverOpen((prev) => !prev)}
+              title="Inspect diagram structure (orphan nodes, unbranched decisions, dead ends, cycles)"
+              className={`min-h-[24px] flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] transition ${
+                healthReport.issues.length > 0
+                  ? 'bg-amber-950/60 hover:bg-amber-900/70 border-amber-400/50 text-amber-200'
+                  : 'bg-emerald-950/50 hover:bg-emerald-900/60 border-emerald-500/40 text-emerald-200'
+              }`}
+            >
+              <Activity className="w-3 h-3" aria-hidden="true" />
+              <span>Health</span>
+              <span
+                data-testid="flow-health-issue-count"
+                className="px-1 rounded bg-slate-950/80 font-mono text-[10px]"
+              >
+                {healthReport.issues.length}
+              </span>
+            </button>
+
+            {isHealthPopoverOpen && (
+              <div
+                data-testid="flow-health-popover"
+                role="dialog"
+                aria-label="Diagram Health Inspector"
+                className="absolute right-0 top-7 z-40 w-72 bg-slate-950/95 border border-slate-700 rounded-xl p-2.5 shadow-2xl text-xs text-slate-200 space-y-2"
+              >
+                <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                  <span className="font-semibold text-[11px] uppercase tracking-wider text-indigo-300">
+                    Diagram Health Linter
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="Close Diagram Health Inspector"
+                    onClick={() => setIsHealthPopoverOpen(false)}
+                    className="text-slate-400 hover:text-white px-1"
+                  >
+                    ×
+                  </button>
+                </div>
+                {healthReport.issues.length === 0 ? (
+                  <p
+                    data-testid="flow-health-all-clear"
+                    className="text-[11px] text-emerald-300 py-1"
+                  >
+                    All Checks Passed — 0 Structural Issues
+                  </p>
+                ) : (
+                  <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
+                    {healthReport.issues.map((issue) => (
+                      <li
+                        key={issue.id}
+                        data-testid={`health-issue-${issue.id}`}
+                        className="p-2 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1"
+                      >
+                        <div className="font-medium text-[11px] text-amber-200">
+                          {issue.title}
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          {issue.suggestion}
+                        </div>
+                        <div className="flex items-center gap-1.5 pt-0.5">
+                          <button
+                            type="button"
+                            data-testid={`health-issue-focus-${issue.nodeId}`}
+                            onClick={() => handleFocusHealthIssue(issue)}
+                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-cyan-200 transition"
+                          >
+                            Jump
+                          </button>
+                          {issue.kind !== 'cycle' && (
+                            <button
+                              type="button"
+                              data-testid={`health-issue-fix-${issue.nodeId}`}
+                              onClick={() => handleFixHealthIssue(issue)}
+                              className="px-2 py-0.5 rounded bg-indigo-600/50 hover:bg-indigo-600 text-[10px] text-white transition"
+                            >
+                              Auto-Fix
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </div>
             )}
@@ -4705,19 +5036,66 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         {bounds.title}
                       </button>
                     )}
-                    <button
-                      type="button"
-                      aria-label={`Remove subgraph ${bounds.title}`}
-                      title="Ungroup subgraph"
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRemoveSubgraph(bounds.id);
-                      }}
-                      className="text-slate-400 hover:text-rose-400 text-xs leading-none px-1"
-                    >
-                      ×
-                    </button>
+                    <div className="flex items-center gap-1">
+                      {bounds.collapsed && (
+                        <span
+                          data-testid={`subgraph-collapsed-badge-${bounds.id}`}
+                          className="px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-400/30 text-[9px] font-mono text-indigo-200"
+                        >
+                          {bounds.memberCount || 0} nodes
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        data-testid={`subgraph-autofit-${bounds.id}`}
+                        aria-label={`Auto-fit nodes in subgraph ${bounds.title}`}
+                        title="Compact and align member nodes inside this subgraph"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleAutoFitSubgraph(bounds.id);
+                        }}
+                        className="p-0.5 rounded hover:bg-slate-800 text-cyan-300 hover:text-white transition"
+                      >
+                        <Minimize2 className="w-3 h-3" aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        data-testid={`subgraph-collapse-${bounds.id}`}
+                        aria-label={`${bounds.collapsed ? 'Expand' : 'Collapse'} subgraph ${bounds.title}`}
+                        aria-expanded={!bounds.collapsed}
+                        title={
+                          bounds.collapsed
+                            ? 'Expand subgraph container'
+                            : 'Collapse subgraph into compact summary bar'
+                        }
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleCollapseSubgraph(bounds.id);
+                        }}
+                        className="p-0.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition"
+                      >
+                        {bounds.collapsed ? (
+                          <ChevronRight className="w-3.5 h-3.5" aria-hidden="true" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Remove subgraph ${bounds.title}`}
+                        title="Ungroup subgraph"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveSubgraph(bounds.id);
+                        }}
+                        className="text-slate-400 hover:text-rose-400 text-xs leading-none px-1"
+                      >
+                        ×
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -4962,17 +5340,32 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               <g id="flow-edges-group">
                 {computedEdges.map((item) => {
                   if (!item) return null;
-                  const { edge, idx, x1, y1, x2, y2, pathData } = item;
+                  const { edge, idx, x1, y1, x2, y2, midX, midY, pathData } = item;
+                  if (
+                    collapsedSubgraphNodeIds.has(edge.from) &&
+                    collapsedSubgraphNodeIds.has(edge.to)
+                  ) {
+                    return null;
+                  }
 
                   const isEdgeSelected = editingEdgeIdx === idx;
                   const isEdgeHovered = hoveredEdgeIdx === idx;
+                  const isPathHighlighted = Boolean(
+                    connectedPath &&
+                      connectedPath.highlightedEdgeIndices.includes(idx)
+                  );
                   const markerSuffix = isEdgeSelected
                     ? '-selected'
-                    : isEdgeHovered
+                    : isEdgeHovered || isPathHighlighted
                       ? '-hover'
                       : '';
 
-                  const strokeWidth = edge.style === 'thick' ? '4' : '2.2';
+                  const strokeWidth =
+                    edge.style === 'thick'
+                      ? '4'
+                      : isPathHighlighted
+                        ? '3.2'
+                        : '2.2';
                   const strokeDasharray =
                     edge.style === 'dotted' ? '6,4' : undefined;
                   const markerStart =
@@ -4990,14 +5383,19 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
 
                   const strokeColor = isEdgeSelected
                     ? '#38bdf8'
-                    : isEdgeHovered
-                      ? '#67e8f9'
-                      : '#818cf8';
+                    : isPathHighlighted
+                      ? '#34d399'
+                      : isEdgeHovered
+                        ? '#67e8f9'
+                        : '#818cf8';
 
                   return (
                     <g
                       key={`${edge.from}-${edge.to}-${idx}`}
                       data-testid={`flow-edge-${idx}`}
+                      data-path-highlighted={
+                        isPathHighlighted ? 'true' : 'false'
+                      }
                       onMouseEnter={() => setHoveredEdgeIdx(idx)}
                       onMouseLeave={() =>
                         setHoveredEdgeIdx((prev) => (prev === idx ? null : prev))
@@ -5066,6 +5464,24 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             fill="#020617"
                             stroke={strokeColor}
                             strokeWidth="1.8"
+                          />
+                          <circle
+                            data-testid={`edge-waypoint-handle-${idx}`}
+                            cx={midX}
+                            cy={midY}
+                            r="5"
+                            fill="#22d3ee"
+                            stroke="#020617"
+                            strokeWidth="1.8"
+                            className="cursor-move"
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              if (canvasWrapperRef.current) {
+                                cachedWrapperRectRef.current =
+                                  canvasWrapperRef.current.getBoundingClientRect();
+                              }
+                              draggingWaypointRef.current = { edgeIdx: idx };
+                            }}
                           />
                         </>
                       )}
@@ -5216,6 +5632,34 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             />
                             <span>Reverse</span>
                           </button>
+                          <button
+                            type="button"
+                            data-testid="edge-set-waypoint-btn"
+                            aria-label="Bend connector waypoint"
+                            title="Add or offset a custom bend waypoint on this connector"
+                            onClick={() =>
+                              handleSetEdgeWaypoint(idx, {
+                                x: Math.round((midX + 48) / 8) * 8,
+                                y: Math.round((midY - 24) / 8) * 8,
+                              })
+                            }
+                            className="min-h-[24px] px-2 py-0.5 rounded bg-slate-800 hover:bg-indigo-600 text-[10px] font-medium text-indigo-200 hover:text-white flex items-center gap-1 transition"
+                          >
+                            <Spline className="w-2.5 h-2.5" aria-hidden="true" />
+                            <span>Bend</span>
+                          </button>
+                          {edge.waypoint && (
+                            <button
+                              type="button"
+                              data-testid="edge-reset-waypoint-btn"
+                              aria-label="Reset connector waypoint"
+                              title="Remove custom waypoint bend and restore automatic routing"
+                              onClick={() => handleSetEdgeWaypoint(idx, undefined)}
+                              className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-rose-600 text-[10px] text-rose-200 hover:text-white transition"
+                            >
+                              Reset Bend
+                            </button>
+                          )}
                           {['Yes', 'No', 'Error'].map((preset) => (
                             <button
                               key={preset}
@@ -5364,6 +5808,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               className="absolute inset-0 w-full h-full pointer-events-none"
             >
               {effectiveNodes.map((node) => {
+                if (collapsedSubgraphNodeIds.has(node.id)) {
+                  return null;
+                }
                 let textTheme = 'text-sky-100';
                 if (node.type === 'decision' || node.type === 'manual') {
                   textTheme = 'text-amber-100';
@@ -5403,6 +5850,10 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 const hasActiveSearch = nodeSearchQuery.trim().length > 0;
                 const isSearchMatch =
                   hasActiveSearch && matchedSearchNodeIds.includes(node.id);
+                const isPathHighlighted = Boolean(
+                  connectedPath &&
+                    connectedPath.highlightedNodeIds.includes(node.id)
+                );
 
                 let shapeClasses = `rounded-xl ${textTheme}`;
                 if (connectMode && connectSourceNodeId === node.id) {
@@ -5412,10 +5863,16 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 } else if (isSearchMatch) {
                   shapeClasses +=
                     ' ring-4 ring-amber-400 shadow-lg shadow-amber-500/30 z-20';
+                } else if (isPathHighlighted) {
+                  shapeClasses +=
+                    ' ring-4 ring-emerald-400 shadow-lg shadow-emerald-500/25 z-20';
                 } else if (isSelected) {
                   shapeClasses += ' ring-2 ring-indigo-400/90';
                 }
-                if (hasActiveSearch && !isSearchMatch) {
+                if (
+                  (hasActiveSearch && !isSearchMatch) ||
+                  (connectedPath && !isPathHighlighted)
+                ) {
                   shapeClasses += ' opacity-35';
                 }
 
@@ -5434,6 +5891,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                     data-color={node.color || ''}
                     data-selected={isSelected ? 'true' : 'false'}
                     data-search-match={isSearchMatch ? 'true' : 'false'}
+                    data-path-highlighted={isPathHighlighted ? 'true' : 'false'}
                     data-testid={`flow-node-${node.id}`}
                     style={{ left: `${node.x}px`, top: `${node.y}px` }}
                     onMouseDown={(e) => handleNodeMouseDown(e, node)}
@@ -5553,6 +6011,17 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                               </button>
                             ))}
                           </div>
+                          <button
+                            type="button"
+                            data-testid={`split-yes-no-btn-${node.id}`}
+                            aria-label={`Split ${node.text} into Yes and No branches`}
+                            title="1-Click Split Yes / No Branches (Alt+B)"
+                            onClick={() => handleSplitDecisionYesNo(node.id)}
+                            className="h-6 px-1.5 flex items-center gap-0.5 rounded bg-emerald-600/35 hover:bg-emerald-600/60 border border-emerald-400/50 text-[10px] font-medium text-emerald-100 transition"
+                          >
+                            <GitBranch className="w-3 h-3" aria-hidden="true" />
+                            <span>Yes/No</span>
+                          </button>
                           <button
                             type="button"
                             data-testid={`node-duplicate-btn-${node.id}`}

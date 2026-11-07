@@ -515,5 +515,109 @@ describe('SideFlow Phase 5 UX Suite — Global Command Palette & Flowchart Minim
       expect(currentFlow.subgraphs?.[0].title).toContain('Customer');
       expect(currentFlow.nodes.length).toBe(8);
     });
+
+    it('supports 1-click Split Yes/No Decision branching, interactive connector bend waypoints, collapsible/auto-fit subgraphs, and Diagram Health Linter + Critical-Path tracing', () => {
+      let currentFlow: FlowchartState = {
+        nodes: [
+          { id: 'n1', type: 'start', text: 'API Request', x: 120, y: 40 },
+          { id: 'n2', type: 'decision', text: 'Is Authorized?', x: 120, y: 150 },
+          { id: 'n_orphan', type: 'process', text: 'Isolated Step', x: 380, y: 40 },
+        ],
+        edges: [{ from: 'n1', to: 'n2' }],
+        subgraphs: [
+          {
+            id: 'sg_auth',
+            title: 'Auth Layer',
+            nodeIds: ['n1', 'n2'],
+          },
+        ],
+      };
+
+      const Wrapper = () => {
+        const [flow, setFlow] = React.useState(currentFlow);
+        return (
+          <FlowCanvas
+            flowData={flow}
+            onChangeFlowData={(updater) => {
+              setFlow((prev) => {
+                const next =
+                  typeof updater === 'function' ? updater(prev) : updater;
+                currentFlow = next;
+                return next;
+              });
+            }}
+            onNotify={vi.fn()}
+            panelWidthPercent={65}
+          />
+        );
+      };
+
+      render(<Wrapper />);
+
+      // 1. Diagram Health Linter detects unbranched Decision ('n2') and Orphan Node ('n_orphan')
+      expect(screen.getByTestId('flow-health-issue-count')).toHaveTextContent(
+        '2'
+      );
+      fireEvent.click(screen.getByTestId('toggle-flow-health-btn'));
+      expect(screen.getByTestId('flow-health-popover')).toBeInTheDocument();
+      expect(
+        screen.getByTestId('health-issue-orphan-n_orphan')
+      ).toBeInTheDocument();
+      expect(
+        screen.getByTestId('health-issue-decision-n2')
+      ).toBeInTheDocument();
+
+      // Auto-Fix orphan node via 1-click Health Linter action
+      fireEvent.click(screen.getByTestId('health-issue-fix-n_orphan'));
+      expect(
+        currentFlow.edges.some((e) => e.to === 'n_orphan')
+      ).toBe(true);
+
+      // 2. Select Decision node 'n2' and click 1-Click 'Yes/No' Split button
+      const decisionNode = screen.getByTestId('flow-node-n2');
+      fireEvent.mouseDown(decisionNode, { button: 0 });
+      fireEvent.mouseUp(window);
+      fireEvent.click(screen.getByTestId('split-yes-no-btn-n2'));
+      expect(
+        currentFlow.edges.filter((e) => e.from === 'n2' && e.label === 'Yes')
+          .length
+      ).toBe(1);
+      expect(
+        currentFlow.edges.filter((e) => e.from === 'n2' && e.label === 'No')
+          .length
+      ).toBe(1);
+
+      // 3. Critical-Path Dependency Chain Highlighter ('Trace Path')
+      fireEvent.click(screen.getByTestId('toggle-critical-path-btn'));
+      expect(screen.getByTestId('flow-node-n1')).toHaveAttribute(
+        'data-path-highlighted',
+        'true'
+      );
+      expect(screen.getByTestId('flow-edge-0')).toHaveAttribute(
+        'data-path-highlighted',
+        'true'
+      );
+
+      // 4. Interactive Connector Bend Waypoints (Add Bend & Reset Bend)
+      fireEvent.click(screen.getByTestId('edge-label-pill-0'));
+      fireEvent.click(screen.getByTestId('edge-set-waypoint-btn'));
+      expect(currentFlow.edges[0].waypoint).toBeDefined();
+      expect(
+        screen.getByTestId('edge-waypoint-handle-0')
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('edge-reset-waypoint-btn'));
+      expect(currentFlow.edges[0].waypoint).toBeUndefined();
+
+      // 5. Collapsible Subgraph & 1-Click Auto-Fit Subgraph
+      fireEvent.click(screen.getByTestId('subgraph-autofit-sg_auth'));
+      fireEvent.click(screen.getByTestId('subgraph-collapse-sg_auth'));
+      expect(
+        screen.getByTestId('subgraph-collapsed-badge-sg_auth')
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId('flow-node-n1')).not.toBeInTheDocument();
+      // Expand subgraph back
+      fireEvent.click(screen.getByTestId('subgraph-collapse-sg_auth'));
+      expect(screen.getByTestId('flow-node-n1')).toBeInTheDocument();
+    });
   });
 });

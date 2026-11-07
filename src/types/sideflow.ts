@@ -130,12 +130,14 @@ export interface FlowEdge {
   arrow?: FlowEdgeArrow;
   cardinality?: string;
   curve?: FlowEdgeCurve;
+  waypoint?: { x: number; y: number };
 }
 
 export interface FlowSubgraph {
   id: string;
   title: string;
   nodeIds: string[];
+  collapsed?: boolean;
 }
 
 export interface FlowchartState {

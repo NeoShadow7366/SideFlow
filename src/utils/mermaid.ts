@@ -29,6 +29,8 @@ export interface SubgraphBounds {
   y: number;
   width: number;
   height: number;
+  collapsed?: boolean;
+  memberCount?: number;
 }
 
 export type MermaidTemplateId =
@@ -322,7 +324,9 @@ export function computeSubgraphBounds(
     x: minX,
     y: minY,
     width: Math.max(180, maxX - minX),
-    height: Math.max(96, maxY - minY),
+    height: subgraph.collapsed ? 40 : Math.max(96, maxY - minY),
+    collapsed: Boolean(subgraph.collapsed),
+    memberCount: members.length,
   };
 }
 
@@ -491,7 +495,9 @@ export function computeEdgeGeometry(
   curve: FlowEdgeCurve = 'bezier',
   toNodeWidth = nodeWidth,
   toNodeHeight = nodeHeight,
-  parallelOffset = 0
+  parallelOffset = 0,
+  waypoint?: { x: number; y: number },
+  obstacles?: FlowNode[]
 ): EdgeGeometry {
   const cx1 = fromNode.x + nodeWidth / 2;
   const cy1 = fromNode.y + nodeHeight / 2;
@@ -506,8 +512,10 @@ export function computeEdgeGeometry(
 
   const isHorizontalFlow = direction === 'LR' || direction === 'RL';
   const verticalBiasRatio = isHorizontalFlow ? 1.15 : 0.35;
+  const isVertical =
+    Math.abs(cy2 - cy1) >= Math.abs(cx2 - cx1) * verticalBiasRatio;
 
-  if (Math.abs(cy2 - cy1) >= Math.abs(cx2 - cx1) * verticalBiasRatio) {
+  if (isVertical) {
     if (cy2 >= cy1) {
       y1 = fromNode.y + nodeHeight;
       y2 = toNode.y;
@@ -519,6 +527,106 @@ export function computeEdgeGeometry(
       x1 = Math.round(x1 + parallelOffset);
       x2 = Math.round(x2 + parallelOffset);
     }
+  } else {
+    if (cx2 >= cx1) {
+      x1 = fromNode.x + nodeWidth;
+      x2 = toNode.x;
+    } else {
+      x1 = fromNode.x;
+      x2 = toNode.x + toNodeWidth;
+    }
+    if (parallelOffset !== 0) {
+      y1 = Math.round(y1 + parallelOffset);
+      y2 = Math.round(y2 + parallelOffset);
+    }
+  }
+
+  let effectiveWaypoint = waypoint ? { ...waypoint } : undefined;
+  if (!effectiveWaypoint && obstacles && obstacles.length > 0) {
+    const rawMidX = Math.round((x1 + x2) / 2);
+    const rawMidY = Math.round((y1 + y2) / 2);
+    const minSegX = Math.min(x1, x2) + 8;
+    const maxSegX = Math.max(x1, x2) - 8;
+    const minSegY = Math.min(y1, y2) + 8;
+    const maxSegY = Math.max(y1, y2) - 8;
+    const blockingNode = obstacles.find((obs) => {
+      if (obs.id === fromNode.id || obs.id === toNode.id) return false;
+      const dim = getNodeDimensions(obs, nodeWidth, nodeHeight);
+      const boxLeft = obs.x - 10;
+      const boxRight = obs.x + dim.width + 10;
+      const boxTop = obs.y - 10;
+      const boxBottom = obs.y + dim.height + 10;
+      const hitsMid =
+        rawMidX >= boxLeft &&
+        rawMidX <= boxRight &&
+        rawMidY >= boxTop &&
+        rawMidY <= boxBottom;
+      if (hitsMid) return true;
+      if (isVertical && Math.abs(x1 - x2) < 40) {
+        return (
+          rawMidX >= boxLeft &&
+          rawMidX <= boxRight &&
+          boxTop >= minSegY &&
+          boxBottom <= maxSegY
+        );
+      }
+      if (!isVertical && Math.abs(y1 - y2) < 40) {
+        return (
+          rawMidY >= boxTop &&
+          rawMidY <= boxBottom &&
+          boxLeft >= minSegX &&
+          boxRight <= maxSegX
+        );
+      }
+      return false;
+    });
+    if (blockingNode) {
+      const dim = getNodeDimensions(blockingNode, nodeWidth, nodeHeight);
+      if (isVertical) {
+        effectiveWaypoint = {
+          x: Math.round(blockingNode.x + dim.width + 44),
+          y: rawMidY,
+        };
+      } else {
+        effectiveWaypoint = {
+          x: rawMidX,
+          y: Math.round(blockingNode.y - 36),
+        };
+      }
+    }
+  }
+
+  if (effectiveWaypoint) {
+    const wx = Math.round(effectiveWaypoint.x);
+    const wy = Math.round(effectiveWaypoint.y);
+    if (curve === 'straight') {
+      pathData = `M ${x1} ${y1} L ${wx} ${wy} L ${x2} ${y2}`;
+    } else if (curve === 'orthogonal') {
+      if (isVertical) {
+        pathData = `M ${x1} ${y1} L ${wx} ${y1} L ${wx} ${wy} L ${wx} ${y2} L ${x2} ${y2}`;
+      } else {
+        pathData = `M ${x1} ${y1} L ${wx} ${y1} L ${wx} ${wy} L ${x2} ${wy} L ${x2} ${y2}`;
+      }
+    } else {
+      // Smooth quadratic curves meeting at the waypoint
+      const c1x = Math.round((x1 + wx) / 2);
+      const c1y = isVertical ? wy : y1;
+      const c2x = Math.round((wx + x2) / 2);
+      const c2y = isVertical ? wy : y2;
+      pathData = `M ${x1} ${y1} Q ${c1x} ${c1y} ${wx} ${wy} Q ${c2x} ${c2y} ${x2} ${y2}`;
+    }
+    return {
+      x1,
+      y1,
+      x2,
+      y2,
+      midX: wx,
+      midY: wy,
+      pathData,
+    };
+  }
+
+  if (isVertical) {
     const midY = Math.round((y1 + y2) / 2);
     if (curve === 'straight') {
       pathData = `M ${x1} ${y1} L ${x2} ${y2}`;
@@ -547,17 +655,6 @@ export function computeEdgeGeometry(
       pathData = `M ${x1} ${y1} C ${x1} ${y1 + controlOffset}, ${x2} ${y2 - controlOffset}, ${x2} ${y2}`;
     }
   } else {
-    if (cx2 >= cx1) {
-      x1 = fromNode.x + nodeWidth;
-      x2 = toNode.x;
-    } else {
-      x1 = fromNode.x;
-      x2 = toNode.x + toNodeWidth;
-    }
-    if (parallelOffset !== 0) {
-      y1 = Math.round(y1 + parallelOffset);
-      y2 = Math.round(y2 + parallelOffset);
-    }
     const midX = Math.round((x1 + x2) / 2);
     if (curve === 'straight') {
       pathData = `M ${x1} ${y1} L ${x2} ${y2}`;
@@ -2877,5 +2974,348 @@ export function renderCachedMermaidPreview(rawCode: string): {
   mermaidPreviewCache.set(key, result);
   return result;
 }
+
+/**
+ * Splits a Decision node into symmetric 'Yes' (emerald) and 'No' (rose) branches in 1 click.
+ */
+export function branchDecisionYesNo(
+  state: FlowchartState,
+  decisionNodeId: string,
+  yesNodeId: string,
+  noNodeId: string
+): { state: FlowchartState; yesId: string; noId: string } | null {
+  const source = state.nodes.find((n) => n.id === decisionNodeId);
+  if (!source) return null;
+
+  const dir = state.direction || 'TD';
+  const isHorizontal = dir === 'LR' || dir === 'RL';
+  const sign = dir === 'BT' || dir === 'RL' ? -1 : 1;
+
+  const yesX = isHorizontal
+    ? Math.max(16, Math.round((source.x + sign * 200) / 8) * 8)
+    : Math.max(16, Math.round((source.x - 104) / 8) * 8);
+  const yesY = isHorizontal
+    ? Math.max(16, Math.round((source.y - 64) / 8) * 8)
+    : Math.max(16, Math.round((source.y + sign * 112) / 8) * 8);
+
+  const noX = isHorizontal
+    ? Math.max(16, Math.round((source.x + sign * 200) / 8) * 8)
+    : Math.max(16, Math.round((source.x + 104) / 8) * 8);
+  const noY = isHorizontal
+    ? Math.max(16, Math.round((source.y + 64) / 8) * 8)
+    : Math.max(16, Math.round((source.y + sign * 112) / 8) * 8);
+
+  const yesNode: FlowNode = {
+    id: yesNodeId,
+    type: 'process',
+    text: 'Yes Path',
+    x: yesX,
+    y: yesY,
+    color: 'emerald',
+  };
+
+  const noNode: FlowNode = {
+    id: noNodeId,
+    type: 'process',
+    text: 'No Path',
+    x: noX,
+    y: noY,
+    color: 'rose',
+  };
+
+  const updatedNodes = state.nodes
+    .map((n) => (n.id === decisionNodeId ? { ...n, type: 'decision' as const } : n))
+    .concat([yesNode, noNode]);
+
+  const updatedEdges: FlowEdge[] = [
+    ...state.edges,
+    { from: decisionNodeId, to: yesNodeId, label: 'Yes' },
+    { from: decisionNodeId, to: noNodeId, label: 'No', style: 'dotted' },
+  ];
+
+  const updatedSubgraphs = state.subgraphs?.map((sg) =>
+    sg.nodeIds.includes(decisionNodeId)
+      ? { ...sg, nodeIds: [...sg.nodeIds, yesNodeId, noNodeId] }
+      : sg
+  );
+
+  return {
+    yesId: yesNodeId,
+    noId: noNodeId,
+    state: {
+      ...state,
+      nodes: updatedNodes,
+      edges: updatedEdges,
+      ...(updatedSubgraphs ? { subgraphs: updatedSubgraphs } : {}),
+    },
+  };
+}
+
+/**
+ * Neatly compacts and grid-aligns all member nodes inside a Subgraph container.
+ */
+export function autoFitSubgraphNodes(
+  state: FlowchartState,
+  subgraphId: string
+): FlowchartState {
+  const sg = (state.subgraphs || []).find((s) => s.id === subgraphId);
+  if (!sg || sg.nodeIds.length === 0) return state;
+
+  const memberSet = new Set(sg.nodeIds);
+  const members = state.nodes.filter((n) => memberSet.has(n.id));
+  if (members.length === 0) return state;
+
+  const anchorX = Math.max(24, Math.round(Math.min(...members.map((n) => n.x)) / 8) * 8);
+  const anchorY = Math.max(40, Math.round(Math.min(...members.map((n) => n.y)) / 8) * 8);
+  const isHorizontal = state.direction === 'LR' || state.direction === 'RL';
+
+  const sorted = [...members].sort((a, b) =>
+    isHorizontal ? a.x - b.x || a.y - b.y : a.y - b.y || a.x - b.x
+  );
+
+  const posById = new Map<string, { x: number; y: number }>();
+  sorted.forEach((node, idx) => {
+    if (isHorizontal) {
+      posById.set(node.id, {
+        x: anchorX + idx * 176,
+        y: anchorY,
+      });
+    } else {
+      posById.set(node.id, {
+        x: anchorX,
+        y: anchorY + idx * 88,
+      });
+    }
+  });
+
+  return {
+    ...state,
+    subgraphs: (state.subgraphs || []).map((s) =>
+      s.id === subgraphId ? { ...s, collapsed: false } : s
+    ),
+    nodes: state.nodes.map((n) => {
+      const nextPos = posById.get(n.id);
+      return nextPos ? { ...n, x: nextPos.x, y: nextPos.y } : n;
+    }),
+  };
+}
+
+export interface FlowchartHealthIssue {
+  id: string;
+  nodeId: string;
+  kind: 'orphan' | 'dead-end' | 'unbranched-decision' | 'cycle';
+  title: string;
+  suggestion: string;
+}
+
+export interface FlowchartHealthReport {
+  issues: FlowchartHealthIssue[];
+  orphanNodeIds: string[];
+  deadEndNodeIds: string[];
+  unbranchedDecisionIds: string[];
+  cycleNodeIds: string[];
+}
+
+/**
+ * Analyzes a FlowchartState for structural issues: orphan nodes, dead-end steps,
+ * unbranched Decision diamonds (<2 outgoing edges), and directed cycles.
+ */
+export function analyzeFlowchartHealth(
+  state: FlowchartState
+): FlowchartHealthReport {
+  const issues: FlowchartHealthIssue[] = [];
+  const orphanNodeIds: string[] = [];
+  const deadEndNodeIds: string[] = [];
+  const unbranchedDecisionIds: string[] = [];
+  const cycleNodeIds: string[] = [];
+
+  if (state.nodes.length === 0) {
+    return {
+      issues,
+      orphanNodeIds,
+      deadEndNodeIds,
+      unbranchedDecisionIds,
+      cycleNodeIds,
+    };
+  }
+
+  const nodeIds = new Set(state.nodes.map((n) => n.id));
+  const incomingCount = new Map<string, number>();
+  const outgoingCount = new Map<string, number>();
+  const adj = new Map<string, string[]>();
+
+  state.nodes.forEach((n) => {
+    incomingCount.set(n.id, 0);
+    outgoingCount.set(n.id, 0);
+    adj.set(n.id, []);
+  });
+
+  state.edges.forEach((e) => {
+    if (!nodeIds.has(e.from) || !nodeIds.has(e.to)) return;
+    outgoingCount.set(e.from, (outgoingCount.get(e.from) || 0) + 1);
+    incomingCount.set(e.to, (incomingCount.get(e.to) || 0) + 1);
+    adj.get(e.from)?.push(e.to);
+  });
+
+  for (const node of state.nodes) {
+    if (node.type === 'note') continue;
+    const inDeg = incomingCount.get(node.id) || 0;
+    const outDeg = outgoingCount.get(node.id) || 0;
+
+    if (state.nodes.length > 1 && inDeg === 0 && outDeg === 0) {
+      orphanNodeIds.push(node.id);
+      issues.push({
+        id: `orphan-${node.id}`,
+        nodeId: node.id,
+        kind: 'orphan',
+        title: `Orphan Node: "${node.text}"`,
+        suggestion: 'Connect this node to the flow or remove it.',
+      });
+      continue;
+    }
+
+    if (node.type === 'decision' && outDeg < 2) {
+      unbranchedDecisionIds.push(node.id);
+      issues.push({
+        id: `decision-${node.id}`,
+        nodeId: node.id,
+        kind: 'unbranched-decision',
+        title: `Decision "${node.text}" has ${outDeg} branch${outDeg === 1 ? '' : 'es'}`,
+        suggestion: 'Split into Yes / No branches for complete conditional coverage.',
+      });
+      continue;
+    }
+
+    if (
+      state.nodes.length > 2 &&
+      inDeg > 0 &&
+      outDeg === 0 &&
+      node.type !== 'start' &&
+      node.type !== 'database'
+    ) {
+      deadEndNodeIds.push(node.id);
+      issues.push({
+        id: `deadend-${node.id}`,
+        nodeId: node.id,
+        kind: 'dead-end',
+        title: `Non-Terminal End Step: "${node.text}"`,
+        suggestion: 'Connect to a Terminal node or mark as Terminal shape.',
+      });
+    }
+  }
+
+  // Detect directed cycles via 3-color DFS
+  const visitState = new Map<string, 0 | 1 | 2>();
+  const inCycleSet = new Set<string>();
+
+  const dfs = (u: string, stack: string[]) => {
+    visitState.set(u, 1);
+    stack.push(u);
+    for (const v of adj.get(u) || []) {
+      const st = visitState.get(v) || 0;
+      if (st === 1) {
+        const cycleStartIdx = stack.indexOf(v);
+        if (cycleStartIdx !== -1) {
+          for (let i = cycleStartIdx; i < stack.length; i++) {
+            inCycleSet.add(stack[i]);
+          }
+        }
+      } else if (st === 0) {
+        dfs(v, stack);
+      }
+    }
+    stack.pop();
+    visitState.set(u, 2);
+  };
+
+  for (const n of state.nodes) {
+    if ((visitState.get(n.id) || 0) === 0) {
+      dfs(n.id, []);
+    }
+  }
+
+  inCycleSet.forEach((cid) => {
+    cycleNodeIds.push(cid);
+    const node = state.nodes.find((n) => n.id === cid);
+    if (node) {
+      issues.push({
+        id: `cycle-${cid}`,
+        nodeId: cid,
+        kind: 'cycle',
+        title: `Loop Detected at "${node.text}"`,
+        suggestion: 'Verify loop exit condition prevents infinite recursion.',
+      });
+    }
+  });
+
+  return {
+    issues,
+    orphanNodeIds,
+    deadEndNodeIds,
+    unbranchedDecisionIds,
+    cycleNodeIds,
+  };
+}
+
+/**
+ * Computes the complete upstream + downstream dependency chain for a given node.
+ */
+export function computeConnectedPath(
+  state: FlowchartState,
+  rootNodeId: string
+): {
+  upstreamNodeIds: string[];
+  downstreamNodeIds: string[];
+  highlightedNodeIds: string[];
+  highlightedEdgeIndices: number[];
+} {
+  const upstream = new Set<string>();
+  const downstream = new Set<string>();
+
+  // Forward BFS (downstream)
+  const fwdQueue = [rootNodeId];
+  while (fwdQueue.length > 0) {
+    const curr = fwdQueue.shift()!;
+    state.edges.forEach((e) => {
+      if (e.from === curr && !downstream.has(e.to) && e.to !== rootNodeId) {
+        downstream.add(e.to);
+        fwdQueue.push(e.to);
+      }
+    });
+  }
+
+  // Backward BFS (upstream)
+  const bwdQueue = [rootNodeId];
+  while (bwdQueue.length > 0) {
+    const curr = bwdQueue.shift()!;
+    state.edges.forEach((e) => {
+      if (e.to === curr && !upstream.has(e.from) && e.from !== rootNodeId) {
+        upstream.add(e.from);
+        bwdQueue.push(e.from);
+      }
+    });
+  }
+
+  const allHighlighted = new Set<string>([
+    rootNodeId,
+    ...Array.from(upstream),
+    ...Array.from(downstream),
+  ]);
+
+  const highlightedEdgeIndices: number[] = [];
+  state.edges.forEach((e, idx) => {
+    if (allHighlighted.has(e.from) && allHighlighted.has(e.to)) {
+      highlightedEdgeIndices.push(idx);
+    }
+  });
+
+  return {
+    upstreamNodeIds: Array.from(upstream),
+    downstreamNodeIds: Array.from(downstream),
+    highlightedNodeIds: Array.from(allHighlighted),
+    highlightedEdgeIndices,
+  };
+}
+
 
 
