@@ -16,6 +16,8 @@ import {
 } from '@testing-library/react';
 import App from '../App';
 import { isSafeCustomIconUrl } from '../components/CommandPalette';
+import { FlowCanvas } from '../components/Flowchart/FlowCanvas';
+import { FlowchartState } from '../types/sideflow';
 
 describe('SideFlow Phase 5 UX Suite — Global Command Palette & Flowchart Minimap', () => {
   beforeEach(() => {
@@ -412,6 +414,106 @@ describe('SideFlow Phase 5 UX Suite — Global Command Palette & Flowchart Minim
       expect(screen.getByTestId('edge-anchor-start-0')).toBeInTheDocument();
       expect(screen.getByTestId('edge-anchor-end-0')).toBeInTheDocument();
       expect(firstEdge.querySelector('text')).toBeNull();
+    });
+
+    it('supports precision multi-align, batch shape/color/clone, canvas node spotlight search, reverse connector direction, and 1-click Swimlane creation', () => {
+      let currentFlow: FlowchartState = {
+        nodes: [
+          { id: 'n1', type: 'start', text: 'Auth Request', x: 40, y: 30 },
+          { id: 'n2', type: 'process', text: 'Verify Token', x: 180, y: 110 },
+          { id: 'n3', type: 'decision', text: 'Token Valid?', x: 90, y: 210 },
+        ],
+        edges: [
+          { from: 'n1', to: 'n2' },
+          { from: 'n2', to: 'n3', label: 'Checked' },
+        ],
+      };
+
+      const Wrapper = () => {
+        const [flow, setFlow] = React.useState(currentFlow);
+        return (
+          <FlowCanvas
+            flowData={flow}
+            onChangeFlowData={(updater) => {
+              setFlow((prev) => {
+                const next =
+                  typeof updater === 'function' ? updater(prev) : updater;
+                currentFlow = next;
+                return next;
+              });
+            }}
+            onNotify={vi.fn()}
+            panelWidthPercent={65}
+          />
+        );
+      };
+
+      render(<Wrapper />);
+
+      // 1. Canvas Node Search & Spotlight
+      const searchInput = screen.getByTestId('flow-node-search-input');
+      fireEvent.change(searchInput, { target: { value: 'Token' } });
+      expect(screen.getByTestId('flow-search-match-count')).toHaveTextContent(
+        '2'
+      );
+      expect(screen.getByTestId('flow-node-n2')).toHaveAttribute(
+        'data-search-match',
+        'true'
+      );
+      expect(screen.getByTestId('flow-node-n3')).toHaveAttribute(
+        'data-search-match',
+        'true'
+      );
+      expect(screen.getByTestId('flow-node-n1')).toHaveAttribute(
+        'data-search-match',
+        'false'
+      );
+      fireEvent.click(screen.getByTestId('flow-search-focus-btn'));
+      // Clear search with Escape
+      fireEvent.keyDown(searchInput, { key: 'Escape' });
+      expect(
+        screen.queryByTestId('flow-search-match-count')
+      ).not.toBeInTheDocument();
+
+      // 2. Select all nodes (Ctrl+A) and test Precision Alignment, Batch Shape, Batch Color, and Batch Clone
+      fireEvent.keyDown(window, { key: 'a', ctrlKey: true });
+      expect(screen.getByTestId('multi-select-toolbar')).toBeInTheDocument();
+
+      // Align Left (min X = 40)
+      fireEvent.click(screen.getByTestId('multi-align-left'));
+      expect(currentFlow.nodes.every((n) => n.x === 40)).toBe(true);
+
+      // Batch morph all selected nodes to 'hexagon'
+      fireEvent.change(screen.getByTestId('multi-shape-select'), {
+        target: { value: 'hexagon' },
+      });
+      expect(currentFlow.nodes.every((n) => n.type === 'hexagon')).toBe(true);
+
+      // Batch set color to 'rose'
+      fireEvent.click(screen.getByTestId('multi-color-rose'));
+      expect(currentFlow.nodes.every((n) => n.color === 'rose')).toBe(true);
+
+      // Batch Clone selected nodes + internal edges
+      fireEvent.click(screen.getByTestId('multi-duplicate-btn'));
+      expect(currentFlow.nodes.length).toBe(6);
+      expect(currentFlow.edges.length).toBe(4);
+
+      // 3. 1-Click Reverse Connector Direction
+      const edgePill = screen.getByTestId('edge-label-pill-1');
+      fireEvent.click(edgePill);
+      expect(screen.getByTestId('uml-edge-toolbar')).toBeInTheDocument();
+      expect(currentFlow.edges[1].from).toBe('n2');
+      expect(currentFlow.edges[1].to).toBe('n3');
+      fireEvent.click(screen.getByTestId('reverse-edge-btn'));
+      expect(currentFlow.edges[1].from).toBe('n3');
+      expect(currentFlow.edges[1].to).toBe('n2');
+
+      // 4. 1-Click Parallel Swimlane creation
+      const swimlaneBtn = screen.getByTestId('add-swimlane-btn');
+      fireEvent.click(swimlaneBtn);
+      expect(currentFlow.subgraphs?.length).toBe(1);
+      expect(currentFlow.subgraphs?.[0].title).toContain('Customer');
+      expect(currentFlow.nodes.length).toBe(8);
     });
   });
 });

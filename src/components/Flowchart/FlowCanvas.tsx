@@ -35,6 +35,8 @@ import {
   Image as ImageIcon,
   Layers,
   Map as MapIcon,
+  Search,
+  ArrowLeftRight,
 } from 'lucide-react';
 import {
   AccentColor,
@@ -63,6 +65,7 @@ import {
   computeEdgeGeometry,
   computeParallelEdgeOffsets,
   computeSubgraphBounds,
+  FlowAlignmentMode,
   formatMermaidEdgeOperator,
   formatSequenceMessageOperator,
   generateMermaidCode,
@@ -952,6 +955,8 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   const [isShapePaletteOpen, setIsShapePaletteOpen] = useState<boolean>(false);
   const [shapeSearchQuery, setShapeSearchQuery] = useState<string>('');
   const [shapeCategory, setShapeCategory] = useState<ShapeCategoryId>('all');
+  const [nodeSearchQuery, setNodeSearchQuery] = useState<string>('');
+  const [nodeSearchFocusIdx, setNodeSearchFocusIdx] = useState<number>(0);
 
   // Transient drag coordinate map to prevent localStorage/IPC thrashing on mousemove
   const [dragNodePositions, setDragNodePositions] = useState<Record<
@@ -1803,18 +1808,27 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   }, [commitFlowUpdate, onNotify]);
 
   const handleAlignOrDistribute = useCallback(
-    (mode: 'align-x' | 'align-y' | 'distribute') => {
+    (mode: FlowAlignmentMode) => {
       if (selectedNodeIdsRef.current.length < 2) return;
       commitFlowUpdate((prev) =>
         alignOrDistributeNodes(prev, selectedNodeIdsRef.current, mode)
       );
-      const label =
-        mode === 'align-x'
-          ? 'Aligned Columns (X)'
-          : mode === 'align-y'
-            ? 'Aligned Rows (Y)'
-            : 'Distributed Spacing Evenly';
-      onNotify(label, 'check', `${selectedNodeIdsRef.current.length} nodes`);
+      const labelMap: Record<FlowAlignmentMode, string> = {
+        'align-left': 'Aligned Left Edges',
+        'align-x': 'Aligned Columns (Center X)',
+        'align-right': 'Aligned Right Edges',
+        'align-top': 'Aligned Top Edges',
+        'align-y': 'Aligned Rows (Middle Y)',
+        'align-bottom': 'Aligned Bottom Edges',
+        distribute: 'Distributed Spacing Evenly',
+        'distribute-h': 'Distributed Horizontally',
+        'distribute-v': 'Distributed Vertically',
+      };
+      onNotify(
+        labelMap[mode] || 'Aligned Selection',
+        'check',
+        `${selectedNodeIdsRef.current.length} nodes`
+      );
     },
     [commitFlowUpdate, onNotify]
   );
@@ -1836,6 +1850,96 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       }),
     }));
   }, [commitFlowUpdate]);
+
+  const handleBatchSetColor = useCallback(
+    (color: AccentColor) => {
+      if (selectedNodeIdsRef.current.length === 0) return;
+      const idSet = new Set(selectedNodeIdsRef.current);
+      commitFlowUpdate((prev) => ({
+        ...prev,
+        nodes: prev.nodes.map((n) => (idSet.has(n.id) ? { ...n, color } : n)),
+      }));
+      onNotify(
+        `Applied ${color.toUpperCase()} Accent`,
+        'check',
+        `${selectedNodeIdsRef.current.length} nodes updated`
+      );
+    },
+    [commitFlowUpdate, onNotify]
+  );
+
+  const handleBatchSetShape = useCallback(
+    (nextShape: FlowNodeType) => {
+      if (selectedNodeIdsRef.current.length === 0) return;
+      const idSet = new Set(selectedNodeIdsRef.current);
+      commitFlowUpdate((prev) => ({
+        ...prev,
+        nodes: prev.nodes.map((n) =>
+          idSet.has(n.id) ? { ...n, type: nextShape } : n
+        ),
+      }));
+      onNotify(
+        `Morphed Selection to ${NODE_DEFAULT_LABELS[nextShape]}`,
+        'check',
+        `${selectedNodeIdsRef.current.length} nodes updated`
+      );
+    },
+    [commitFlowUpdate, onNotify]
+  );
+
+  const handleBatchDuplicateSelected = useCallback(() => {
+    const ids = selectedNodeIdsRef.current;
+    if (ids.length === 0) return;
+    if (ids.length === 1) {
+      handleDuplicateNode(ids[0]);
+      return;
+    }
+    const idSet = new Set(ids);
+    let clonedIds: string[] = [];
+    commitFlowUpdate((prev) => {
+      const idMap = new Map<string, string>();
+      const workingNodes = [...prev.nodes];
+      const newNodes: FlowNode[] = [];
+
+      for (const orig of prev.nodes) {
+        if (!idSet.has(orig.id)) continue;
+        const nextId = allocateUniqueNodeId([...workingNodes, ...newNodes]);
+        idMap.set(orig.id, nextId);
+        newNodes.push({
+          ...orig,
+          id: nextId,
+          text: `${orig.text} Copy`,
+          x: orig.x + 32,
+          y: orig.y + 32,
+          ...(orig.members ? { members: [...orig.members] } : {}),
+        });
+      }
+
+      const newEdges = prev.edges
+        .filter((e) => idMap.has(e.from) && idMap.has(e.to))
+        .map((e) => ({
+          ...e,
+          from: idMap.get(e.from)!,
+          to: idMap.get(e.to)!,
+        }));
+
+      clonedIds = Array.from(idMap.values());
+      return {
+        ...prev,
+        nodes: [...prev.nodes, ...newNodes],
+        edges: [...prev.edges, ...newEdges],
+      };
+    });
+    if (clonedIds.length > 0) {
+      setSelectedNodeIds(clonedIds);
+      setSelectedNodeId(clonedIds[0]);
+      onNotify(
+        `Duplicated ${clonedIds.length} Nodes`,
+        'check',
+        'Cloned selected nodes and their internal connectors'
+      );
+    }
+  }, [commitFlowUpdate, handleDuplicateNode, onNotify]);
 
   // Multi-Diagram Workspace Switcher Handlers
   const activeDiagram = useMemo(
@@ -2090,14 +2194,27 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         return;
       }
 
-      if (
-        (e.ctrlKey || e.metaKey) &&
-        e.key.toLowerCase() === 'd' &&
-        selectedNodeId
-      ) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
         e.preventDefault();
-        handleDuplicateNode(selectedNodeId);
+        const searchEl = document.getElementById(
+          'flow-node-search-input'
+        ) as HTMLInputElement | null;
+        searchEl?.focus();
+        searchEl?.select();
         return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+        if (selectedNodeIdsRef.current.length > 1) {
+          e.preventDefault();
+          handleBatchDuplicateSelected();
+          return;
+        }
+        if (selectedNodeId) {
+          e.preventDefault();
+          handleDuplicateNode(selectedNodeId);
+          return;
+        }
       }
 
       if (
@@ -2114,6 +2231,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   }, [
     connectMode,
     marqueeMode,
+    isShapePaletteOpen,
     editingNodeId,
     editingEdgeIdx,
     editingSubgraphId,
@@ -2122,9 +2240,43 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     handleUndo,
     handleRedo,
     handleDuplicateNode,
+    handleBatchDuplicateSelected,
     handleBatchDeleteSelected,
     selectedNodeId,
   ]);
+
+  const matchedSearchNodeIds = useMemo(() => {
+    const q = nodeSearchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return flowData.nodes
+      .filter(
+        (n) =>
+          n.text.toLowerCase().includes(q) ||
+          n.id.toLowerCase().includes(q) ||
+          n.type.toLowerCase().includes(q) ||
+          (n.stereotype && n.stereotype.toLowerCase().includes(q)) ||
+          (n.members && n.members.some((m) => m.toLowerCase().includes(q)))
+      )
+      .map((n) => n.id);
+  }, [flowData.nodes, nodeSearchQuery]);
+
+  const handleFocusNextSearchMatch = useCallback(() => {
+    if (matchedSearchNodeIds.length === 0) return;
+    const nextIdx = (nodeSearchFocusIdx + 1) % matchedSearchNodeIds.length;
+    setNodeSearchFocusIdx(nextIdx);
+    const targetId = matchedSearchNodeIds[nextIdx];
+    const targetNode = flowData.nodes.find((n) => n.id === targetId);
+    if (!targetNode) return;
+    setSelectedNodeId(targetId);
+    setSelectedNodeIds([targetId]);
+    const rect = canvasWrapperRef.current?.getBoundingClientRect();
+    const viewW = rect && rect.width > 80 ? rect.width : 540;
+    const viewH = rect && rect.height > 80 ? rect.height : 340;
+    setPanOffset({
+      x: Math.round(viewW / 2 - (targetNode.x + 72) * zoomLevel),
+      y: Math.round(viewH / 2 - (targetNode.y + 26) * zoomLevel),
+    });
+  }, [matchedSearchNodeIds, nodeSearchFocusIdx, flowData.nodes, zoomLevel]);
 
   const filteredPaletteShapes = useMemo(() => {
     const query = shapeSearchQuery.trim().toLowerCase();
@@ -2396,6 +2548,86 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     );
   };
 
+  const handleAddSwimlane = () => {
+    let createdIds: string[] = [];
+    let laneTitle = '';
+    commitFlowUpdate((prev) => {
+      const existingSubgraphs = prev.subgraphs || [];
+      const laneIdx = existingSubgraphs.length + 1;
+      const sgId = `lane_${laneIdx}_${Date.now().toString(36).slice(-2)}`;
+      const defaultLaneNames = [
+        'Customer / Client',
+        'Application Tier',
+        'Data & Storage',
+        'External Services',
+      ];
+      laneTitle =
+        defaultLaneNames[(laneIdx - 1) % defaultLaneNames.length] ||
+        `Swimlane ${laneIdx}`;
+
+      const maxX =
+        prev.nodes.length > 0
+          ? Math.max(...prev.nodes.map((n) => n.x))
+          : -190;
+      const laneX = Math.max(40, maxX + 220);
+
+      const id1 = allocateUniqueNodeId(prev.nodes);
+      const id2 = allocateUniqueNodeId([
+        ...prev.nodes,
+        { id: id1, type: 'process', text: '', x: 0, y: 0 },
+      ]);
+      createdIds = [id1, id2];
+
+      const laneNodes: FlowNode[] = [
+        {
+          id: id1,
+          type: 'process',
+          text: `${laneTitle.split(' ')[0]} Entry`,
+          x: laneX,
+          y: 64,
+        },
+        {
+          id: id2,
+          type: 'process',
+          text: `${laneTitle.split(' ')[0]} Action`,
+          x: laneX,
+          y: 184,
+        },
+      ];
+
+      const newSubgraph: FlowSubgraph = {
+        id: sgId,
+        title: laneTitle,
+        nodeIds: createdIds,
+      };
+
+      return {
+        ...prev,
+        nodes: [...prev.nodes, ...laneNodes],
+        edges: [
+          ...prev.edges,
+          {
+            from: id1,
+            to: id2,
+            style: activeEdgeStyle,
+            arrow: activeEdgeArrow,
+            curve: currentEdgeCurve,
+          },
+        ],
+        subgraphs: [...existingSubgraphs, newSubgraph],
+      };
+    });
+    if (createdIds.length > 0) {
+      setSelectedNodeIds(createdIds);
+      setSelectedNodeId(createdIds[0]);
+      onNotify(
+        `Added Swimlane: ${laneTitle}`,
+        'check',
+        'Parallel lane created with starter flow steps'
+      );
+    }
+  };
+
   const handleRemoveSubgraph = (subgraphId: string) => {
     commitFlowUpdate((prev) => {
       const remaining = (prev.subgraphs || []).filter(
@@ -2624,6 +2856,20 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     if (editingEdgeIdx === index) {
       setEditingEdgeIdx(null);
     }
+  };
+
+  const handleReverseEdge = (index: number) => {
+    commitFlowUpdate((prev) => ({
+      ...prev,
+      edges: prev.edges.map((edge, idx) =>
+        idx === index ? { ...edge, from: edge.to, to: edge.from } : edge
+      ),
+    }));
+    onNotify(
+      'Reversed Connector Direction',
+      'check',
+      'Swapped source and target nodes'
+    );
   };
 
   const startEditingEdge = (
@@ -3392,6 +3638,17 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             <BoxSelect className="w-3 h-3 text-indigo-300" aria-hidden="true" />
             <span>Subgraph</span>
           </button>
+          <button
+            type="button"
+            data-testid="add-swimlane-btn"
+            onClick={() => handleAddSwimlane()}
+            aria-label="Add Parallel Swimlane"
+            title="Create a parallel Swimlane column with starter steps"
+            className="min-h-[24px] px-2 py-0.5 rounded-md bg-indigo-950/80 hover:bg-indigo-900/80 border border-dashed border-indigo-400/60 text-indigo-200 flex items-center gap-1 transition"
+          >
+            <Columns className="w-3 h-3 text-cyan-300" aria-hidden="true" />
+            <span>+ Swimlane</span>
+          </button>
         </div>
 
         {/* Diagram Mode + Templates + Edge Style/Arrow/Curve + Flow Direction Controls */}
@@ -3532,7 +3789,56 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <div className="relative flex items-center">
+            <Search
+              className="w-3 h-3 text-indigo-300/70 absolute left-2 pointer-events-none"
+              aria-hidden="true"
+            />
+            <input
+              id="flow-node-search-input"
+              data-testid="flow-node-search-input"
+              type="text"
+              aria-label="Find node on canvas"
+              value={nodeSearchQuery}
+              onChange={(e) => {
+                setNodeSearchQuery(e.target.value);
+                setNodeSearchFocusIdx(0);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleFocusNextSearchMatch();
+                } else if (e.key === 'Escape') {
+                  setNodeSearchQuery('');
+                }
+              }}
+              placeholder="Find node (Ctrl+F)..."
+              className="min-h-[24px] w-32 sm:w-40 bg-slate-900/90 border border-indigo-500/30 focus:border-cyan-400 rounded-md pl-6 pr-6 py-0.5 text-[11px] text-white placeholder-indigo-300/50 focus:outline-none"
+            />
+            {nodeSearchQuery && (
+              <div className="flex items-center gap-1 ml-1">
+                <span
+                  data-testid="flow-search-match-count"
+                  className="px-1.5 py-0.5 rounded bg-cyan-500/20 border border-cyan-400/40 text-[10px] font-mono text-cyan-200"
+                >
+                  {matchedSearchNodeIds.length}
+                </span>
+                {matchedSearchNodeIds.length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="flow-search-focus-btn"
+                    onClick={handleFocusNextSearchMatch}
+                    title="Center and select next matching node (Enter)"
+                    className="min-h-[22px] px-1.5 py-0.5 rounded bg-cyan-600/40 hover:bg-cyan-500/60 text-cyan-100 text-[10px] font-medium transition"
+                  >
+                    Jump
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
           {onInsertMermaidToNote && (
             <button
               type="button"
@@ -4085,29 +4391,72 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               aria-label="Multi-Select Actions"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
-              className="absolute top-3 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 border border-cyan-400/60 rounded-xl px-2.5 py-1.5 shadow-2xl flex items-center gap-1.5 flex-wrap text-[11px]"
+              className="absolute top-3 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 border border-cyan-400/60 rounded-xl px-2.5 py-1.5 shadow-2xl flex items-center gap-1.5 flex-wrap text-[11px] max-w-[95%]"
             >
               <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-200 font-mono text-[10px] font-semibold">
                 {selectedNodeIds.length} Selected
               </span>
-              <button
-                type="button"
-                data-testid="multi-align-x"
-                onClick={() => handleAlignOrDistribute('align-x')}
-                title="Align selected nodes horizontally (same X column)"
-                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
+              <div
+                role="group"
+                aria-label="Precision Alignment"
+                className="flex items-center gap-0.5 bg-slate-950/80 border border-slate-800 rounded-lg p-0.5"
               >
-                Align X
-              </button>
-              <button
-                type="button"
-                data-testid="multi-align-y"
-                onClick={() => handleAlignOrDistribute('align-y')}
-                title="Align selected nodes vertically (same Y row)"
-                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
-              >
-                Align Y
-              </button>
+                <button
+                  type="button"
+                  data-testid="multi-align-left"
+                  onClick={() => handleAlignOrDistribute('align-left')}
+                  title="Align Left Edges"
+                  className="px-1.5 py-0.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition text-[10px]"
+                >
+                  Left
+                </button>
+                <button
+                  type="button"
+                  data-testid="multi-align-x"
+                  onClick={() => handleAlignOrDistribute('align-x')}
+                  title="Align Horizontal Center (same X column)"
+                  className="px-1.5 py-0.5 rounded hover:bg-slate-800 text-slate-200 hover:text-white transition text-[10px]"
+                >
+                  Align X
+                </button>
+                <button
+                  type="button"
+                  data-testid="multi-align-right"
+                  onClick={() => handleAlignOrDistribute('align-right')}
+                  title="Align Right Edges"
+                  className="px-1.5 py-0.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition text-[10px]"
+                >
+                  Right
+                </button>
+                <span className="text-slate-700 px-0.5">|</span>
+                <button
+                  type="button"
+                  data-testid="multi-align-top"
+                  onClick={() => handleAlignOrDistribute('align-top')}
+                  title="Align Top Edges"
+                  className="px-1.5 py-0.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition text-[10px]"
+                >
+                  Top
+                </button>
+                <button
+                  type="button"
+                  data-testid="multi-align-y"
+                  onClick={() => handleAlignOrDistribute('align-y')}
+                  title="Align Vertical Middle (same Y row)"
+                  className="px-1.5 py-0.5 rounded hover:bg-slate-800 text-slate-200 hover:text-white transition text-[10px]"
+                >
+                  Align Y
+                </button>
+                <button
+                  type="button"
+                  data-testid="multi-align-bottom"
+                  onClick={() => handleAlignOrDistribute('align-bottom')}
+                  title="Align Bottom Edges"
+                  className="px-1.5 py-0.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition text-[10px]"
+                >
+                  Bottom
+                </button>
+              </div>
               {selectedNodeIds.length >= 3 && (
                 <button
                   type="button"
@@ -4119,6 +4468,64 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   Distribute
                 </button>
               )}
+              <select
+                aria-label="Batch change shape for selected nodes"
+                data-testid="multi-shape-select"
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value) {
+                    handleBatchSetShape(e.target.value as FlowNodeType);
+                    e.target.value = '';
+                  }
+                }}
+                className="min-h-[22px] bg-slate-800 border border-slate-700 text-slate-200 rounded px-1.5 py-0.5 text-[10px] focus:outline-none focus:border-cyan-400"
+              >
+                <option value="" disabled>
+                  Shape...
+                </option>
+                {ALL_NODE_SHAPES.map((s) => (
+                  <option key={`multi-shape-${s.type}`} value={s.type}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+              <div
+                role="group"
+                aria-label="Batch Color Swatches"
+                className="flex items-center gap-1 px-1 py-0.5 rounded bg-slate-950/70 border border-slate-800"
+              >
+                {(['emerald', 'amber', 'rose', 'purple', 'cyan'] as const).map(
+                  (c) => (
+                    <button
+                      key={`multi-color-${c}`}
+                      type="button"
+                      data-testid={`multi-color-${c}`}
+                      aria-label={`Set selected nodes color to ${c}`}
+                      onClick={() => handleBatchSetColor(c)}
+                      className={`w-3 h-3 rounded-full border ${ACCENT_SWATCH_CLASSES[c]} hover:scale-125 transition`}
+                    />
+                  )
+                )}
+                <button
+                  type="button"
+                  data-testid="multi-color-btn"
+                  onClick={handleBatchCycleColor}
+                  title="Cycle accent color for all selected nodes"
+                  className="p-0.5 rounded hover:bg-slate-800 text-slate-300 transition"
+                >
+                  <Palette className="w-3 h-3" aria-hidden="true" />
+                </button>
+              </div>
+              <button
+                type="button"
+                data-testid="multi-duplicate-btn"
+                onClick={handleBatchDuplicateSelected}
+                title="Duplicate all selected nodes and their internal connectors (Ctrl+D)"
+                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-200 flex items-center gap-1 transition"
+              >
+                <Copy className="w-3 h-3" aria-hidden="true" />
+                <span>Clone</span>
+              </button>
               <button
                 type="button"
                 data-testid="multi-wrap-subgraph-btn"
@@ -4128,15 +4535,6 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               >
                 <BoxSelect className="w-3 h-3" aria-hidden="true" />
                 <span>Wrap Subgraph</span>
-              </button>
-              <button
-                type="button"
-                data-testid="multi-color-btn"
-                onClick={handleBatchCycleColor}
-                title="Cycle accent color for all selected nodes"
-                className="p-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
-              >
-                <Palette className="w-3 h-3" aria-hidden="true" />
               </button>
               <button
                 type="button"
@@ -4708,6 +5106,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   <React.Fragment key={`edge-badge-wrap-${idx}`}>
                     <button
                       type="button"
+                      data-testid={`edge-label-pill-${idx}`}
                       aria-label={
                         edge.label
                           ? `Edit edge label ${edge.label}`
@@ -4802,6 +5201,20 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           >
                             <Plus className="w-2.5 h-2.5" aria-hidden="true" />
                             <span>Insert Step</span>
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="reverse-edge-btn"
+                            aria-label="Reverse connector direction"
+                            title="Swap connector source and target direction (From ↔ To)"
+                            onClick={() => handleReverseEdge(idx)}
+                            className="min-h-[24px] px-2 py-0.5 rounded bg-slate-800 hover:bg-cyan-600 text-[10px] font-medium text-cyan-200 hover:text-white flex items-center gap-1 transition"
+                          >
+                            <ArrowLeftRight
+                              className="w-2.5 h-2.5"
+                              aria-hidden="true"
+                            />
+                            <span>Reverse</span>
                           </button>
                           {['Yes', 'No', 'Error'].map((preset) => (
                             <button
@@ -4987,14 +5400,23 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   selectedNodeIds.includes(node.id);
                 const isDropTarget =
                   draftConnection?.hoverTargetId === node.id;
+                const hasActiveSearch = nodeSearchQuery.trim().length > 0;
+                const isSearchMatch =
+                  hasActiveSearch && matchedSearchNodeIds.includes(node.id);
 
                 let shapeClasses = `rounded-xl ${textTheme}`;
                 if (connectMode && connectSourceNodeId === node.id) {
                   shapeClasses += ' ring-4 ring-indigo-500';
                 } else if (isDropTarget) {
                   shapeClasses += ' ring-4 ring-cyan-400 scale-105';
+                } else if (isSearchMatch) {
+                  shapeClasses +=
+                    ' ring-4 ring-amber-400 shadow-lg shadow-amber-500/30 z-20';
                 } else if (isSelected) {
                   shapeClasses += ' ring-2 ring-indigo-400/90';
+                }
+                if (hasActiveSearch && !isSearchMatch) {
+                  shapeClasses += ' opacity-35';
                 }
 
                 const hasCompartment =
@@ -5011,6 +5433,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                     data-shape={node.type}
                     data-color={node.color || ''}
                     data-selected={isSelected ? 'true' : 'false'}
+                    data-search-match={isSearchMatch ? 'true' : 'false'}
                     data-testid={`flow-node-${node.id}`}
                     style={{ left: `${node.x}px`, top: `${node.y}px` }}
                     onMouseDown={(e) => handleNodeMouseDown(e, node)}

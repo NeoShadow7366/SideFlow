@@ -2625,18 +2625,45 @@ export function spliceExistingNodeOnEdge(
   };
 }
 
+export type FlowAlignmentMode =
+  | 'align-left'
+  | 'align-x'
+  | 'align-right'
+  | 'align-top'
+  | 'align-y'
+  | 'align-bottom'
+  | 'distribute'
+  | 'distribute-h'
+  | 'distribute-v';
+
 /**
  * Aligns or evenly distributes a multi-selection of nodes (`selectedIds.length >= 2`).
  */
 export function alignOrDistributeNodes(
   state: FlowchartState,
   selectedIds: string[],
-  mode: 'align-x' | 'align-y' | 'distribute'
+  mode: FlowAlignmentMode
 ): FlowchartState {
   if (selectedIds.length < 2) return state;
   const idSet = new Set(selectedIds);
   const selectedNodes = state.nodes.filter((n) => idSet.has(n.id));
   if (selectedNodes.length < 2) return state;
+
+  if (mode === 'align-left') {
+    const minX = Math.round(Math.min(...selectedNodes.map((n) => n.x)) / 8) * 8;
+    return {
+      ...state,
+      nodes: state.nodes.map((n) => (idSet.has(n.id) ? { ...n, x: minX } : n)),
+    };
+  }
+
+  if (mode === 'align-right') {
+    const maxX = Math.round(Math.max(...selectedNodes.map((n) => n.x)) / 8) * 8;
+    return {
+      ...state,
+      nodes: state.nodes.map((n) => (idSet.has(n.id) ? { ...n, x: maxX } : n)),
+    };
+  }
 
   if (mode === 'align-x') {
     const avgX =
@@ -2648,6 +2675,22 @@ export function alignOrDistributeNodes(
     return {
       ...state,
       nodes: state.nodes.map((n) => (idSet.has(n.id) ? { ...n, x: avgX } : n)),
+    };
+  }
+
+  if (mode === 'align-top') {
+    const minY = Math.round(Math.min(...selectedNodes.map((n) => n.y)) / 8) * 8;
+    return {
+      ...state,
+      nodes: state.nodes.map((n) => (idSet.has(n.id) ? { ...n, y: minY } : n)),
+    };
+  }
+
+  if (mode === 'align-bottom') {
+    const maxY = Math.round(Math.max(...selectedNodes.map((n) => n.y)) / 8) * 8;
+    return {
+      ...state,
+      nodes: state.nodes.map((n) => (idSet.has(n.id) ? { ...n, y: maxY } : n)),
     };
   }
 
@@ -2664,12 +2707,17 @@ export function alignOrDistributeNodes(
     };
   }
 
-  // Distribute evenly along the dominant span axis
+  // Distribute evenly along explicit or dominant span axis
   const minX = Math.min(...selectedNodes.map((n) => n.x));
   const maxX = Math.max(...selectedNodes.map((n) => n.x));
   const minY = Math.min(...selectedNodes.map((n) => n.y));
   const maxY = Math.max(...selectedNodes.map((n) => n.y));
-  const distributeHorizontally = maxX - minX > maxY - minY;
+  const distributeHorizontally =
+    mode === 'distribute-h'
+      ? true
+      : mode === 'distribute-v'
+        ? false
+        : maxX - minX > maxY - minY;
 
   const sorted = [...selectedNodes].sort((a, b) =>
     distributeHorizontally ? a.x - b.x : a.y - b.y
