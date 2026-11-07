@@ -82,7 +82,12 @@ export type FlowNodeType =
   | 'io'
   | 'circle'
   | 'hexagon'
-  | 'asymmetric';
+  | 'asymmetric'
+  | 'document'
+  | 'manual'
+  | 'trapezoid'
+  | 'delay'
+  | 'note';
 
 export type FlowEdgeStyle = 'solid' | 'dotted' | 'thick';
 

@@ -165,7 +165,7 @@ function readLocalStore(): Record<string, unknown> {
   } catch (err) {
     console.error('[SideFlow] Failed to read local store:', err);
   }
-  cachedStore = {};
+  cachedStore = app.isPackaged ? { sideflow_auto_onboarding: true } : {};
   return cachedStore;
 }
 
@@ -475,6 +475,11 @@ async function performUpdateCheck(): Promise<MainUpdateState> {
 function setupAutoUpdater(): void {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  // Allow SHA-512 verified in-app updates via latest.yml without failing on unsigned builds
+  // (preventing fallback to browser downloads that attach Zone.Identifier Mark-of-the-Web)
+  (
+    autoUpdater as unknown as { verifyUpdateCodeSignature?: boolean }
+  ).verifyUpdateCodeSignature = false;
 
   autoUpdater.on('checking-for-update', () => {
     broadcastUpdateState({

@@ -57,9 +57,11 @@ import {
   DEFAULT_PANEL_WIDTH_PERCENT,
 } from '../../utils/defaults';
 import {
+  ACCENT_HEX_PALETTE,
   alignOrDistributeNodes,
   computeDagLayout,
   computeEdgeGeometry,
+  computeParallelEdgeOffsets,
   computeSubgraphBounds,
   formatMermaidEdgeOperator,
   formatSequenceMessageOperator,
@@ -87,6 +89,15 @@ interface FlowCanvasProps {
   panelWidthPercent?: number;
 }
 
+export type ShapeCategoryId = 'all' | 'basic' | 'process' | 'data';
+
+const SHAPE_CATEGORIES: Array<{ id: ShapeCategoryId; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'basic', label: 'Basic' },
+  { id: 'process', label: 'Process' },
+  { id: 'data', label: 'Data' },
+];
+
 const NODE_DEFAULT_LABELS: Record<FlowNodeType, string> = {
   process: 'New Process',
   decision: 'Condition?',
@@ -97,23 +108,583 @@ const NODE_DEFAULT_LABELS: Record<FlowNodeType, string> = {
   circle: 'Connector',
   hexagon: 'Prepare',
   asymmetric: 'Signal / Flag',
+  document: 'Document',
+  manual: 'Manual Op',
+  trapezoid: 'Priority Op',
+  delay: 'Wait / Delay',
+  note: 'Sticky Note',
 };
 
 const ALL_NODE_SHAPES: Array<{
   type: FlowNodeType;
   label: string;
   shortLabel: string;
+  category: Exclude<ShapeCategoryId, 'all'>;
+  syntaxHint: string;
 }> = [
-  { type: 'process', label: 'Process Box', shortLabel: 'Process' },
-  { type: 'decision', label: 'Decision Diamond', shortLabel: 'Decision' },
-  { type: 'start', label: 'Start / End Terminal', shortLabel: 'Terminal' },
-  { type: 'database', label: 'Database Cylinder', shortLabel: 'DB' },
-  { type: 'subroutine', label: 'Subroutine', shortLabel: 'Sub' },
-  { type: 'io', label: 'Input / Output', shortLabel: 'I/O' },
-  { type: 'circle', label: 'Circle Node', shortLabel: 'Circle' },
-  { type: 'hexagon', label: 'Hexagon Prepare', shortLabel: 'Hex' },
-  { type: 'asymmetric', label: 'Signal / Flag', shortLabel: 'Flag' },
+  {
+    type: 'process',
+    label: 'Process Box',
+    shortLabel: 'Process',
+    category: 'basic',
+    syntaxHint: '["..."]',
+  },
+  {
+    type: 'decision',
+    label: 'Decision Diamond',
+    shortLabel: 'Decision',
+    category: 'basic',
+    syntaxHint: '{"..."}',
+  },
+  {
+    type: 'start',
+    label: 'Start / End Terminal',
+    shortLabel: 'Terminal',
+    category: 'basic',
+    syntaxHint: '(["..."])',
+  },
+  {
+    type: 'circle',
+    label: 'Circle Node',
+    shortLabel: 'Circle',
+    category: 'basic',
+    syntaxHint: '(("..."))',
+  },
+  {
+    type: 'subroutine',
+    label: 'Subroutine',
+    shortLabel: 'Sub',
+    category: 'process',
+    syntaxHint: '[["..."]]',
+  },
+  {
+    type: 'hexagon',
+    label: 'Hexagon Prepare',
+    shortLabel: 'Hex',
+    category: 'process',
+    syntaxHint: '{{"..."}}',
+  },
+  {
+    type: 'manual',
+    label: 'Manual Operation',
+    shortLabel: 'Manual',
+    category: 'process',
+    syntaxHint: '[\\"..."/]',
+  },
+  {
+    type: 'trapezoid',
+    label: 'Priority Trapezoid',
+    shortLabel: 'Trap',
+    category: 'process',
+    syntaxHint: '[/"..."\\]',
+  },
+  {
+    type: 'delay',
+    label: 'Delay / Wait Gate',
+    shortLabel: 'Delay',
+    category: 'process',
+    syntaxHint: '@{delay}',
+  },
+  {
+    type: 'asymmetric',
+    label: 'Signal / Flag',
+    shortLabel: 'Flag',
+    category: 'process',
+    syntaxHint: '>"..."]',
+  },
+  {
+    type: 'database',
+    label: 'Database Cylinder',
+    shortLabel: 'DB',
+    category: 'data',
+    syntaxHint: '[("...")]',
+  },
+  {
+    type: 'io',
+    label: 'Input / Output',
+    shortLabel: 'I/O',
+    category: 'data',
+    syntaxHint: '[/"..."/]',
+  },
+  {
+    type: 'document',
+    label: 'Document Wave',
+    shortLabel: 'Doc',
+    category: 'data',
+    syntaxHint: '@{doc}',
+  },
+  {
+    type: 'note',
+    label: 'Callout / Note',
+    shortLabel: 'Note',
+    category: 'data',
+    syntaxHint: '@{note}',
+  },
 ];
+
+const SHAPE_DEFAULT_THEME_HEX: Record<
+  FlowNodeType,
+  { fill: string; stroke: string }
+> = {
+  process: { fill: '#082f49', stroke: '#38bdf8' },
+  decision: { fill: '#451a03', stroke: '#fbbf24' },
+  start: { fill: '#022c22', stroke: '#34d399' },
+  database: { fill: '#2e1065', stroke: '#a78bfa' },
+  subroutine: { fill: '#1e1b4b', stroke: '#818cf8' },
+  io: { fill: '#083344', stroke: '#22d3ee' },
+  circle: { fill: '#4c0519', stroke: '#fb7185' },
+  hexagon: { fill: '#431407', stroke: '#fb923c' },
+  asymmetric: { fill: '#042f2e', stroke: '#2dd4bf' },
+  document: { fill: '#1e1b4b', stroke: '#818cf8' },
+  manual: { fill: '#451a03', stroke: '#fbbf24' },
+  trapezoid: { fill: '#022c22', stroke: '#34d399' },
+  delay: { fill: '#4c0519', stroke: '#fb7185' },
+  note: { fill: '#422006', stroke: '#facc15' },
+};
+
+const MiniShapeIcon: React.FC<{
+  type: FlowNodeType;
+  className?: string;
+}> = ({ type, className = 'w-6 h-4' }) => {
+  const { fill, stroke } =
+    SHAPE_DEFAULT_THEME_HEX[type] || SHAPE_DEFAULT_THEME_HEX.process;
+  return (
+    <svg
+      viewBox="0 0 36 22"
+      aria-hidden="true"
+      className={`shrink-0 overflow-visible ${className}`}
+    >
+      {type === 'decision' && (
+        <polygon
+          points="18,1 35,11 18,21 1,11"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      )}
+      {type === 'start' && (
+        <rect
+          x="1"
+          y="2"
+          width="34"
+          height="18"
+          rx="9"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="2"
+        />
+      )}
+      {type === 'circle' && (
+        <>
+          <circle
+            cx="18"
+            cy="11"
+            r="9.5"
+            fill={fill}
+            stroke={stroke}
+            strokeWidth="2"
+          />
+          <circle
+            cx="18"
+            cy="11"
+            r="6.5"
+            fill="none"
+            stroke={stroke}
+            strokeWidth="1"
+            strokeOpacity="0.55"
+          />
+        </>
+      )}
+      {type === 'database' && (
+        <>
+          <path
+            d="M 3,5 V 17 A 15,3.5 0 0,0 33,17 V 5 Z"
+            fill={fill}
+            stroke={stroke}
+            strokeWidth="1.8"
+          />
+          <ellipse
+            cx="18"
+            cy="5"
+            rx="15"
+            ry="3.5"
+            fill={fill}
+            stroke={stroke}
+            strokeWidth="1.8"
+          />
+        </>
+      )}
+      {type === 'subroutine' && (
+        <>
+          <rect
+            x="1"
+            y="2"
+            width="34"
+            height="18"
+            rx="3"
+            fill={fill}
+            stroke={stroke}
+            strokeWidth="1.8"
+          />
+          <line
+            x1="6"
+            y1="2"
+            x2="6"
+            y2="20"
+            stroke={stroke}
+            strokeWidth="1.6"
+          />
+          <line
+            x1="30"
+            y1="2"
+            x2="30"
+            y2="20"
+            stroke={stroke}
+            strokeWidth="1.6"
+          />
+        </>
+      )}
+      {type === 'io' && (
+        <polygon
+          points="6,2 35,2 30,20 1,20"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+      )}
+      {type === 'hexagon' && (
+        <polygon
+          points="7,2 29,2 35,11 29,20 7,20 1,11"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+      )}
+      {type === 'asymmetric' && (
+        <polygon
+          points="1,2 29,2 35,11 29,20 1,20 6,11"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+      )}
+      {type === 'document' && (
+        <path
+          d="M 2,2 H 34 V 16 Q 26,22 18,17 T 2,17 Z"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+      )}
+      {type === 'manual' && (
+        <polygon
+          points="1,2 35,2 30,20 6,20"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+      )}
+      {type === 'trapezoid' && (
+        <polygon
+          points="6,2 30,2 35,20 1,20"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+      )}
+      {type === 'delay' && (
+        <path
+          d="M 2,2 H 24 A 10,9 0 0,1 24,20 H 2 Z"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+      )}
+      {type === 'note' && (
+        <>
+          <path
+            d="M 2,2 H 28 L 34,8 V 20 H 2 Z"
+            fill={fill}
+            stroke={stroke}
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M 28,2 V 8 H 34"
+            fill="none"
+            stroke={stroke}
+            strokeWidth="1.5"
+          />
+        </>
+      )}
+      {type === 'process' && (
+        <rect
+          x="1"
+          y="2"
+          width="34"
+          height="18"
+          rx="4"
+          fill={fill}
+          stroke={stroke}
+          strokeWidth="2"
+        />
+      )}
+    </svg>
+  );
+};
+
+const NodeShapeSvg: React.FC<{
+  nodeId: string;
+  type: FlowNodeType;
+  color?: AccentColor;
+  hasCompartment?: boolean;
+}> = ({ nodeId, type, color, hasCompartment }) => {
+  const defaultTheme =
+    SHAPE_DEFAULT_THEME_HEX[type] || SHAPE_DEFAULT_THEME_HEX.process;
+  const palette = color ? ACCENT_HEX_PALETTE[color] : defaultTheme;
+  const fill = palette.fill;
+  const stroke = palette.stroke;
+
+  return (
+    <svg
+      data-testid={`node-shape-svg-${nodeId}`}
+      aria-hidden="true"
+      viewBox="0 0 144 52"
+      preserveAspectRatio="none"
+      className="absolute inset-0 w-full h-full pointer-events-none overflow-visible"
+    >
+      {hasCompartment ? (
+        <rect
+          x="1"
+          y="1"
+          width="142"
+          height="50"
+          rx="10"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+        />
+      ) : type === 'decision' ? (
+        <>
+          <polygon
+            points="72,1 143,26 72,51 1,26"
+            fill={fill}
+            fillOpacity="0.94"
+            stroke={stroke}
+            strokeWidth="2"
+            strokeLinejoin="round"
+          />
+          <polygon
+            points="72,5 135,26 72,47 9,26"
+            fill="none"
+            stroke={stroke}
+            strokeOpacity="0.35"
+            strokeWidth="1"
+            strokeDasharray="4,3"
+          />
+        </>
+      ) : type === 'start' ? (
+        <rect
+          x="1"
+          y="1"
+          width="142"
+          height="50"
+          rx="25"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+        />
+      ) : type === 'circle' ? (
+        <>
+          <rect
+            x="1"
+            y="1"
+            width="142"
+            height="50"
+            rx="25"
+            fill={fill}
+            fillOpacity="0.92"
+            stroke={stroke}
+            strokeWidth="2"
+          />
+          <rect
+            x="5"
+            y="5"
+            width="134"
+            height="42"
+            rx="21"
+            fill="none"
+            stroke={stroke}
+            strokeOpacity="0.4"
+            strokeWidth="1.2"
+          />
+        </>
+      ) : type === 'database' ? (
+        <>
+          <path
+            d="M 1,9 V 43 A 71,8 0 0,0 143,43 V 9 Z"
+            fill={fill}
+            fillOpacity="0.94"
+            stroke={stroke}
+            strokeWidth="2"
+            strokeLinejoin="round"
+          />
+          <ellipse
+            cx="72"
+            cy="9"
+            rx="71"
+            ry="8"
+            fill={fill}
+            stroke={stroke}
+            strokeWidth="2"
+          />
+          <path
+            d="M 10,15 A 62,6 0 0,0 134,15"
+            fill="none"
+            stroke={stroke}
+            strokeOpacity="0.35"
+            strokeWidth="1"
+          />
+        </>
+      ) : type === 'subroutine' ? (
+        <>
+          <rect
+            x="1"
+            y="1"
+            width="142"
+            height="50"
+            rx="8"
+            fill={fill}
+            fillOpacity="0.92"
+            stroke={stroke}
+            strokeWidth="2"
+          />
+          <line
+            x1="13"
+            y1="1"
+            x2="13"
+            y2="51"
+            stroke={stroke}
+            strokeWidth="1.8"
+            strokeOpacity="0.85"
+          />
+          <line
+            x1="131"
+            y1="1"
+            x2="131"
+            y2="51"
+            stroke={stroke}
+            strokeWidth="1.8"
+            strokeOpacity="0.85"
+          />
+        </>
+      ) : type === 'io' ? (
+        <polygon
+          points="14,1 143,1 130,51 1,51"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      ) : type === 'hexagon' ? (
+        <polygon
+          points="16,1 128,1 143,26 128,51 16,51 1,26"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      ) : type === 'asymmetric' ? (
+        <polygon
+          points="1,1 126,1 143,26 126,51 1,51 13,26"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      ) : type === 'document' ? (
+        <path
+          d="M 1,7 Q 1,1 7,1 H 137 Q 143,1 143,7 V 42 Q 108,54 72,44 T 1,44 Z"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      ) : type === 'manual' ? (
+        <polygon
+          points="1,1 143,1 129,51 15,51"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      ) : type === 'trapezoid' ? (
+        <polygon
+          points="15,1 129,1 143,51 1,51"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      ) : type === 'delay' ? (
+        <path
+          d="M 7,1 H 116 A 27,25 0 0,1 116,51 H 7 Q 1,51 1,45 V 7 Q 1,1 7,1 Z"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      ) : type === 'note' ? (
+        <>
+          <path
+            d="M 7,1 H 128 L 143,16 V 45 Q 143,51 137,51 H 7 Q 1,51 1,45 V 7 Q 1,1 7,1 Z"
+            fill={fill}
+            fillOpacity="0.92"
+            stroke={stroke}
+            strokeWidth="2"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M 128,1 V 16 H 143"
+            fill="none"
+            stroke={stroke}
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+          />
+        </>
+      ) : (
+        <rect
+          x="1"
+          y="1"
+          width="142"
+          height="50"
+          rx="11"
+          fill={fill}
+          fillOpacity="0.92"
+          stroke={stroke}
+          strokeWidth="2"
+        />
+      )}
+    </svg>
+  );
+};
 
 const ACCENT_CYCLE: Array<AccentColor | undefined> = [
   undefined,
@@ -194,6 +765,41 @@ const EXTRA_SHAPE_BUTTONS: Array<{
     title: 'Add Asymmetric Flag Node >...]',
     colorClass: 'text-teal-300',
     Icon: Flag,
+  },
+  {
+    type: 'document',
+    label: 'Doc',
+    title: 'Add Document Node @{ shape: doc }',
+    colorClass: 'text-blue-300',
+    Icon: FileText,
+  },
+  {
+    type: 'manual',
+    label: 'Manual',
+    title: 'Add Manual Input Node [\\.../]',
+    colorClass: 'text-amber-300',
+    Icon: SlidersHorizontal,
+  },
+  {
+    type: 'trapezoid',
+    label: 'Trap',
+    title: 'Add Manual Operation Trapezoid [/...\\]',
+    colorClass: 'text-violet-300',
+    Icon: Columns,
+  },
+  {
+    type: 'delay',
+    label: 'Delay',
+    title: 'Add Delay / Wait Gate @{ shape: delay }',
+    colorClass: 'text-pink-300',
+    Icon: CircleDot,
+  },
+  {
+    type: 'note',
+    label: 'Note',
+    title: 'Add Callout Note Card @{ shape: note }',
+    colorClass: 'text-yellow-300',
+    Icon: FileText,
   },
 ];
 
@@ -342,6 +948,10 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     y?: number;
   } | null>(null);
   const [isStudioSidebarOpen, setIsStudioSidebarOpen] = useState<boolean>(true);
+  const [hoveredEdgeIdx, setHoveredEdgeIdx] = useState<number | null>(null);
+  const [isShapePaletteOpen, setIsShapePaletteOpen] = useState<boolean>(false);
+  const [shapeSearchQuery, setShapeSearchQuery] = useState<string>('');
+  const [shapeCategory, setShapeCategory] = useState<ShapeCategoryId>('all');
 
   // Transient drag coordinate map to prevent localStorage/IPC thrashing on mousemove
   const [dragNodePositions, setDragNodePositions] = useState<Record<
@@ -443,6 +1053,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
 
   // Memoized single-pass edge geometries shared by SVG paths and HTML label badges
   const computedEdges = useMemo(() => {
+    const parallelOffsets = computeParallelEdgeOffsets(flowData.edges);
     return flowData.edges.map((edge, idx) => {
       const fromEntry = nodesById.get(edge.from);
       const toEntry = nodesById.get(edge.to);
@@ -455,6 +1066,10 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         return {
           edge,
           idx,
+          x1,
+          y1: y,
+          x2,
+          y2: y,
           pathData: `M ${x1} ${y} L ${x2} ${y}`,
           midX: Math.round((x1 + x2) / 2),
           midY: y,
@@ -469,11 +1084,16 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         flowData.direction,
         edge.curve || currentEdgeCurve,
         toEntry.width,
-        toEntry.height
+        toEntry.height,
+        parallelOffsets[idx] || 0
       );
       return {
         edge,
         idx,
+        x1: geom.x1,
+        y1: geom.y1,
+        x2: geom.x2,
+        y2: geom.y2,
         pathData: geom.pathData,
         midX: geom.midX,
         midY: geom.midY,
@@ -1412,6 +2032,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         const hasTransientOverlay =
           connectMode ||
           marqueeMode ||
+          isShapePaletteOpen ||
           Boolean(editingNodeId) ||
           editingEdgeIdx !== null ||
           Boolean(editingSubgraphId) ||
@@ -1422,6 +2043,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         setConnectSourceNodeId(null);
         setMarqueeMode(false);
         setMarqueeBox(null);
+        setIsShapePaletteOpen(false);
         setEditingNodeId(null);
         setEditingEdgeIdx(null);
         setEditingSubgraphId(null);
@@ -1503,6 +2125,110 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     handleBatchDeleteSelected,
     selectedNodeId,
   ]);
+
+  const filteredPaletteShapes = useMemo(() => {
+    const query = shapeSearchQuery.trim().toLowerCase();
+    return ALL_NODE_SHAPES.filter((item) => {
+      if (shapeCategory !== 'all' && item.category !== shapeCategory) {
+        return false;
+      }
+      if (!query) return true;
+      return (
+        item.label.toLowerCase().includes(query) ||
+        item.shortLabel.toLowerCase().includes(query) ||
+        item.type.toLowerCase().includes(query) ||
+        item.syntaxHint.toLowerCase().includes(query)
+      );
+    });
+  }, [shapeSearchQuery, shapeCategory]);
+
+  const handleDropShapeOnCanvas = (
+    type: FlowNodeType,
+    clientX: number,
+    clientY: number
+  ) => {
+    const rect = canvasWrapperRef.current?.getBoundingClientRect();
+    let dropX = 64;
+    let dropY = 64;
+    if (rect && rect.width > 0 && rect.height > 0) {
+      dropX = Math.max(
+        16,
+        Math.round((clientX - rect.left - panOffset.x) / zoomLevel - 72)
+      );
+      dropY = Math.max(
+        16,
+        Math.round((clientY - rect.top - panOffset.y) / zoomLevel - 26)
+      );
+      if (snapToGrid) {
+        dropX = Math.round(dropX / 8) * 8;
+        dropY = Math.round(dropY / 8) * 8;
+      }
+    }
+
+    // Check if dropped within 42px of an existing edge midpoint -> splice into edge!
+    const dropCenterX = dropX + 72;
+    const dropCenterY = dropY + 26;
+    const nearEdge = computedEdges.find(
+      (item) =>
+        item &&
+        Math.hypot(item.midX - dropCenterX, item.midY - dropCenterY) <= 42
+    );
+
+    if (nearEdge) {
+      let createdId = '';
+      let createdText = '';
+      commitFlowUpdate((prev) => {
+        const candidateId = allocateUniqueNodeId(prev.nodes);
+        const res = insertNodeOnEdge(
+          prev,
+          nearEdge.idx,
+          candidateId,
+          type,
+          NODE_DEFAULT_LABELS[type]
+        );
+        if (!res) return prev;
+        createdId = res.createdNode.id;
+        createdText = res.createdNode.text;
+        return res.state;
+      });
+      if (createdId) {
+        setSelectedNodeId(createdId);
+        setSelectedNodeIds([createdId]);
+        setEditingNodeId(createdId);
+        setEditingText(createdText);
+        onNotify(
+          `Spliced ${NODE_DEFAULT_LABELS[type]} on Connector`,
+          'check',
+          'Dropped shape directly onto connector midpoint'
+        );
+      }
+      return;
+    }
+
+    let createdId = '';
+    const defaultLabel = NODE_DEFAULT_LABELS[type];
+    commitFlowUpdate((prev) => {
+      const candidateId = allocateUniqueNodeId(prev.nodes);
+      createdId = candidateId;
+      const newNode: FlowNode = {
+        id: candidateId,
+        type,
+        text: defaultLabel,
+        x: dropX,
+        y: dropY,
+      };
+      return {
+        ...prev,
+        nodes: [...prev.nodes, newNode],
+      };
+    });
+    if (createdId) {
+      setSelectedNodeId(createdId);
+      setSelectedNodeIds([createdId]);
+      setEditingNodeId(createdId);
+      setEditingText(defaultLabel);
+    }
+  };
 
   const handleAddNode = (type: FlowNodeType) => {
     let createdId = '';
@@ -2381,6 +3107,25 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               {savedDiagrams.length}
             </span>
           </button>
+          <button
+            type="button"
+            data-testid="toggle-shape-palette-btn"
+            aria-label="Toggle Quick Shape Palette"
+            aria-pressed={isShapePaletteOpen}
+            onClick={() => setIsShapePaletteOpen((prev) => !prev)}
+            title="Open Lucidchart-Style Shape Stencil Palette (Search & Drag to Canvas)"
+            className={`px-2.5 py-1.5 rounded-lg border text-xs flex items-center gap-1.5 transition ${
+              isShapePaletteOpen
+                ? 'bg-indigo-600/35 border-indigo-400 text-indigo-100 shadow'
+                : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-indigo-200'
+            }`}
+          >
+            <Hexagon className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
+            <span>Shapes</span>
+            <span className="px-1 py-0.2 rounded bg-slate-900/90 text-[10px] font-mono text-indigo-300">
+              {ALL_NODE_SHAPES.length}
+            </span>
+          </button>
           {!(layoutMode === 'expanded' && isStudioSidebarOpen) && (
             <>
               <button
@@ -2838,19 +3583,59 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1.5 flex items-center justify-between">
                 <span>Quick Stencil Palette</span>
                 <span className="font-mono text-[10px] text-indigo-400">
-                  9 Shapes
+                  {ALL_NODE_SHAPES.length} Shapes
                 </span>
               </div>
+              <input
+                type="text"
+                data-testid="studio-shape-search"
+                aria-label="Search flowchart shapes"
+                value={shapeSearchQuery}
+                onChange={(e) => setShapeSearchQuery(e.target.value)}
+                placeholder="Filter shapes..."
+                className="w-full mb-1.5 bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-2 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+              />
+              <div
+                role="group"
+                aria-label="Shape Categories"
+                className="flex items-center gap-1 mb-2"
+              >
+                {SHAPE_CATEGORIES.map((cat) => (
+                  <button
+                    key={`studio-cat-${cat.id}`}
+                    type="button"
+                    aria-pressed={shapeCategory === cat.id}
+                    onClick={() => setShapeCategory(cat.id)}
+                    className={`flex-1 py-0.5 rounded text-[10px] font-medium transition ${
+                      shapeCategory === cat.id
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
               <div className="grid grid-cols-2 gap-1.5">
-                {ALL_NODE_SHAPES.map((item) => (
+                {filteredPaletteShapes.map((item) => (
                   <button
                     key={`studio-add-${item.type}`}
                     type="button"
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(
+                        'application/x-sideflow-shape',
+                        item.type
+                      );
+                      e.dataTransfer.effectAllowed = 'copy';
+                    }}
                     aria-label={`Studio: Add ${item.label}`}
+                    title={`${item.label} ${item.syntaxHint} • Click to add or Drag onto canvas`}
                     onClick={() => handleAddNode(item.type)}
-                    className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/40 text-slate-200 text-[11px] text-left truncate transition"
+                    className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/50 text-slate-200 text-[11px] flex items-center gap-1.5 truncate transition cursor-grab active:cursor-grabbing"
                   >
-                    + {item.shortLabel}
+                    <MiniShapeIcon type={item.type} />
+                    <span className="truncate">{item.shortLabel}</span>
                   </button>
                 ))}
               </div>
@@ -3006,6 +3791,26 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
           ref={canvasWrapperRef}
           id="flow-canvas-wrapper"
           onWheel={handleCanvasWheel}
+          onDragOver={(e) => {
+            if (
+              e.dataTransfer.types.includes('application/x-sideflow-shape')
+            ) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+            }
+          }}
+          onDrop={(e) => {
+            const rawShape = e.dataTransfer.getData(
+              'application/x-sideflow-shape'
+            ) as FlowNodeType;
+            if (
+              rawShape &&
+              ALL_NODE_SHAPES.some((s) => s.type === rawShape)
+            ) {
+              e.preventDefault();
+              handleDropShapeOnCanvas(rawShape, e.clientX, e.clientY);
+            }
+          }}
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) {
               setEditingEdgeIdx(null);
@@ -3048,6 +3853,112 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
           }}
           className="relative flex-1 canvas-grid overflow-hidden bg-slate-950"
         >
+          {/* Floating Lucidchart-Style Quick Shape Palette Popover (Available in all panel widths) */}
+          {isShapePaletteOpen && (
+            <div
+              data-testid="quick-shape-palette-popover"
+              role="dialog"
+              aria-label="Quick Shape Palette"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              className="absolute top-3 left-3 z-40 w-64 max-h-[82%] bg-slate-950/95 backdrop-blur-md border border-indigo-500/40 rounded-2xl p-3 shadow-2xl flex flex-col gap-2 text-xs overflow-hidden"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <Hexagon
+                    className="w-3.5 h-3.5 text-indigo-400"
+                    aria-hidden="true"
+                  />
+                  <span className="font-semibold text-[11px] uppercase tracking-wider text-indigo-200">
+                    Shape Library
+                  </span>
+                  <span className="font-mono text-[10px] text-slate-400">
+                    ({filteredPaletteShapes.length})
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  data-testid="close-shape-palette-btn"
+                  aria-label="Close Quick Shape Palette"
+                  onClick={() => setIsShapePaletteOpen(false)}
+                  className="w-6 h-6 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center text-xs"
+                >
+                  ×
+                </button>
+              </div>
+
+              <input
+                type="text"
+                data-testid="shape-palette-search"
+                aria-label="Search shapes in palette"
+                value={shapeSearchQuery}
+                onChange={(e) => setShapeSearchQuery(e.target.value)}
+                placeholder="Search shapes (e.g. Doc, Note, DB)..."
+                className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 rounded-lg px-2.5 py-1 text-[11px] text-white placeholder-slate-500 focus:outline-none"
+              />
+
+              <div
+                role="group"
+                aria-label="Palette Shape Categories"
+                className="flex items-center gap-1"
+              >
+                {SHAPE_CATEGORIES.map((cat) => (
+                  <button
+                    key={`palette-cat-${cat.id}`}
+                    type="button"
+                    data-testid={`palette-category-${cat.id}`}
+                    aria-pressed={shapeCategory === cat.id}
+                    onClick={() => setShapeCategory(cat.id)}
+                    className={`flex-1 py-1 rounded-md text-[10px] font-medium transition ${
+                      shapeCategory === cat.id
+                        ? 'bg-indigo-600 text-white shadow'
+                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5 overflow-y-auto pr-0.5 max-h-64">
+                {filteredPaletteShapes.map((item) => (
+                  <button
+                    key={`palette-shape-${item.type}`}
+                    type="button"
+                    data-testid={`palette-shape-${item.type}`}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(
+                        'application/x-sideflow-shape',
+                        item.type
+                      );
+                      e.dataTransfer.effectAllowed = 'copy';
+                    }}
+                    onClick={() => {
+                      handleAddNode(item.type);
+                    }}
+                    title={`${item.label} ${item.syntaxHint} • Click to spawn or Drag onto canvas / connector`}
+                    className="min-h-[34px] px-2 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/60 text-slate-100 text-[11px] flex items-center gap-2 transition cursor-grab active:cursor-grabbing group"
+                  >
+                    <MiniShapeIcon type={item.type} />
+                    <div className="min-w-0 flex-1 text-left">
+                      <div className="font-medium truncate leading-tight">
+                        {item.shortLabel}
+                      </div>
+                      <div className="text-[9px] font-mono text-slate-400 truncate">
+                        {item.syntaxHint}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <div className="text-[10px] text-slate-400 border-t border-slate-800/80 pt-1.5 flex items-center justify-between">
+                <span>Drag onto canvas or connector</span>
+                <span className="font-mono text-indigo-300">14 stencils</span>
+              </div>
+            </div>
+          )}
+
           {/* Floating Bottom-Right Viewport HUD (Zoom / Fit / Snap-to-Grid) */}
           <div
             data-testid="flow-canvas-hud"
@@ -3423,22 +4334,80 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 <marker
                   id="arrowhead"
                   markerWidth="10"
-                  markerHeight="7"
-                  refX="9"
-                  refY="3.5"
+                  markerHeight="8"
+                  refX="8.5"
+                  refY="4"
                   orient="auto"
                 >
-                  <polygon points="0 0, 10 3.5, 0 7" fill="#818cf8" />
+                  <path
+                    d="M 0 0.5 L 9.5 4 L 0 7.5 L 2.3 4 Z"
+                    fill="#818cf8"
+                  />
+                </marker>
+                <marker
+                  id="arrowhead-hover"
+                  markerWidth="10"
+                  markerHeight="8"
+                  refX="8.5"
+                  refY="4"
+                  orient="auto"
+                >
+                  <path
+                    d="M 0 0.5 L 9.5 4 L 0 7.5 L 2.3 4 Z"
+                    fill="#67e8f9"
+                  />
+                </marker>
+                <marker
+                  id="arrowhead-selected"
+                  markerWidth="10"
+                  markerHeight="8"
+                  refX="8.5"
+                  refY="4"
+                  orient="auto"
+                >
+                  <path
+                    d="M 0 0.5 L 9.5 4 L 0 7.5 L 2.3 4 Z"
+                    fill="#38bdf8"
+                  />
                 </marker>
                 <marker
                   id="arrowhead-start"
                   markerWidth="10"
-                  markerHeight="7"
-                  refX="1"
-                  refY="3.5"
+                  markerHeight="8"
+                  refX="1.5"
+                  refY="4"
                   orient="auto"
                 >
-                  <polygon points="10 0, 0 3.5, 10 7" fill="#818cf8" />
+                  <path
+                    d="M 10 0.5 L 0.5 4 L 10 7.5 L 7.7 4 Z"
+                    fill="#818cf8"
+                  />
+                </marker>
+                <marker
+                  id="arrowhead-start-hover"
+                  markerWidth="10"
+                  markerHeight="8"
+                  refX="1.5"
+                  refY="4"
+                  orient="auto"
+                >
+                  <path
+                    d="M 10 0.5 L 0.5 4 L 10 7.5 L 7.7 4 Z"
+                    fill="#67e8f9"
+                  />
+                </marker>
+                <marker
+                  id="arrowhead-start-selected"
+                  markerWidth="10"
+                  markerHeight="8"
+                  refX="1.5"
+                  refY="4"
+                  orient="auto"
+                >
+                  <path
+                    d="M 10 0.5 L 0.5 4 L 10 7.5 L 7.7 4 Z"
+                    fill="#38bdf8"
+                  />
                 </marker>
                 <marker
                   id="circlehead"
@@ -3458,6 +4427,40 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   />
                 </marker>
                 <marker
+                  id="circlehead-hover"
+                  markerWidth="8"
+                  markerHeight="8"
+                  refX="5"
+                  refY="4"
+                  orient="auto"
+                >
+                  <circle
+                    cx="4"
+                    cy="4"
+                    r="3"
+                    fill="#020617"
+                    stroke="#67e8f9"
+                    strokeWidth="1.8"
+                  />
+                </marker>
+                <marker
+                  id="circlehead-selected"
+                  markerWidth="8"
+                  markerHeight="8"
+                  refX="5"
+                  refY="4"
+                  orient="auto"
+                >
+                  <circle
+                    cx="4"
+                    cy="4"
+                    r="3"
+                    fill="#020617"
+                    stroke="#38bdf8"
+                    strokeWidth="1.8"
+                  />
+                </marker>
+                <marker
                   id="crosshead"
                   markerWidth="9"
                   markerHeight="9"
@@ -3468,6 +4471,36 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   <path
                     d="M 1.5 1.5 L 7.5 7.5 M 7.5 1.5 L 1.5 7.5"
                     stroke="#818cf8"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                </marker>
+                <marker
+                  id="crosshead-hover"
+                  markerWidth="9"
+                  markerHeight="9"
+                  refX="6"
+                  refY="4.5"
+                  orient="auto"
+                >
+                  <path
+                    d="M 1.5 1.5 L 7.5 7.5 M 7.5 1.5 L 1.5 7.5"
+                    stroke="#67e8f9"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                </marker>
+                <marker
+                  id="crosshead-selected"
+                  markerWidth="9"
+                  markerHeight="9"
+                  refX="6"
+                  refY="4.5"
+                  orient="auto"
+                >
+                  <path
+                    d="M 1.5 1.5 L 7.5 7.5 M 7.5 1.5 L 1.5 7.5"
+                    stroke="#38bdf8"
                     strokeWidth="2"
                     strokeLinecap="round"
                   />
@@ -3531,30 +4564,46 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               <g id="flow-edges-group">
                 {computedEdges.map((item) => {
                   if (!item) return null;
-                  const { edge, idx, pathData, midX, midY } = item;
+                  const { edge, idx, x1, y1, x2, y2, pathData } = item;
+
+                  const isEdgeSelected = editingEdgeIdx === idx;
+                  const isEdgeHovered = hoveredEdgeIdx === idx;
+                  const markerSuffix = isEdgeSelected
+                    ? '-selected'
+                    : isEdgeHovered
+                      ? '-hover'
+                      : '';
 
                   const strokeWidth = edge.style === 'thick' ? '4' : '2.2';
                   const strokeDasharray =
                     edge.style === 'dotted' ? '6,4' : undefined;
                   const markerStart =
                     edge.arrow === 'bidirectional'
-                      ? 'url(#arrowhead-start)'
+                      ? `url(#arrowhead-start${markerSuffix})`
                       : undefined;
-                  let markerEnd: string | undefined = 'url(#arrowhead)';
+                  let markerEnd: string | undefined = `url(#arrowhead${markerSuffix})`;
                   if (edge.arrow === 'none') {
                     markerEnd = undefined;
                   } else if (edge.arrow === 'circle') {
-                    markerEnd = 'url(#circlehead)';
+                    markerEnd = `url(#circlehead${markerSuffix})`;
                   } else if (edge.arrow === 'cross') {
-                    markerEnd = 'url(#crosshead)';
+                    markerEnd = `url(#crosshead${markerSuffix})`;
                   }
 
-                  const isEdgeSelected = editingEdgeIdx === idx;
+                  const strokeColor = isEdgeSelected
+                    ? '#38bdf8'
+                    : isEdgeHovered
+                      ? '#67e8f9'
+                      : '#818cf8';
 
                   return (
                     <g
                       key={`${edge.from}-${edge.to}-${idx}`}
                       data-testid={`flow-edge-${idx}`}
+                      onMouseEnter={() => setHoveredEdgeIdx(idx)}
+                      onMouseLeave={() =>
+                        setHoveredEdgeIdx((prev) => (prev === idx ? null : prev))
+                      }
                       onClick={(e) => {
                         e.stopPropagation();
                         startEditingEdge(
@@ -3585,31 +4634,42 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                       <path
                         d={pathData}
                         stroke="transparent"
-                        strokeWidth="14"
+                        strokeWidth="16"
                         fill="none"
                       />
                       <path
                         d={pathData}
-                        stroke={isEdgeSelected ? '#38bdf8' : '#818cf8'}
+                        stroke={strokeColor}
                         strokeWidth={strokeWidth}
                         strokeDasharray={strokeDasharray}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
                         fill="none"
                         markerStart={markerStart}
                         markerEnd={markerEnd}
-                        className="group-hover:stroke-cyan-300 transition-colors"
+                        className="transition-colors"
                       />
-                      {edge.label && (
-                        <text
-                          x={midX}
-                          y={midY - 8}
-                          fill="#c7d2fe"
-                          fontSize="10"
-                          fontWeight="600"
-                          textAnchor="middle"
-                          className="pointer-events-none select-none"
-                        >
-                          {edge.label}
-                        </text>
+                      {(isEdgeHovered || isEdgeSelected) && (
+                        <>
+                          <circle
+                            data-testid={`edge-anchor-start-${idx}`}
+                            cx={x1}
+                            cy={y1}
+                            r="3.2"
+                            fill="#020617"
+                            stroke={strokeColor}
+                            strokeWidth="1.8"
+                          />
+                          <circle
+                            data-testid={`edge-anchor-end-${idx}`}
+                            cx={x2}
+                            cy={y2}
+                            r="3.2"
+                            fill="#020617"
+                            stroke={strokeColor}
+                            strokeWidth="1.8"
+                          />
+                        </>
                       )}
                     </g>
                   );
@@ -3891,49 +4951,35 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               className="absolute inset-0 w-full h-full pointer-events-none"
             >
               {effectiveNodes.map((node) => {
-                let radiusAndBorder = 'rounded-xl border-2';
-                let colorTheme =
-                  'bg-sky-950/90 border-sky-400/70 text-sky-100';
-
-                if (node.type === 'decision') {
-                  radiusAndBorder = 'rounded-2xl border-2 border-dashed';
-                  colorTheme =
-                    'bg-amber-950/90 border-amber-400/80 text-amber-100';
+                let textTheme = 'text-sky-100';
+                if (node.type === 'decision' || node.type === 'manual') {
+                  textTheme = 'text-amber-100';
                 } else if (node.type === 'start') {
-                  radiusAndBorder = 'rounded-full border-2';
-                  colorTheme =
-                    'bg-emerald-950/90 border-emerald-400/80 text-emerald-100';
-                } else if (node.type === 'database') {
-                  radiusAndBorder = 'rounded-xl border-2 border-t-[6px]';
-                  colorTheme =
-                    'bg-purple-950/90 border-purple-400/80 text-purple-100';
+                  textTheme = 'text-emerald-100';
+                } else if (
+                  node.type === 'database' ||
+                  node.type === 'trapezoid'
+                ) {
+                  textTheme = 'text-purple-100';
                 } else if (node.type === 'subroutine') {
-                  radiusAndBorder =
-                    'rounded-lg border-y-2 border-x-[6px] border-double';
-                  colorTheme =
-                    'bg-indigo-950/90 border-indigo-400/80 text-indigo-100';
-                } else if (node.type === 'io') {
-                  radiusAndBorder = 'rounded-lg border-2 -skew-x-6';
-                  colorTheme =
-                    'bg-cyan-950/90 border-cyan-400/80 text-cyan-100';
-                } else if (node.type === 'circle') {
-                  radiusAndBorder =
-                    'rounded-full border-2 ring-1 ring-rose-400/30';
-                  colorTheme =
-                    'bg-rose-950/90 border-rose-400/80 text-rose-100';
+                  textTheme = 'text-indigo-100';
+                } else if (node.type === 'io' || node.type === 'document') {
+                  textTheme = 'text-cyan-100';
+                } else if (node.type === 'circle' || node.type === 'delay') {
+                  textTheme = 'text-rose-100';
                 } else if (node.type === 'hexagon') {
-                  radiusAndBorder = 'rounded-xl border-2 border-x-[6px]';
-                  colorTheme =
-                    'bg-orange-950/90 border-orange-400/80 text-orange-100';
+                  textTheme = 'text-orange-100';
                 } else if (node.type === 'asymmetric') {
-                  radiusAndBorder =
-                    'rounded-r-2xl rounded-l-sm border-2 border-l-[6px]';
-                  colorTheme =
-                    'bg-teal-950/90 border-teal-400/80 text-teal-100';
+                  textTheme = 'text-teal-100';
+                } else if (node.type === 'note') {
+                  textTheme = 'text-yellow-100';
                 }
 
                 if (node.color && NODE_COLOR_CLASSES[node.color]) {
-                  colorTheme = NODE_COLOR_CLASSES[node.color];
+                  const colorTokens = NODE_COLOR_CLASSES[node.color]
+                    .split(' ')
+                    .filter((cls) => cls.startsWith('text-'));
+                  if (colorTokens[0]) textTheme = colorTokens[0];
                 }
 
                 const isSelected =
@@ -3942,7 +4988,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 const isDropTarget =
                   draftConnection?.hoverTargetId === node.id;
 
-                let shapeClasses = `${radiusAndBorder} ${colorTheme}`;
+                let shapeClasses = `rounded-xl ${textTheme}`;
                 if (connectMode && connectSourceNodeId === node.id) {
                   shapeClasses += ' ring-4 ring-indigo-500';
                 } else if (isDropTarget) {
@@ -3950,6 +4996,10 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 } else if (isSelected) {
                   shapeClasses += ' ring-2 ring-indigo-400/90';
                 }
+
+                const hasCompartment =
+                  Boolean(node.stereotype) ||
+                  Boolean(node.members && node.members.length > 0);
 
                 return (
                   <div
@@ -3969,9 +5019,17 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                       startEditingNode(node);
                     }}
                     onKeyDown={(e) => handleNodeKeyDown(e, node)}
-                    className={`pointer-events-auto absolute w-36 min-h-[52px] px-3 py-2 shadow-xl flex flex-col items-center justify-center text-center text-xs font-medium cursor-move select-none transition-shadow group ${shapeClasses}`}
+                    className={`pointer-events-auto absolute w-36 min-h-[52px] px-3 py-2 flex flex-col items-center justify-center text-center text-xs font-medium cursor-move select-none transition-transform group ${shapeClasses}`}
                   >
-                    {/* Floating In-Place Shape Switcher & Quick Action Pill when a Single Node is Selected */}
+                    {/* True Vector SVG Silhouette Layer */}
+                    <NodeShapeSvg
+                      nodeId={node.id}
+                      type={node.type}
+                      color={node.color}
+                      hasCompartment={hasCompartment}
+                    />
+
+                    {/* Floating In-Place Shape Switcher, Quick Morph Icons, Color Dots & Quick Action Pill when a Single Node is Selected */}
                     {isSelected &&
                       selectedNodeIds.length <= 1 &&
                       !connectMode &&
@@ -3981,10 +5039,41 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           onMouseDown={(e) => e.stopPropagation()}
                           onClick={(e) => e.stopPropagation()}
                           onDoubleClick={(e) => e.stopPropagation()}
-                          className={`pointer-events-auto absolute -top-9 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 border border-indigo-500/50 rounded-lg px-1.5 py-0.5 shadow-xl flex items-center gap-1 ${
-                            node.type === 'io' ? 'skew-x-6' : ''
-                          }`}
+                          className="pointer-events-auto absolute -top-10 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 border border-indigo-500/50 rounded-xl px-1.5 py-0.5 shadow-2xl flex items-center gap-1 whitespace-nowrap"
                         >
+                          {(
+                            [
+                              { type: 'process', morphLabel: 'Box' },
+                              { type: 'decision', morphLabel: 'Diamond' },
+                              { type: 'database', morphLabel: 'Cylinder' },
+                              { type: 'document', morphLabel: 'Wave' },
+                              { type: 'note', morphLabel: 'Callout' },
+                            ] as Array<{
+                              type: FlowNodeType;
+                              morphLabel: string;
+                            }>
+                          ).map(({ type: quickType, morphLabel }) => (
+                            <button
+                              key={`quick-morph-${node.id}-${quickType}`}
+                              type="button"
+                              data-testid={`quick-morph-${quickType}-${node.id}`}
+                              aria-label={`Quick morph to ${morphLabel}`}
+                              title={`Quick morph to ${NODE_DEFAULT_LABELS[quickType]}`}
+                              onClick={() =>
+                                handleChangeNodeShape(node.id, quickType)
+                              }
+                              className={`w-6 h-6 rounded-md flex items-center justify-center transition ${
+                                node.type === quickType
+                                  ? 'bg-indigo-600/40 ring-1 ring-indigo-400'
+                                  : 'hover:bg-slate-800'
+                              }`}
+                            >
+                              <MiniShapeIcon
+                                type={quickType}
+                                className="w-3.5 h-3"
+                              />
+                            </button>
+                          ))}
                           <select
                             aria-label={`Change shape for ${node.text}`}
                             data-testid={`node-shape-switcher-${node.id}`}
@@ -3995,7 +5084,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                                 e.target.value as FlowNodeType
                               )
                             }
-                            title="Switch node shape in-place"
+                            title="Switch node shape in-place (14 shapes)"
                             className="min-h-[24px] bg-slate-800 border border-slate-700 text-indigo-200 rounded px-1.5 py-0.5 text-[10px] focus:outline-none"
                           >
                             {ALL_NODE_SHAPES.map((s) => (
@@ -4004,6 +5093,43 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                               </option>
                             ))}
                           </select>
+                          <div className="flex items-center gap-0.5 px-0.5 border-x border-slate-700/80">
+                            {(
+                              [
+                                'indigo',
+                                'cyan',
+                                'emerald',
+                                'amber',
+                                'rose',
+                                'purple',
+                              ] as AccentColor[]
+                            ).map((c) => (
+                              <button
+                                key={`quick-color-${node.id}-${c}`}
+                                type="button"
+                                data-testid={`quick-color-${c}-${node.id}`}
+                                aria-label={`Quick accent ${c}`}
+                                title={`Set ${c} accent`}
+                                onClick={() =>
+                                  handleSetNodeColor(
+                                    node.id,
+                                    node.color === c ? undefined : c
+                                  )
+                                }
+                                className="w-4 h-6 flex items-center justify-center rounded hover:bg-slate-800"
+                              >
+                                <span
+                                  className={`w-2.5 h-2.5 rounded-full border ${
+                                    ACCENT_SWATCH_CLASSES[c]
+                                  } ${
+                                    node.color === c
+                                      ? 'ring-1 ring-white scale-110'
+                                      : ''
+                                  }`}
+                                />
+                              </button>
+                            ))}
+                          </div>
                           <button
                             type="button"
                             data-testid={`node-duplicate-btn-${node.id}`}
@@ -4036,7 +5162,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             isSelected
                               ? 'opacity-95 scale-100'
                               : 'opacity-0 group-hover:opacity-95 group-focus-within:opacity-95 scale-90 group-hover:scale-100'
-                          } ${node.type === 'io' ? 'skew-x-6' : ''}`}
+                          }`}
                         >
                           <Plus
                             className="w-2.5 h-2.5 stroke-[2.5]"
@@ -4053,9 +5179,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           setCompartmentNodeId(node.id);
                         }}
                         title="Click to edit UML stereotype & members"
-                        className={`text-[10px] italic text-amber-300/90 leading-tight mb-0.5 cursor-pointer hover:underline ${
-                          node.type === 'io' ? 'skew-x-6' : ''
-                        }`}
+                        className="relative z-10 text-[10px] italic text-amber-300/90 leading-tight mb-0.5 cursor-pointer hover:underline"
                       >
                         &lt;&lt;{node.stereotype}&gt;&gt;
                       </span>
@@ -4106,9 +5230,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                             }
                           }}
                           autoFocus
-                          className={`w-full bg-slate-900 text-white text-xs px-1.5 py-0.5 rounded border border-indigo-400 focus:outline-none text-center ${
-                            node.type === 'io' ? 'skew-x-6' : ''
-                          }`}
+                          className="relative z-10 w-full bg-slate-900 text-white text-xs px-1.5 py-0.5 rounded border border-indigo-400 focus:outline-none text-center"
                         />
                       </>
                     ) : (
@@ -4117,9 +5239,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           e.stopPropagation();
                           startEditingNode(node);
                         }}
-                        className={`leading-snug break-words pointer-events-auto ${
-                          node.type === 'io' ? 'skew-x-6' : ''
-                        }`}
+                        className="relative z-10 leading-snug break-words pointer-events-auto"
                       >
                         {node.text}
                       </span>
@@ -4133,9 +5253,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           setCompartmentNodeId(node.id);
                         }}
                         title="Click to edit compartment members"
-                        className={`w-full mt-1.5 pt-1 border-t border-slate-500/40 text-left font-mono text-[10px] text-slate-200/90 space-y-0.5 cursor-pointer hover:text-white ${
-                          node.type === 'io' ? 'skew-x-6' : ''
-                        }`}
+                        className="relative z-10 w-full mt-1.5 pt-1 border-t border-slate-500/40 text-left font-mono text-[10px] text-slate-200/90 space-y-0.5 cursor-pointer hover:text-white"
                       >
                         {node.members.map((member, mIdx) => (
                           <div
@@ -4158,9 +5276,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         e.stopPropagation();
                         handleCycleNodeColor(node.id);
                       }}
-                      className={`opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -top-2.5 -left-2.5 w-6 h-6 rounded-full bg-slate-800 border border-slate-600 text-slate-200 hover:text-indigo-300 flex items-center justify-center shadow z-20 ${
-                        node.type === 'io' ? 'skew-x-6' : ''
-                      }`}
+                      className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -top-2.5 -left-2.5 w-6 h-6 rounded-full bg-slate-800 border border-slate-600 text-slate-200 hover:text-indigo-300 flex items-center justify-center shadow z-20"
                     >
                       <Palette className="w-3 h-3" aria-hidden="true" />
                     </button>
@@ -4179,9 +5295,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         );
                         setNewMemberInput('');
                       }}
-                      className={`opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -bottom-2.5 -left-2.5 w-6 h-6 rounded-full bg-slate-800 border border-slate-600 text-slate-200 hover:text-cyan-300 flex items-center justify-center shadow z-20 ${
-                        node.type === 'io' ? 'skew-x-6' : ''
-                      }`}
+                      className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -bottom-2.5 -left-2.5 w-6 h-6 rounded-full bg-slate-800 border border-slate-600 text-slate-200 hover:text-cyan-300 flex items-center justify-center shadow z-20"
                     >
                       <ListPlus className="w-3 h-3" aria-hidden="true" />
                     </button>
@@ -4195,9 +5309,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         e.stopPropagation();
                         handleDeleteNode(node.id);
                       }}
-                      className={`opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -top-2.5 -right-2.5 w-6 h-6 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center text-xs shadow z-20 ${
-                        node.type === 'io' ? 'skew-x-6' : ''
-                      }`}
+                      className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 absolute -top-2.5 -right-2.5 w-6 h-6 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center text-xs shadow z-20"
                     >
                       ×
                     </button>
@@ -4221,9 +5333,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           transform:
                             node.x < 85 ? 'none' : 'translateX(-50%)',
                         }}
-                        className={`pointer-events-auto absolute top-full mt-2 z-50 w-64 rounded-xl border border-indigo-500/60 bg-slate-900/95 p-2.5 shadow-2xl text-left text-[10px] text-slate-100 flex flex-col gap-2 cursor-default ${
-                          node.type === 'io' ? 'skew-x-6' : ''
-                        }`}
+                        className="pointer-events-auto absolute top-full mt-2 z-50 w-64 rounded-xl border border-indigo-500/60 bg-slate-900/95 p-2.5 shadow-2xl text-left text-[10px] text-slate-100 flex flex-col gap-2 cursor-default"
                       >
                         <div className="flex items-center justify-between border-b border-slate-800 pb-1">
                           <span className="font-semibold text-indigo-300 truncate">

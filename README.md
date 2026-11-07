@@ -232,6 +232,15 @@ SideFlow/
 
 ### 4.1 Prerequisites & Installation
 
+#### ⚡ Option A: Warning-Free 1-Line Windows Install (Recommended for End Users)
+Run the following one-liner in **PowerShell** to download the latest release from GitHub, verify its SHA-512 checksum against `latest.yml`, strip the browser Mark-of-the-Web (`Zone.Identifier`) stream (preventing Microsoft Defender SmartScreen popups), and install silently per-user with **zero UAC elevation prompts**:
+
+```powershell
+irm https://raw.githubusercontent.com/NeoShadow7366/SideFlow/master/install.ps1 | iex
+```
+
+#### 🛠️ Option B: Build & Install from Source (Developers)
+
 - **Node.js:** `v18.0.0` or higher (LTS recommended)
 - **npm:** `v9.0.0` or higher
 - **OS:** Windows 10/11 or macOS (for native Electron tray packaging)
@@ -240,6 +249,9 @@ Install project dependencies from the repository root:
 
 ```bash
 npm install
+
+# Optional: Build and silently install the local Windows NSIS package with zero warnings
+npm run install:local
 ```
 
 ### 4.2 Development Web Mode

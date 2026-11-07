@@ -73,6 +73,7 @@ import { FlowCanvas } from './components/Flowchart/FlowCanvas';
 import { NotesView } from './components/Notes/NotesView';
 import { SettingsView } from './components/Settings/SettingsView';
 import { ElectronModal } from './components/ElectronModal';
+import { OnboardingModal } from './components/OnboardingModal';
 import { CommandPalette } from './components/CommandPalette';
 import { DynamicIcon } from './components/DynamicIcon';
 import { SideFlowIcon } from './components/SideFlowIcon';
@@ -176,6 +177,16 @@ export const App: React.FC = () => {
   const [isRecordingHotkey, setIsRecordingHotkey] = useState<boolean>(false);
   const [isTrayMenuOpen, setIsTrayMenuOpen] = useState<boolean>(false);
   const [isElectronModalOpen, setIsElectronModalOpen] = useState<boolean>(false);
+  const [hasOnboarded, setHasOnboarded] = useLocalStorage<boolean>(
+    'sideflow_onboarded_v1',
+    false
+  );
+  const [autoOnboarding, setAutoOnboarding] = useLocalStorage<boolean>(
+    'sideflow_auto_onboarding',
+    false
+  );
+  const [isOnboardingModalOpen, setIsOnboardingModalOpen] =
+    useState<boolean>(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [clockTime, setClockTime] = useState<string>(() =>
@@ -2271,6 +2282,7 @@ export const App: React.FC = () => {
                 notes: notes.length,
               }}
               onOpenElectronModal={() => setIsElectronModalOpen(true)}
+              onOpenOnboardingWizard={() => setIsOnboardingModalOpen(true)}
               onExportBackup={handleExportBackup}
               onImportBackup={handleImportBackup}
               onResetAllData={handleResetAllData}
@@ -2498,6 +2510,59 @@ export const App: React.FC = () => {
         isOpen={isElectronModalOpen}
         onClose={() => setIsElectronModalOpen(false)}
         onNotify={notify}
+      />
+
+      {/* 60-Second First-Run Onboarding Wizard */}
+      <OnboardingModal
+        isOpen={isOnboardingModalOpen || (autoOnboarding && !hasOnboarded)}
+        onClose={() => {
+          setIsOnboardingModalOpen(false);
+          setHasOnboarded(true);
+          setAutoOnboarding(false);
+          setIsRecordingHotkey(false);
+        }}
+        onComplete={() => {
+          setIsOnboardingModalOpen(false);
+          setHasOnboarded(true);
+          setAutoOnboarding(false);
+          setIsRecordingHotkey(false);
+          notify(
+            'SideFlow Setup Complete',
+            'check',
+            `Toggle anytime with ${shortcut.label}`
+          );
+        }}
+        shortcut={shortcut}
+        isRecordingHotkey={isRecordingHotkey}
+        onStartRecordingHotkey={() => setIsRecordingHotkey((prev) => !prev)}
+        onSelectShortcutPreset={(preset) => {
+          setIsRecordingHotkey(false);
+          setShortcut(preset);
+          void window.sideflow?.updateGlobalShortcut?.(
+            preset.label.replace(/\s+/g, '')
+          );
+          notify('Updated Toggle Shortcut', 'check', preset.label);
+        }}
+        isPinned={isPinned}
+        onTogglePin={togglePin}
+        openAtLogin={openAtLogin}
+        onToggleOpenAtLogin={handleToggleOpenAtLogin}
+        panelEdge={panelEdge}
+        onChangePanelEdge={handleChangePanelEdge}
+        panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
+        onChangePanelWidthPercent={(nextPct) =>
+          handleChangePanelWidthPercent(nextPct, true)
+        }
+        monitorSettings={safeMonitorSettings}
+        onChangeMonitorSettings={(next) =>
+          handleChangeMonitorSettings(
+            next,
+            'Updated Monitor Routing',
+            next.mode === 'all'
+              ? 'Follows your mouse across all monitors'
+              : 'Pinned to Primary Monitor'
+          )
+        }
       />
     </div>
   );

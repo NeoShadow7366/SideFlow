@@ -92,6 +92,7 @@ interface SettingsViewProps {
     notes: number;
   };
   onOpenElectronModal: () => void;
+  onOpenOnboardingWizard?: () => void;
   onExportBackup?: () => void;
   onImportBackup?: (rawJson: string) => void;
   onResetAllData?: () => void;
@@ -130,6 +131,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   isElectron,
   countsSummary,
   onOpenElectronModal,
+  onOpenOnboardingWizard,
   onExportBackup,
   onImportBackup,
   onResetAllData,
@@ -139,6 +141,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const cancelResetBtnRef = useRef<HTMLButtonElement>(null);
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('all');
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+  const [copiedPsInstall, setCopiedPsInstall] = useState(false);
+  const psInstallCmd =
+    'irm https://raw.githubusercontent.com/NeoShadow7366/SideFlow/master/install.ps1 | iex';
 
   const runningInElectron = isElectron ?? Boolean(window.sideflow?.isElectron);
   const showSection = (cat: Exclude<SettingsCategory, 'all'>) =>
@@ -330,6 +335,37 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           );
         })}
       </div>
+
+      {/* 60-Second Quick Setup Wizard Banner */}
+      {showSection('shortcuts') && onOpenOnboardingWizard && (
+        <div
+          data-testid="onboarding-wizard-banner"
+          className="p-3.5 rounded-2xl bg-gradient-to-r from-indigo-950/60 via-slate-950/80 to-cyan-950/40 border border-indigo-500/30 flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center shrink-0">
+              <Sparkles className="w-4 h-4 text-indigo-400" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-white">
+                60-Second Setup Wizard
+              </div>
+              <div className="text-[11px] text-slate-400 truncate">
+                Guided setup for your hotkey, screen edge, and multi-monitor routing
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            data-testid="open-onboarding-wizard-btn"
+            onClick={onOpenOnboardingWizard}
+            className="min-h-[32px] px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition shrink-0 flex items-center gap-1.5 shadow-sm shadow-indigo-950/50"
+          >
+            <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
+            Launch Wizard
+          </button>
+        </div>
+      )}
 
       {/* Global Toggle Shortcut */}
       {showSection('shortcuts') && (
@@ -1177,6 +1213,40 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </span>
               </button>
             )}
+          </div>
+
+          <div
+            data-testid="warning-free-install-box"
+            className="pt-2 border-t border-slate-800/80 space-y-1.5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-slate-300">
+                Warning-Free 1-Line PowerShell Install / Upgrade
+              </span>
+              <span className="text-[10px] font-mono text-emerald-400">
+                No SmartScreen / No UAC
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <code
+                data-testid="ps-install-command"
+                className="flex-1 min-w-0 truncate px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 font-mono text-[10px] text-indigo-200 select-all"
+              >
+                {psInstallCmd}
+              </code>
+              <button
+                type="button"
+                data-testid="copy-ps-install-btn"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(psInstallCmd);
+                  setCopiedPsInstall(true);
+                  window.setTimeout(() => setCopiedPsInstall(false), 2000);
+                }}
+                className="min-h-[28px] px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-[11px] font-medium text-indigo-200 hover:text-white shrink-0 transition"
+              >
+                {copiedPsInstall ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
           </div>
         </div>
       )}

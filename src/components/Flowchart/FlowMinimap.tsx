@@ -395,12 +395,22 @@ export const FlowMinimap: React.FC<FlowMinimapProps> = ({
             const isSelected = selectedSet.has(node.id);
             const fillHex = node.color
               ? NODE_FILL_HEX[node.color]
-              : node.type === 'decision'
+              : node.type === 'decision' || node.type === 'manual'
               ? '#f59e0b'
-              : node.type === 'start'
+              : node.type === 'start' || node.type === 'trapezoid'
               ? '#10b981'
               : node.type === 'database'
               ? '#a855f7'
+              : node.type === 'circle' || node.type === 'delay'
+              ? '#f43f5e'
+              : node.type === 'io'
+              ? '#06b6d4'
+              : node.type === 'hexagon'
+              ? '#fb923c'
+              : node.type === 'asymmetric'
+              ? '#14b8a6'
+              : node.type === 'note'
+              ? '#eab308'
               : '#6366f1';
 
             if (node.type === 'decision') {

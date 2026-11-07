@@ -339,4 +339,79 @@ describe('SideFlow Phase 5 UX Suite — Global Command Palette & Flowchart Minim
       expect(window.localStorage.getItem('sideflow_flow_minimap')).toBe('true');
     });
   });
+
+  describe('3. Lucidchart-Style Quick Shape Palette, Vector SVG Node Silhouettes & Connector UX', () => {
+    it('renders inline SVG shape silhouettes, opens Quick Shape Palette with search/category filtering & drag-and-drop creation, morphs shapes & colors via floating toolbar, and avoids duplicate edge labels', () => {
+      render(<App />);
+
+      fireEvent.click(screen.getByRole('tab', { name: /^Flow$/i }));
+
+      // 1. Verify true inline SVG shape silhouettes render on canvas nodes
+      expect(screen.getByTestId('node-shape-svg-n1')).toBeInTheDocument();
+      expect(screen.getByTestId('node-shape-svg-n2')).toBeInTheDocument();
+
+      // 2. Open floating Quick Shape Palette from primary toolbar
+      const paletteToggleBtn = screen.getByTestId('toggle-shape-palette-btn');
+      expect(paletteToggleBtn).toHaveAttribute('aria-pressed', 'false');
+      fireEvent.click(paletteToggleBtn);
+      expect(paletteToggleBtn).toHaveAttribute('aria-pressed', 'true');
+
+      const palettePopover = screen.getByTestId('quick-shape-palette-popover');
+      expect(palettePopover).toBeInTheDocument();
+
+      // Filter by category 'data' and search 'Doc'
+      fireEvent.click(screen.getByTestId('palette-category-data'));
+      const searchInput = screen.getByTestId('shape-palette-search');
+      fireEvent.change(searchInput, { target: { value: 'Doc' } });
+      expect(screen.getByTestId('palette-shape-document')).toBeInTheDocument();
+      expect(
+        screen.queryByTestId('palette-shape-process')
+      ).not.toBeInTheDocument();
+
+      // Click Document stencil in Quick Shape Palette to spawn a Document node
+      fireEvent.click(screen.getByTestId('palette-shape-document'));
+      expect(screen.getByTestId('flow-node-n5')).toHaveAttribute(
+        'data-shape',
+        'document'
+      );
+
+      // Drag and drop a Callout Note ('note') onto the canvas wrapper
+      const canvasWrapper = document.getElementById('flow-canvas-wrapper')!;
+      fireEvent.drop(canvasWrapper, {
+        clientX: 280,
+        clientY: 220,
+        dataTransfer: {
+          types: ['application/x-sideflow-shape'],
+          getData: (type: string) =>
+            type === 'application/x-sideflow-shape' ? 'note' : '',
+        },
+      });
+      // Commit inline edit on newly dropped node
+      const editInput = screen.getByLabelText('Edit node label');
+      fireEvent.keyDown(editInput, { key: 'Enter' });
+
+      const noteNode = screen.getByRole('group', { name: /Node: Sticky Note/i });
+      const noteId = noteNode.getAttribute('data-id')!;
+      expect(noteNode).toHaveAttribute('data-shape', 'note');
+
+      // 3. Select noteNode and test floating node context toolbar 1-click quick morph & color dot
+      fireEvent.mouseDown(noteNode, { button: 0 });
+      fireEvent.mouseUp(window);
+      const nodeToolbar = screen.getByTestId(`selected-node-toolbar-${noteId}`);
+      expect(nodeToolbar).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId(`quick-morph-database-${noteId}`));
+      expect(noteNode).toHaveAttribute('data-shape', 'database');
+
+      fireEvent.click(screen.getByTestId(`quick-color-emerald-${noteId}`));
+      expect(noteNode).toHaveAttribute('data-color', 'emerald');
+
+      // 4. Hover an edge to verify endpoint anchor dots appear and no duplicate SVG <text> is rendered inside #flow-svg-layer
+      const firstEdge = screen.getByTestId('flow-edge-0');
+      fireEvent.mouseEnter(firstEdge);
+      expect(screen.getByTestId('edge-anchor-start-0')).toBeInTheDocument();
+      expect(screen.getByTestId('edge-anchor-end-0')).toBeInTheDocument();
+      expect(firstEdge.querySelector('text')).toBeNull();
+    });
+  });
 });

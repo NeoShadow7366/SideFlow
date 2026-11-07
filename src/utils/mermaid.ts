@@ -490,7 +490,8 @@ export function computeEdgeGeometry(
   direction?: FlowDirection,
   curve: FlowEdgeCurve = 'bezier',
   toNodeWidth = nodeWidth,
-  toNodeHeight = nodeHeight
+  toNodeHeight = nodeHeight,
+  parallelOffset = 0
 ): EdgeGeometry {
   const cx1 = fromNode.x + nodeWidth / 2;
   const cy1 = fromNode.y + nodeHeight / 2;
@@ -514,11 +515,31 @@ export function computeEdgeGeometry(
       y1 = fromNode.y;
       y2 = toNode.y + toNodeHeight;
     }
+    if (parallelOffset !== 0) {
+      x1 = Math.round(x1 + parallelOffset);
+      x2 = Math.round(x2 + parallelOffset);
+    }
     const midY = Math.round((y1 + y2) / 2);
     if (curve === 'straight') {
       pathData = `M ${x1} ${y1} L ${x2} ${y2}`;
     } else if (curve === 'orthogonal') {
-      pathData = `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`;
+      const dx = x2 - x1;
+      const dy1 = midY - y1;
+      const dy2 = y2 - midY;
+      const r = Math.min(
+        10,
+        Math.floor(Math.abs(dx) / 2),
+        Math.floor(Math.abs(dy1) / 2),
+        Math.floor(Math.abs(dy2) / 2)
+      );
+      if (r >= 3) {
+        const sx = dx >= 0 ? 1 : -1;
+        const sy1 = dy1 >= 0 ? 1 : -1;
+        const sy2 = dy2 >= 0 ? 1 : -1;
+        pathData = `M ${x1} ${y1} L ${x1} ${midY - sy1 * r} Q ${x1} ${midY} ${x1 + sx * r} ${midY} L ${x2 - sx * r} ${midY} Q ${x2} ${midY} ${x2} ${midY + sy2 * r} L ${x2} ${y2}`;
+      } else {
+        pathData = `M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`;
+      }
     } else {
       const dy = y2 - y1;
       const controlOffset =
@@ -533,11 +554,31 @@ export function computeEdgeGeometry(
       x1 = fromNode.x;
       x2 = toNode.x + toNodeWidth;
     }
+    if (parallelOffset !== 0) {
+      y1 = Math.round(y1 + parallelOffset);
+      y2 = Math.round(y2 + parallelOffset);
+    }
     const midX = Math.round((x1 + x2) / 2);
     if (curve === 'straight') {
       pathData = `M ${x1} ${y1} L ${x2} ${y2}`;
     } else if (curve === 'orthogonal') {
-      pathData = `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
+      const dy = y2 - y1;
+      const dx1 = midX - x1;
+      const dx2 = x2 - midX;
+      const r = Math.min(
+        10,
+        Math.floor(Math.abs(dy) / 2),
+        Math.floor(Math.abs(dx1) / 2),
+        Math.floor(Math.abs(dx2) / 2)
+      );
+      if (r >= 3) {
+        const sy = dy >= 0 ? 1 : -1;
+        const sx1 = dx1 >= 0 ? 1 : -1;
+        const sx2 = dx2 >= 0 ? 1 : -1;
+        pathData = `M ${x1} ${y1} L ${midX - sx1 * r} ${y1} Q ${midX} ${y1} ${midX} ${y1 + sy * r} L ${midX} ${y2 - sy * r} Q ${midX} ${y2} ${midX + sx2 * r} ${y2} L ${x2} ${y2}`;
+      } else {
+        pathData = `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
+      }
     } else {
       const dx = x2 - x1;
       const controlOffset =
@@ -635,12 +676,22 @@ function formatNodeMermaidLine(n: FlowNode, indent = '    '): string {
       return `${indent}${n.id}[["${cleanText}"]]\n`;
     case 'io':
       return `${indent}${n.id}[/"${cleanText}"/]\n`;
+    case 'trapezoid':
+      return `${indent}${n.id}[/"${cleanText}"\\]\n`;
+    case 'manual':
+      return `${indent}${n.id}[\\"${cleanText}"/]\n`;
     case 'circle':
       return `${indent}${n.id}(("${cleanText}"))\n`;
     case 'hexagon':
       return `${indent}${n.id}{{"${cleanText}"}}\n`;
     case 'asymmetric':
       return `${indent}${n.id}>"${cleanText}"]\n`;
+    case 'document':
+      return `${indent}${n.id}["${cleanText}"]@{ shape: doc }\n`;
+    case 'delay':
+      return `${indent}${n.id}(["${cleanText}"])@{ shape: delay }\n`;
+    case 'note':
+      return `${indent}${n.id}["${cleanText}"]@{ shape: note }\n`;
     case 'process':
     default:
       return `${indent}${n.id}["${cleanText}"]\n`;
@@ -917,8 +968,48 @@ function parseNodeToken(rawToken: string): ParsedNodeToken | null {
     className = classMatch[2];
   }
 
-  const withClass = (base: ParsedNodeToken): ParsedNodeToken =>
-    className ? { ...base, className } : base;
+  // Strip optional Mermaid v10.8+ @{ shape: ..., label: ... } metadata suffix
+  let shapeMetaType: FlowNodeType | undefined;
+  let shapeMetaLabel: string | undefined;
+  const metaMatch = token.match(/^(.*?)@\{\s*([^}]+)\s*\}$/);
+  if (metaMatch) {
+    token = metaMatch[1].trim();
+    const metaBody = metaMatch[2];
+    const shapeAttr = metaBody.match(/shape\s*:\s*["']?([A-Za-z0-9_-]+)["']?/i);
+    const labelAttr = metaBody.match(/label\s*:\s*["']([^"']+)["']/i);
+    if (labelAttr) {
+      shapeMetaLabel = labelAttr[1];
+    }
+    if (shapeAttr) {
+      const s = shapeAttr[1].toLowerCase();
+      if (s === 'doc' || s === 'document' || s === 'docs') {
+        shapeMetaType = 'document';
+      } else if (s === 'delay' || s === 'd-shape') {
+        shapeMetaType = 'delay';
+      } else if (s === 'note' || s === 'br-rect' || s === 'comment') {
+        shapeMetaType = 'note';
+      } else if (s === 'trap-t' || s === 'manual') {
+        shapeMetaType = 'manual';
+      } else if (s === 'trap-b' || s === 'trapezoid') {
+        shapeMetaType = 'trapezoid';
+      } else if (s === 'cyl' || s === 'database') {
+        shapeMetaType = 'database';
+      } else if (s === 'diam' || s === 'decision') {
+        shapeMetaType = 'decision';
+      } else if (s === 'hex' || s === 'hexagon') {
+        shapeMetaType = 'hexagon';
+      } else if (s === 'stadium' || s === 'start') {
+        shapeMetaType = 'start';
+      }
+    }
+  }
+
+  const withClass = (base: ParsedNodeToken): ParsedNodeToken => ({
+    ...base,
+    ...(shapeMetaType ? { type: shapeMetaType } : {}),
+    ...(shapeMetaLabel && !base.text ? { text: shapeMetaLabel } : {}),
+    ...(className ? { className } : {}),
+  });
 
   // 1. Terminal / Stadium: id(["text"])
   const startMatch = token.match(/^([A-Za-z0-9_-]+)\(\[\s*"?(.*?)"?\s*\]\)$/);
@@ -964,12 +1055,36 @@ function parseNodeToken(rawToken: string): ParsedNodeToken | null {
     });
   }
 
-  // 6. Parallelogram Input/Output: id[/"text"/] or id[\"text"\]
+  // 6a. Trapezoid (bottom wider): id[/"text"\]
+  const trapMatch = token.match(
+    /^([A-Za-z0-9_-]+)\[\/\s*"?(.*?)"?\s*\\\]$/
+  );
+  if (trapMatch) {
+    return withClass({
+      id: trapMatch[1],
+      type: 'trapezoid',
+      text: trapMatch[2],
+    });
+  }
+
+  // 6b. Manual Operation / Inverse Trapezoid (top wider): id[\"text"/]
+  const manualMatch = token.match(
+    /^([A-Za-z0-9_-]+)\[\\\s*"?(.*?)"?\s*\/\]$/
+  );
+  if (manualMatch) {
+    return withClass({
+      id: manualMatch[1],
+      type: 'manual',
+      text: manualMatch[2],
+    });
+  }
+
+  // 6c. Parallelogram Input/Output: id[/"text"/] or id[\"text"\]
   const ioMatch = token.match(
-    /^([A-Za-z0-9_-]+)\[[/\\]\s*"?(.*?)"?\s*[/\\]\]$/
+    /^([A-Za-z0-9_-]+)\[([/\\])\s*"?(.*?)"?\s*\2\]$/
   );
   if (ioMatch) {
-    return withClass({ id: ioMatch[1], type: 'io', text: ioMatch[2] });
+    return withClass({ id: ioMatch[1], type: 'io', text: ioMatch[3] });
   }
 
   // 7. Asymmetric / Flag: id>"text"]
@@ -2058,6 +2173,26 @@ export function parseMermaidCode(
   };
 }
 
+export function computeParallelEdgeOffsets(edges: FlowEdge[]): number[] {
+  const pairIndices = new Map<string, number[]>();
+  edges.forEach((edge, idx) => {
+    const key = [edge.from, edge.to].sort().join('::');
+    const list = pairIndices.get(key) || [];
+    list.push(idx);
+    pairIndices.set(key, list);
+  });
+
+  const offsets = new Array<number>(edges.length).fill(0);
+  pairIndices.forEach((indices) => {
+    if (indices.length <= 1) return;
+    const count = indices.length;
+    indices.forEach((edgeIdx, rank) => {
+      offsets[edgeIdx] = Math.round((rank - (count - 1) / 2) * 24);
+    });
+  });
+  return offsets;
+}
+
 export function generateStandaloneSVG(flowData: FlowchartState): string {
   const isSequence = flowData.diagramType === 'sequenceDiagram';
   const subgraphBoundsList = (flowData.subgraphs || [])
@@ -2124,6 +2259,7 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
   const nodesById = new Map<string, FlowNode>(
     flowData.nodes.map((n) => [n.id, n])
   );
+  const parallelOffsets = computeParallelEdgeOffsets(flowData.edges);
 
   const edgesSvg = flowData.edges
     .map((edge, idx) => {
@@ -2153,7 +2289,8 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
           flowData.direction,
           edge.curve || flowData.edgeCurve || 'bezier',
           toDim.width,
-          toDim.height
+          toDim.height,
+          parallelOffsets[idx] || 0
         );
         pathData = geom.pathData;
         midX = geom.midX;
@@ -2232,6 +2369,21 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
       } else if (node.type === 'asymmetric') {
         fill = '#042f2e';
         stroke = '#2dd4bf';
+      } else if (node.type === 'document') {
+        fill = '#1e1b4b';
+        stroke = '#818cf8';
+      } else if (node.type === 'manual') {
+        fill = '#451a03';
+        stroke = '#fbbf24';
+      } else if (node.type === 'trapezoid') {
+        fill = '#022c22';
+        stroke = '#34d399';
+      } else if (node.type === 'delay') {
+        fill = '#4c0519';
+        stroke = '#fb7185';
+      } else if (node.type === 'note') {
+        fill = '#422006';
+        stroke = '#facc15';
       }
 
       // Override fill/stroke if node has explicit AccentColor styling
@@ -2242,6 +2394,8 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
 
       if (hasCompartment) {
         shapeSvg = `<rect width="${w}" height="${h}" rx="8" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+      } else if (node.type === 'decision') {
+        shapeSvg = `<polygon points="${w / 2},0 ${w},${h / 2} ${w / 2},${h} 0,${h / 2}" fill="${fill}" stroke="${stroke}" stroke-width="2" ${dash} />`;
       } else if (node.type === 'database') {
         shapeSvg = `<rect x="0" y="6" width="${w}" height="${h - 12}" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="2" />
       <ellipse cx="${w / 2}" cy="8" rx="${w / 2}" ry="7" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
@@ -2255,6 +2409,17 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
         shapeSvg = `<polygon points="16,0 ${w - 16},0 ${w},${h / 2} ${w - 16},${h} 16,${h} 0,${h / 2}" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
       } else if (node.type === 'asymmetric') {
         shapeSvg = `<polygon points="0,0 ${w - 16},0 ${w},${h / 2} ${w - 16},${h} 0,${h} 12,${h / 2}" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+      } else if (node.type === 'document') {
+        shapeSvg = `<path d="M 0,6 Q 0,0 6,0 H ${w - 6} Q ${w},0 ${w},6 V ${h - 9} Q ${w * 0.75},${h + 3} ${w / 2},${h - 7} T 0,${h - 7} Z" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+      } else if (node.type === 'manual') {
+        shapeSvg = `<polygon points="0,0 ${w},0 ${w - 14},${h} 14,${h}" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+      } else if (node.type === 'trapezoid') {
+        shapeSvg = `<polygon points="14,0 ${w - 14},0 ${w},${h} 0,${h}" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+      } else if (node.type === 'delay') {
+        shapeSvg = `<path d="M 6,0 H ${w - 26} A 26,${h / 2} 0 0,1 ${w - 26},${h} H 6 Q 0,${h} 0,${h - 6} V 6 Q 0,0 6,0 Z" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+      } else if (node.type === 'note') {
+        shapeSvg = `<path d="M 0,6 Q 0,0 6,0 H ${w - 14} L ${w},14 V ${h - 6} Q ${w},${h} ${w - 6},${h} H 6 Q 0,${h} 0,${h - 6} Z" fill="${fill}" stroke="${stroke}" stroke-width="2" />
+      <path d="M ${w - 14},0 V 14 H ${w}" fill="none" stroke="${stroke}" stroke-width="1.8" />`;
       }
 
       if (!shapeSvg) {

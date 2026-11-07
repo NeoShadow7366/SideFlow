@@ -72,16 +72,29 @@ jobs:
       - name: Package & Publish NSIS Installer + Auto-Update Artifacts to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
         run: npx electron-builder --win nsis portable --publish always
 
-      - name: Ensure GitHub Release is Published (Non-Draft) with Release Notes
+      - name: Upload Warning-Free PowerShell Installer & Finalize GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           $tag = "${{ steps.version_step.outputs.TAG }}"
           try {
-            gh release edit $tag --draft=false --latest
+            if (Test-Path "install.ps1") {
+              gh release upload $tag "install.ps1" --clobber
+            }
+            $notes = @"
+          ### ⚡ Warning-Free 1-Line Windows Install / Upgrade (No SmartScreen or UAC Prompts)
+          Run in PowerShell:
+          ``````powershell
+          irm https://raw.githubusercontent.com/NeoShadow7366/SideFlow/master/install.ps1 | iex
+          ``````
+          *Verifies the SHA-512 checksum against `latest.yml`, removes the browser Mark-of-the-Web (`Zone.Identifier`) stream, and installs silently per-user.*
+          "@
+            gh release edit $tag --draft=false --latest --notes $notes
           } catch {
-            Write-Host "Release $tag already published or finalized."
+            Write-Host "Release $tag already published or finalized: $($_.Exception.Message)"
           }

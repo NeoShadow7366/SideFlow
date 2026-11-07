@@ -18,6 +18,7 @@ import {
   alignOrDistributeNodes,
   computeDagLayout,
   computeEdgeGeometry,
+  computeParallelEdgeOffsets,
   computeSubgraphBounds,
   formatMermaidEdgeOperator,
   formatSequenceMessageOperator,
@@ -1774,6 +1775,66 @@ describe('Shared Storage Sync, Spellcheck Cache & WhisperWorker Pipeline Cache',
     expect(pipelineCache.has('model-c')).toBe(true);
     expect(disposeA).toHaveBeenCalledTimes(1);
     expect(disposeB).not.toHaveBeenCalled();
+  });
+
+  it('round-trips all 14 Flowchart shapes (including document, manual, trapezoid, delay, note), computes parallel edge offsets, and renders rounded orthogonal elbows', () => {
+    const flowWith14Shapes = {
+      direction: 'TD' as const,
+      nodes: [
+        { id: 'n1', type: 'document' as const, text: 'Spec Doc', x: 20, y: 20 },
+        { id: 'n2', type: 'manual' as const, text: 'Key Input', x: 20, y: 120 },
+        { id: 'n3', type: 'trapezoid' as const, text: 'Manual Op', x: 20, y: 220 },
+        { id: 'n4', type: 'delay' as const, text: 'Wait 5s', x: 220, y: 120 },
+        { id: 'n5', type: 'note' as const, text: 'Audit Note', x: 220, y: 220 },
+      ],
+      edges: [
+        { from: 'n1', to: 'n2', label: 'Forward' },
+        { from: 'n2', to: 'n1', label: 'Retry' },
+        { from: 'n2', to: 'n3' },
+        { from: 'n3', to: 'n4' },
+        { from: 'n4', to: 'n5' },
+      ],
+    };
+
+    const code = generateMermaidCode(flowWith14Shapes);
+    expect(code).toContain('n1["Spec Doc"]@{ shape: doc }');
+    expect(code).toContain('n2[\\"Key Input"/]');
+    expect(code).toContain('n3[/"Manual Op"\\]');
+    expect(code).toContain('n4(["Wait 5s"])@{ shape: delay }');
+    expect(code).toContain('n5["Audit Note"]@{ shape: note }');
+
+    const parsed = parseMermaidCode(code);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.nodes.map((n) => ({ id: n.id, type: n.type, text: n.text }))).toEqual([
+      { id: 'n1', type: 'document', text: 'Spec Doc' },
+      { id: 'n2', type: 'manual', text: 'Key Input' },
+      { id: 'n3', type: 'trapezoid', text: 'Manual Op' },
+      { id: 'n4', type: 'delay', text: 'Wait 5s' },
+      { id: 'n5', type: 'note', text: 'Audit Note' },
+    ]);
+
+    const offsets = computeParallelEdgeOffsets(flowWith14Shapes.edges);
+    expect(offsets[0]).toBe(-12);
+    expect(offsets[1]).toBe(12);
+    expect(offsets[2]).toBe(0);
+
+    const ortho = computeEdgeGeometry(
+      flowWith14Shapes.nodes[0],
+      flowWith14Shapes.nodes[3],
+      144,
+      52,
+      'TD',
+      'orthogonal',
+      144,
+      52,
+      offsets[0]
+    );
+    expect(ortho.pathData).toContain('L ');
+    expect(ortho.pathData).toContain('Q ');
+
+    const svg = generateStandaloneSVG(flowWith14Shapes);
+    expect(svg).toContain('Spec Doc');
+    expect(svg).toContain('Audit Note');
   });
 });
 

@@ -18,6 +18,7 @@
     "electron:pack": "npm run build && electron-builder --dir",
     "electron:dist": "npm run build && electron-builder --publish never",
     "electron:publish": "npm run build && electron-builder --win nsis --publish always",
+    "install:local": "powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Local",
     "release": "node scripts/release.mjs auto",
     "release:patch": "node scripts/release.mjs patch",
     "release:minor": "node scripts/release.mjs minor",
@@ -58,6 +59,7 @@
   "build": {
     "appId": "com.sideflow.desktop",
     "productName": "SideFlow",
+    "copyright": "Copyright © 2026 NeoShadow7366",
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
@@ -100,12 +102,18 @@
         "nsis",
         "portable"
       ],
-      "icon": "electron/icon.png"
+      "icon": "electron/icon.png",
+      "requestedExecutionLevel": "asInvoker",
+      "verifyUpdateCodeSignature": false,
+      "signAndEditExecutable": true
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
       "allowElevation": false,
+      "include": "electron/installer.nsh",
+      "differentialPackage": true,
+      "unicode": true,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "SideFlow",
