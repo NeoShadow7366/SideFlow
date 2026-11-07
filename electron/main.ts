@@ -145,9 +145,104 @@ const ALLOWED_PROTOCOLS = new Set([
 ]);
 
 const FORBIDDEN_STORE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const MAX_ROLLING_BACKUPS = 7;
+let lastBackupWrittenAt = 0;
+let lastRecoveredFromBackup: string | null = null;
+
+export interface StoreBackupInfo {
+  fileName: string;
+  filePath: string;
+  createdAt: number;
+  sizeBytes: number;
+}
 
 function getStorePath(): string {
   return path.join(app.getPath('userData'), 'sideflow-config.json');
+}
+
+function getBackupsDir(): string {
+  return path.join(app.getPath('userData'), 'backups');
+}
+
+function listStoreBackupsSync(): StoreBackupInfo[] {
+  try {
+    const dir = getBackupsDir();
+    if (!fs.existsSync(dir)) return [];
+    const entries = fs.readdirSync(dir);
+    const items: StoreBackupInfo[] = [];
+    for (const name of entries) {
+      if (!/^sideflow-backup-[\w.-]+\.json$/i.test(name)) continue;
+      const fullPath = path.join(dir, name);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.isFile() && stat.size > 2) {
+          items.push({
+            fileName: name,
+            filePath: fullPath,
+            createdAt: Math.round(stat.mtimeMs),
+            sizeBytes: stat.size,
+          });
+        }
+      } catch {
+        // ignore unreadable file
+      }
+    }
+    items.sort((a, b) => b.createdAt - a.createdAt);
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+function writeBackupSnapshotSync(
+  data: Record<string, unknown>,
+  forceTimestampName = false
+): StoreBackupInfo | null {
+  try {
+    if (!data || Object.keys(data).length === 0) return null;
+    const dir = getBackupsDir();
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const suffix = forceTimestampName
+      ? `${yyyy}-${mm}-${dd}-${String(now.getHours()).padStart(2, '0')}${String(
+          now.getMinutes()
+        ).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`
+      : `${yyyy}-${mm}-${dd}`;
+    const fileName = `sideflow-backup-${suffix}.json`;
+    const targetPath = path.join(dir, fileName);
+    const tmpPath = `${targetPath}.tmp`;
+    const serialized = JSON.stringify(data, null, 2);
+    fs.writeFileSync(tmpPath, serialized, 'utf-8');
+    fs.renameSync(tmpPath, targetPath);
+    lastBackupWrittenAt = Date.now();
+
+    // Prune older snapshots beyond MAX_ROLLING_BACKUPS
+    const allBackups = listStoreBackupsSync();
+    if (allBackups.length > MAX_ROLLING_BACKUPS) {
+      for (const old of allBackups.slice(MAX_ROLLING_BACKUPS)) {
+        try {
+          fs.unlinkSync(old.filePath);
+        } catch {
+          // ignore
+        }
+      }
+    }
+    const stat = fs.statSync(targetPath);
+    return {
+      fileName,
+      filePath: targetPath,
+      createdAt: Math.round(stat.mtimeMs),
+      sizeBytes: stat.size,
+    };
+  } catch (err) {
+    console.warn('[SideFlow] Failed to write rolling backup snapshot:', err);
+    return null;
+  }
 }
 
 function readLocalStore(): Record<string, unknown> {
@@ -163,7 +258,32 @@ function readLocalStore(): Record<string, unknown> {
       }
     }
   } catch (err) {
-    console.error('[SideFlow] Failed to read local store:', err);
+    console.error('[SideFlow] Failed to read local store, checking rolling backups:', err);
+    // Corrupt-store auto-recovery: try newest valid rolling snapshot
+    const backups = listStoreBackupsSync();
+    for (const backup of backups) {
+      try {
+        const rawBackup = fs.readFileSync(backup.filePath, 'utf-8');
+        const parsedBackup = JSON.parse(rawBackup);
+        if (
+          parsedBackup &&
+          typeof parsedBackup === 'object' &&
+          !Array.isArray(parsedBackup)
+        ) {
+          cachedStore = parsedBackup as Record<string, unknown>;
+          lastRecoveredFromBackup = backup.fileName;
+          const storePath = getStorePath();
+          fs.writeFileSync(
+            storePath,
+            JSON.stringify(cachedStore, null, 2),
+            'utf-8'
+          );
+          return cachedStore;
+        }
+      } catch {
+        // try next older backup
+      }
+    }
   }
   cachedStore = app.isPackaged ? { sideflow_auto_onboarding: true } : {};
   return cachedStore;
@@ -177,10 +297,14 @@ function persistLocalStoreSnapshot(): void {
     const tmpPath = `${storePath}.tmp`;
     const current = readLocalStore();
     const serialized = JSON.stringify(current, null, 2);
+    const shouldWriteBackup = Date.now() - lastBackupWrittenAt > 60000;
     storeWriteChain = storeWriteChain
       .then(async () => {
         await fs.promises.writeFile(tmpPath, serialized, 'utf-8');
         await fs.promises.rename(tmpPath, storePath);
+        if (shouldWriteBackup) {
+          writeBackupSnapshotSync(current, false);
+        }
       })
       .catch((err) => {
         console.error('[SideFlow] Failed to write local store:', err);
@@ -203,6 +327,7 @@ function flushLocalStoreSync(): void {
     const serialized = JSON.stringify(cachedStore, null, 2);
     fs.writeFileSync(tmpPath, serialized, 'utf-8');
     fs.renameSync(tmpPath, storePath);
+    writeBackupSnapshotSync(cachedStore, false);
   } catch (err) {
     console.error('[SideFlow] Failed to flush local store synchronously:', err);
   }
@@ -451,6 +576,17 @@ function checkGitHubReleaseFallback(): Promise<MainUpdateState> {
 }
 
 async function performUpdateCheck(): Promise<MainUpdateState> {
+  const store = readLocalStore();
+  if (store.sideflow_strict_offline === true) {
+    broadcastUpdateState({
+      status: 'not-available',
+      latestVersion: app.getVersion(),
+      lastCheckedAt: Date.now(),
+      canQuitAndInstall: false,
+      error: undefined,
+    });
+    return updateState;
+  }
   if (updateState.status === 'checking' || updateState.status === 'downloading') {
     return updateState;
   }
@@ -2978,6 +3114,138 @@ app.whenReady().then(() => {
   ipcMain.handle('store-get-all', async (event) => {
     if (!isMainSender(event)) return {};
     return readLocalStore();
+  });
+
+  ipcMain.handle('list-store-backups', async (event) => {
+    if (!isMainSender(event)) {
+      return { backups: [], storePath: '', backupsDir: '' };
+    }
+    return {
+      backups: listStoreBackupsSync(),
+      storePath: getStorePath(),
+      backupsDir: getBackupsDir(),
+    };
+  });
+
+  ipcMain.handle('create-store-backup-now', async (event) => {
+    if (!isMainSender(event)) {
+      return { success: false, backups: [] };
+    }
+    const current = readLocalStore();
+    const created = writeBackupSnapshotSync(current, true);
+    return {
+      success: Boolean(created),
+      created,
+      backups: listStoreBackupsSync(),
+    };
+  });
+
+  ipcMain.handle(
+    'restore-store-backup',
+    async (event, fileName: string) => {
+      if (!isMainSender(event)) {
+        return { success: false, error: 'Unauthorized IPC sender' };
+      }
+      if (
+        typeof fileName !== 'string' ||
+        path.basename(fileName) !== fileName ||
+        !/^sideflow-backup-[\w.-]+\.json$/i.test(fileName)
+      ) {
+        return { success: false, error: 'Invalid backup snapshot filename' };
+      }
+      try {
+        const targetPath = path.join(getBackupsDir(), fileName);
+        if (!fs.existsSync(targetPath)) {
+          return { success: false, error: 'Backup snapshot file not found' };
+        }
+        const raw = fs.readFileSync(targetPath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return { success: false, error: 'Corrupt backup snapshot JSON' };
+        }
+        cachedStore = parsed as Record<string, unknown>;
+        storeDirty = true;
+        flushLocalStoreSync();
+        return {
+          success: true,
+          store: cachedStore,
+        };
+      } catch (err) {
+        return {
+          success: false,
+          error:
+            err instanceof Error ? err.message : 'Failed to restore snapshot',
+        };
+      }
+    }
+  );
+
+  ipcMain.handle('open-user-data-folder', async (event) => {
+    if (!isMainSender(event)) return { success: false };
+    try {
+      const userDataDir = app.getPath('userData');
+      const errMsg = await shell.openPath(userDataDir);
+      return {
+        success: !errMsg,
+        path: userDataDir,
+        error: errMsg || undefined,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Could not open folder',
+      };
+    }
+  });
+
+  ipcMain.handle('run-workspace-diagnostics', async (event) => {
+    if (!isMainSender(event)) {
+      return {
+        shortcutRegistered: false,
+        currentAccelerator: '',
+        storeHealthy: false,
+        storeSizeBytes: 0,
+        storePath: '',
+        backupCount: 0,
+        strictOffline: false,
+        sttReady: false,
+      };
+    }
+    const store = readLocalStore();
+    const storePath = getStorePath();
+    let storeSizeBytes = 0;
+    let storeHealthy = true;
+    try {
+      if (fs.existsSync(storePath)) {
+        storeSizeBytes = fs.statSync(storePath).size;
+      } else {
+        fs.writeFileSync(storePath, JSON.stringify(store, null, 2), 'utf-8');
+        storeSizeBytes = fs.statSync(storePath).size;
+      }
+    } catch {
+      storeHealthy = false;
+    }
+    const backups = listStoreBackupsSync();
+    let shortcutRegistered = false;
+    try {
+      shortcutRegistered = globalShortcut.isRegistered(currentAccelerator);
+    } catch {
+      shortcutRegistered = false;
+    }
+    return {
+      shortcutRegistered,
+      currentAccelerator,
+      storeHealthy,
+      storeSizeBytes,
+      storePath,
+      backupCount: backups.length,
+      latestBackupFile: backups[0]?.fileName,
+      recoveredFromBackup: lastRecoveredFromBackup || undefined,
+      strictOffline: store.sideflow_strict_offline === true,
+      sttReady:
+        process.platform === 'win32' ||
+        Boolean(sttStatusCache?.fasterWhisperAvailable),
+    };
   });
 
   ipcMain.on('store-set', (event, payload: { key: string; value: unknown }) => {

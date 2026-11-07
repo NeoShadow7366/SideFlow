@@ -553,6 +553,26 @@ export interface AppUpdateState {
   canQuitAndInstall?: boolean;
 }
 
+export interface StoreBackupSnapshot {
+  fileName: string;
+  filePath: string;
+  createdAt: number;
+  sizeBytes: number;
+}
+
+export interface WorkspaceDiagnosticsReport {
+  shortcutRegistered: boolean;
+  currentAccelerator: string;
+  storeHealthy: boolean;
+  storeSizeBytes: number;
+  storePath: string;
+  backupCount: number;
+  latestBackupFile?: string;
+  recoveredFromBackup?: string;
+  strictOffline: boolean;
+  sttReady: boolean;
+}
+
 export interface AutoLaunchState {
   enabled: boolean;
   isPackaged: boolean;
@@ -608,6 +628,27 @@ export interface SideFlowElectronBridge {
   onWindowBlur: (callback: () => void) => () => void;
   storeGetAll: () => Promise<Record<string, unknown>>;
   storeSet: (key: string, value: unknown) => void;
+  listStoreBackups?: () => Promise<{
+    backups: StoreBackupSnapshot[];
+    storePath: string;
+    backupsDir: string;
+  }>;
+  createStoreBackupNow?: () => Promise<{
+    success: boolean;
+    created?: StoreBackupSnapshot | null;
+    backups: StoreBackupSnapshot[];
+  }>;
+  restoreStoreBackup?: (fileName: string) => Promise<{
+    success: boolean;
+    store?: Record<string, unknown>;
+    error?: string;
+  }>;
+  openUserDataFolder?: () => Promise<{
+    success: boolean;
+    path?: string;
+    error?: string;
+  }>;
+  runWorkspaceDiagnostics?: () => Promise<WorkspaceDiagnosticsReport>;
   getLocalSttStatus?: () => Promise<LocalSttStatus>;
   installLocalPythonStt?: () => Promise<{
     success: boolean;

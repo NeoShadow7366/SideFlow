@@ -246,4 +246,150 @@ describe('SettingsView Work Laptop Startup & Auto-Update Controls', () => {
       );
     });
   });
+
+  it('renders Privacy & Local-First Trust Center with live Mic Gate status and Strict Offline Mode toggle', () => {
+    const onToggleStrictOfflineMode = vi.fn();
+    const { rerender } = render(
+      <SettingsView
+        {...baseProps}
+        strictOfflineMode={false}
+        onToggleStrictOfflineMode={onToggleStrictOfflineMode}
+        isDictating={false}
+      />
+    );
+
+    expect(screen.getByTestId('privacy-trust-center-card')).toBeInTheDocument();
+    expect(screen.getByTestId('trust-mic-status-badge')).toHaveTextContent(
+      'Mic Gate: CLOSED (0 bytes)'
+    );
+
+    fireEvent.click(screen.getByTestId('setting-strict-offline'));
+    expect(onToggleStrictOfflineMode).toHaveBeenCalledWith(true);
+
+    rerender(
+      <SettingsView
+        {...baseProps}
+        strictOfflineMode={true}
+        onToggleStrictOfflineMode={onToggleStrictOfflineMode}
+        isDictating={true}
+      />
+    );
+    expect(screen.getByTestId('trust-mic-status-badge')).toHaveTextContent(
+      'Mic Gate: ACTIVE (Local STT)'
+    );
+  });
+
+  it('runs Workspace Health Check, repairs shortcut conflicts, and manages rolling auto-snapshots', async () => {
+    const runWorkspaceDiagnostics = vi.fn().mockResolvedValue({
+      shortcutRegistered: false,
+      currentAccelerator: 'Alt+Space',
+      storeHealthy: true,
+      storeSizeBytes: 8192,
+      storePath: 'C:\\Users\\Test\\AppData\\Roaming\\sideflow-desktop\\sideflow-config.json',
+      backupCount: 1,
+      strictOffline: false,
+      sttReady: true,
+    });
+    const listStoreBackups = vi.fn().mockResolvedValue({
+      backups: [
+        {
+          fileName: 'sideflow-backup-2026-11-07.json',
+          filePath: 'C:\\backups\\sideflow-backup-2026-11-07.json',
+          createdAt: 1700000000000,
+          sizeBytes: 6144,
+        },
+      ],
+      storePath: 'C:\\sideflow-config.json',
+      backupsDir: 'C:\\backups',
+    });
+    const createStoreBackupNow = vi.fn().mockResolvedValue({
+      success: true,
+      created: {
+        fileName: 'sideflow-backup-2026-11-07-132000.json',
+        filePath: 'C:\\backups\\sideflow-backup-2026-11-07-132000.json',
+        createdAt: 1700000050000,
+        sizeBytes: 7168,
+      },
+      backups: [
+        {
+          fileName: 'sideflow-backup-2026-11-07-132000.json',
+          filePath: 'C:\\backups\\sideflow-backup-2026-11-07-132000.json',
+          createdAt: 1700000050000,
+          sizeBytes: 7168,
+        },
+        {
+          fileName: 'sideflow-backup-2026-11-07.json',
+          filePath: 'C:\\backups\\sideflow-backup-2026-11-07.json',
+          createdAt: 1700000000000,
+          sizeBytes: 6144,
+        },
+      ],
+    });
+    const restoreStoreBackup = vi.fn().mockResolvedValue({
+      success: true,
+      store: { sideflow_pinned: false },
+    });
+
+    window.sideflow = {
+      isElectron: true,
+      runWorkspaceDiagnostics,
+      listStoreBackups,
+      createStoreBackupNow,
+      restoreStoreBackup,
+    } as unknown as typeof window.sideflow;
+
+    const onRepairShortcutConflict = vi.fn();
+    const onImportBackup = vi.fn();
+
+    render(
+      <SettingsView
+        {...baseProps}
+        onRepairShortcutConflict={onRepairShortcutConflict}
+        onImportBackup={onImportBackup}
+      />
+    );
+
+    // Wait for initial snapshot list load
+    await waitFor(() => {
+      expect(
+        screen.getByTestId('restore-snapshot-btn-sideflow-backup-2026-11-07.json')
+      ).toBeInTheDocument();
+    });
+
+    // Run Health Check -> detects conflict on Alt+Space and offers 1-click Ctrl+Space repair
+    fireEvent.click(screen.getByTestId('run-health-check-btn'));
+    await waitFor(() => {
+      expect(screen.getByTestId('repair-shortcut-btn')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('repair-shortcut-btn'));
+    expect(onRepairShortcutConflict).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'Ctrl + Space', ctrl: true })
+    );
+    expect(screen.getByTestId('diag-shortcut-status')).toHaveTextContent(
+      'Registered'
+    );
+
+    // Create a snapshot now
+    fireEvent.click(screen.getByTestId('create-snapshot-btn'));
+    await waitFor(() => {
+      expect(createStoreBackupNow).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId('health-status-feedback')).toHaveTextContent(
+        /Saved snapshot: sideflow-backup-2026-11-07-132000\.json/i
+      );
+    });
+
+    // Restore a snapshot
+    fireEvent.click(
+      screen.getByTestId('restore-snapshot-btn-sideflow-backup-2026-11-07.json')
+    );
+    await waitFor(() => {
+      expect(restoreStoreBackup).toHaveBeenCalledWith(
+        'sideflow-backup-2026-11-07.json'
+      );
+      expect(onImportBackup).toHaveBeenCalledWith(
+        JSON.stringify({ sideflow_pinned: false })
+      );
+    });
+  });
 });

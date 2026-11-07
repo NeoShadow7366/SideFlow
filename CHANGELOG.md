@@ -5,6 +5,14 @@ All notable changes to **SideFlow** (`sideflow-desktop`) will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-11-07
+
+### Added
+- **Automatic 7-Day Rolling Backups, Corrupt-Store Recovery & 1-Click Snapshot Restore (`electron/main.ts`, `electron/preload.ts`, `src/components/Settings/SettingsView.tsx`):** Added automatic daily rolling backups (`%AppData%\sideflow-desktop\backups\sideflow-backup-YYYY-MM-DD.json`, retaining up to 7 snapshots), automatic fallback recovery in `readLocalStore()` if `sideflow-config.json` is ever corrupted by a power loss, and in-app **Snapshot Now** (`create-snapshot-btn`), **Restore** (`restore-snapshot-btn-*`), and **Data Folder** (`open-data-folder-btn`) controls.
+- **Privacy & Local-First Trust Center + Strict Offline Mode (`src/components/Settings/SettingsView.tsx`, `src/App.tsx`, `electron/main.ts`):** Added the **Privacy & Local-First Trust Center** card (`privacy-trust-center-card`) featuring a real-time **Microphone Hardware Gate** indicator (`trust-mic-status-badge`: `Mic Gate: CLOSED (0 bytes)` vs. `Mic Gate: ACTIVE (Local STT)`), zero-telemetry architecture badges, and a **Strict Offline / Air-Gapped Mode** toggle (`setting-strict-offline` / `sideflow_strict_offline`) that blocks all outbound GitHub update requests on high-security corporate laptops.
+- **Built-In System Health Check & Shortcut Conflict Self-Repair (`electron/main.ts`, `src/components/Settings/SettingsView.tsx`):** Added `run-workspace-diagnostics` IPC (`run-health-check-btn`) to verify OS global shortcut registration (`globalShortcut.isRegistered`), atomic config store health, and backup snapshot status, with a 1-click **Conflict • Fix (`Ctrl+Space`)** self-repair button (`repair-shortcut-btn`) when another desktop utility hijacks `Alt+Space`.
+- **Supply-Chain Provenance Attestations, Windows Defender CI Scan & `SHA256SUMS.txt` (`.github/workflows/release.yml`, `install.ps1`):** Added a Windows Defender Antivirus scan (`MpCmdRun.exe -Scan`), `SHA256SUMS.txt` checksum asset generation, and GitHub SLSA build provenance attestations (`actions/attest-build-provenance@v2`) to `.github/workflows/release.yml`, plus live SHA-256 hash verification output in `install.ps1`.
+
 ## [1.6.1] - 2026-11-07
 
 ### Added

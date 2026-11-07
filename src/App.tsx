@@ -132,6 +132,10 @@ export const App: React.FC = () => {
     'sideflow_open_at_login',
     true
   );
+  const [strictOfflineMode, setStrictOfflineMode] = useLocalStorage<boolean>(
+    'sideflow_strict_offline',
+    false
+  );
   const [panelEdge, setPanelEdge] = useLocalStorage<PanelEdge>(
     'sideflow_panel_edge',
     'right'
@@ -2283,6 +2287,31 @@ export const App: React.FC = () => {
               }}
               onOpenElectronModal={() => setIsElectronModalOpen(true)}
               onOpenOnboardingWizard={() => setIsOnboardingModalOpen(true)}
+              strictOfflineMode={strictOfflineMode}
+              onToggleStrictOfflineMode={(enabled) => {
+                setStrictOfflineMode(enabled);
+                notify(
+                  enabled
+                    ? 'Strict Offline Mode Enabled'
+                    : 'Strict Offline Mode Disabled',
+                  'check',
+                  enabled
+                    ? 'Outbound GitHub update checks blocked'
+                    : 'Outbound GitHub update checks allowed'
+                );
+              }}
+              isDictating={isDictating}
+              onRepairShortcutConflict={(fallbackShortcut) => {
+                setShortcut(fallbackShortcut);
+                void window.sideflow?.updateGlobalShortcut?.(
+                  fallbackShortcut.label.replace(/\s+/g, '')
+                );
+                notify(
+                  'Resolved Shortcut Conflict',
+                  'check',
+                  `Switched global toggle shortcut to ${fallbackShortcut.label}`
+                );
+              }}
               onExportBackup={handleExportBackup}
               onImportBackup={handleImportBackup}
               onResetAllData={handleResetAllData}

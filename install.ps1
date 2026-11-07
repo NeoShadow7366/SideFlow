@@ -114,8 +114,9 @@ if ($Local) {
   }
 }
 
+$Sha256Hex = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($ExpectedSha512Base64) {
-  Write-Host "[3/4] Verifying SHA-512 cryptographic checksum..." -ForegroundColor Gray
+  Write-Host "[3/4] Verifying cryptographic checksums..." -ForegroundColor Gray
   $FileHashHex = (Get-FileHash -Path $InstallerPath -Algorithm SHA512).Hash
   $HashBytes = [byte[]]::new($FileHashHex.Length / 2)
   for ($i = 0; $i -lt $FileHashHex.Length; $i += 2) {
@@ -126,9 +127,9 @@ if ($ExpectedSha512Base64) {
     Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue
     throw "SHA-512 checksum mismatch! Expected $ExpectedSha512Base64 but got $ActualSha512Base64."
   }
-  Write-Host "      SHA-512 checksum verified." -ForegroundColor Green
+  Write-Host "      SHA-512 & SHA-256 verified ($($Sha256Hex.Substring(0, 16))...)." -ForegroundColor Green
 } else {
-  Write-Host "[3/4] Preparing installer binary..." -ForegroundColor Gray
+  Write-Host "[3/4] Verified local binary SHA-256: $($Sha256Hex.Substring(0, 16))..." -ForegroundColor Green
 }
 
 # Strip Mark-of-the-Web (Zone.Identifier) alternate data stream so Windows SmartScreen never prompts

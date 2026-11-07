@@ -91,6 +91,53 @@ export interface SideFlowElectronAPI {
   onWindowBlur: (callback: () => void) => () => void;
   storeGetAll: () => Promise<Record<string, unknown>>;
   storeSet: (key: string, value: unknown) => void;
+  listStoreBackups?: () => Promise<{
+    backups: Array<{
+      fileName: string;
+      filePath: string;
+      createdAt: number;
+      sizeBytes: number;
+    }>;
+    storePath: string;
+    backupsDir: string;
+  }>;
+  createStoreBackupNow?: () => Promise<{
+    success: boolean;
+    created?: {
+      fileName: string;
+      filePath: string;
+      createdAt: number;
+      sizeBytes: number;
+    } | null;
+    backups: Array<{
+      fileName: string;
+      filePath: string;
+      createdAt: number;
+      sizeBytes: number;
+    }>;
+  }>;
+  restoreStoreBackup?: (fileName: string) => Promise<{
+    success: boolean;
+    store?: Record<string, unknown>;
+    error?: string;
+  }>;
+  openUserDataFolder?: () => Promise<{
+    success: boolean;
+    path?: string;
+    error?: string;
+  }>;
+  runWorkspaceDiagnostics?: () => Promise<{
+    shortcutRegistered: boolean;
+    currentAccelerator: string;
+    storeHealthy: boolean;
+    storeSizeBytes: number;
+    storePath: string;
+    backupCount: number;
+    latestBackupFile?: string;
+    recoveredFromBackup?: string;
+    strictOffline: boolean;
+    sttReady: boolean;
+  }>;
   getLocalSttStatus: () => Promise<{
     available: boolean;
     fasterWhisperAvailable: boolean;
@@ -273,6 +320,12 @@ const sideflowAPI: SideFlowElectronAPI = {
   },
   storeGetAll: () => ipcRenderer.invoke('store-get-all'),
   storeSet: (key: string, value: unknown) => ipcRenderer.send('store-set', { key, value }),
+  listStoreBackups: () => ipcRenderer.invoke('list-store-backups'),
+  createStoreBackupNow: () => ipcRenderer.invoke('create-store-backup-now'),
+  restoreStoreBackup: (fileName: string) =>
+    ipcRenderer.invoke('restore-store-backup', fileName),
+  openUserDataFolder: () => ipcRenderer.invoke('open-user-data-folder'),
+  runWorkspaceDiagnostics: () => ipcRenderer.invoke('run-workspace-diagnostics'),
   getLocalSttStatus: () => ipcRenderer.invoke('get-local-stt-status'),
   installLocalPythonStt: () => ipcRenderer.invoke('install-local-python-stt'),
   warmupLocalStt: (payload) => ipcRenderer.invoke('warmup-local-stt', payload),
