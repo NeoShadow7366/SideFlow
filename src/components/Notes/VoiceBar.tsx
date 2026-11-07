@@ -251,6 +251,61 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
   const [lastEngineLabel, setLastEngineLabel] = useState<string>(
     'CPU WASM (Moonshine)'
   );
+  const [isInstallingPythonStt, setIsInstallingPythonStt] = useState(false);
+
+  const handleInstallPythonStt = async () => {
+    if (isInstallingPythonStt) return;
+    if (!window.sideflow?.installLocalPythonStt) {
+      try {
+        await navigator.clipboard?.writeText('pip install faster-whisper');
+      } catch {
+        // ignore
+      }
+      onNotify(
+        'Copied Python Setup Command',
+        'check',
+        'Run "pip install faster-whisper" in your terminal (or click 1-Click Install in the Desktop App)'
+      );
+      return;
+    }
+
+    setIsInstallingPythonStt(true);
+    onNotify(
+      'Provisioning Python Voice Engine...',
+      'sparkles',
+      'Creating isolated SideFlow venv and installing faster-whisper'
+    );
+    try {
+      const res = await window.sideflow.installLocalPythonStt();
+      if (res.success && res.status) {
+        setSttStatus((prev) => ({
+          ...prev,
+          ...res.status!,
+        }));
+        onNotify(
+          'Native Faster-Whisper Ready',
+          'check',
+          res.message || 'CTranslate2 local voice engine activated'
+        );
+      } else {
+        onNotify(
+          'Python Engine Setup Incomplete',
+          'zap',
+          res.error || 'Could not provision faster-whisper automatically',
+          { variant: 'warning' }
+        );
+      }
+    } catch (err) {
+      onNotify(
+        'Python Engine Setup Error',
+        'zap',
+        err instanceof Error ? err.message : 'Installation failed',
+        { variant: 'error' }
+      );
+    } finally {
+      setIsInstallingPythonStt(false);
+    }
+  };
 
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const auxInterimRecognitionRef = useRef<SpeechRecognitionInstance | null>(
@@ -2070,6 +2125,53 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
                 ? '⚡ Instant Mode ON: Pre-warmed laptop engine, live streaming words & 380ms pause commits.'
                 : '🎯 Deep Accuracy Mode: Full-sentence 780ms pause window & multi-beam decoding.'}
             </span>
+          </div>
+
+          {/* 1-Click Local Python Faster-Whisper Provisioner */}
+          <div
+            data-testid="native-python-stt-card"
+            className="px-2.5 py-2 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-2 flex-wrap"
+          >
+            <div className="min-w-0">
+              <div className="text-[11px] font-semibold text-slate-200 flex items-center gap-1.5">
+                <span>Native Python Faster-Whisper (CTranslate2)</span>
+                <span
+                  data-testid="native-python-stt-badge"
+                  className={`px-1.5 py-0.5 rounded text-[9px] font-mono border ${
+                    sttStatus?.fasterWhisperAvailable
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                      : 'bg-slate-800 text-slate-400 border-slate-700'
+                  }`}
+                >
+                  {sttStatus?.fasterWhisperAvailable
+                    ? sttStatus.cudaAvailable
+                      ? `CUDA Ready (${sttStatus.gpuName || 'GPU'})`
+                      : `CPU INT8 Ready (${sttStatus.cpuThreads || 6}T)`
+                    : 'Not Installed'}
+                </span>
+              </div>
+              <div className="text-[10px] text-slate-400">
+                {sttStatus?.fasterWhisperAvailable
+                  ? 'Native CTranslate2 backend active for ultra-low-latency offline transcription.'
+                  : 'Optional: Auto-provision an isolated Python venv with faster-whisper for native CPU/CUDA speed.'}
+              </div>
+            </div>
+
+            {!sttStatus?.fasterWhisperAvailable && (
+              <button
+                type="button"
+                data-testid="install-python-stt-btn"
+                disabled={isInstallingPythonStt}
+                onClick={() => {
+                  void handleInstallPythonStt();
+                }}
+                className="min-h-[28px] px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-[10px] font-semibold text-white transition shrink-0"
+              >
+                {isInstallingPythonStt
+                  ? 'Installing faster-whisper...'
+                  : '1-Click Install Python Engine'}
+              </button>
+            )}
           </div>
 
           <div className="cq-stt-grid">

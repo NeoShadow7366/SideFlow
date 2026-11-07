@@ -609,6 +609,12 @@ export interface SideFlowElectronBridge {
   storeGetAll: () => Promise<Record<string, unknown>>;
   storeSet: (key: string, value: unknown) => void;
   getLocalSttStatus?: () => Promise<LocalSttStatus>;
+  installLocalPythonStt?: () => Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+    status?: LocalSttStatus;
+  }>;
   warmupLocalStt?: (payload?: {
     lang?: string;
     modelSize?: WhisperModelId;

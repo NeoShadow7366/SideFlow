@@ -1039,10 +1039,21 @@ function getSttWorkerScriptPath(): string | null {
   return null;
 }
 
+function getManagedSttVenvPythonPath(): string {
+  const venvDir = path.join(app.getPath('userData'), 'python-stt-venv');
+  return process.platform === 'win32'
+    ? path.join(venvDir, 'Scripts', 'python.exe')
+    : path.join(venvDir, 'bin', 'python');
+}
+
 function resolvePythonCandidates(): Array<{ bin: string; prefixArgs: string[] }> {
   const candidates: Array<{ bin: string; prefixArgs: string[] }> = [];
   if (process.env.SIDEFLOW_PYTHON_PATH && fs.existsSync(process.env.SIDEFLOW_PYTHON_PATH)) {
     candidates.push({ bin: process.env.SIDEFLOW_PYTHON_PATH, prefixArgs: [] });
+  }
+  const managedVenvPython = getManagedSttVenvPythonPath();
+  if (fs.existsSync(managedVenvPython)) {
+    candidates.push({ bin: managedVenvPython, prefixArgs: [] });
   }
   const venvWin = path.join(__dirname, '../.venv/Scripts/python.exe');
   if (fs.existsSync(venvWin)) {
@@ -3018,6 +3029,150 @@ app.whenReady().then(() => {
       fasterWhisperAvailable: false,
       cudaAvailable: false,
       windowsSapiAvailable: process.platform === 'win32',
+    };
+  });
+
+  ipcMain.handle('install-local-python-stt', async (event) => {
+    if (!isMainSender(event)) {
+      return { success: false, error: 'Unauthorized IPC sender' };
+    }
+    const runCmd = (
+      bin: string,
+      args: string[],
+      timeoutMs = 240000
+    ): Promise<{ ok: boolean; stdout: string; stderr: string }> =>
+      new Promise((resolve) => {
+        try {
+          const proc = spawn(bin, args, {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+          });
+          let stdout = '';
+          let stderr = '';
+          const timer = setTimeout(() => {
+            try {
+              proc.kill();
+            } catch {
+              // ignore
+            }
+            resolve({ ok: false, stdout, stderr: 'Timed out during Python setup' });
+          }, timeoutMs);
+          proc.stdout?.on('data', (chunk: Buffer) => {
+            stdout += chunk.toString('utf-8');
+          });
+          proc.stderr?.on('data', (chunk: Buffer) => {
+            stderr += chunk.toString('utf-8');
+          });
+          proc.on('error', (err) => {
+            clearTimeout(timer);
+            resolve({ ok: false, stdout, stderr: err.message });
+          });
+          proc.on('close', (code) => {
+            clearTimeout(timer);
+            resolve({ ok: code === 0, stdout, stderr });
+          });
+        } catch (err) {
+          resolve({
+            ok: false,
+            stdout: '',
+            stderr: err instanceof Error ? err.message : 'Spawn failed',
+          });
+        }
+      });
+
+    // 1. Locate system Python 3
+    const baseCandidates: Array<{ bin: string; prefixArgs: string[] }> =
+      process.platform === 'win32'
+        ? [
+            { bin: 'python', prefixArgs: [] },
+            { bin: 'py', prefixArgs: ['-3'] },
+          ]
+        : [
+            { bin: 'python3', prefixArgs: [] },
+            { bin: 'python', prefixArgs: [] },
+          ];
+
+    let foundPython: { bin: string; prefixArgs: string[] } | null = null;
+    for (const cand of baseCandidates) {
+      const check = await runCmd(
+        cand.bin,
+        [...cand.prefixArgs, '--version'],
+        10000
+      );
+      if (check.ok && /Python\s+3\./i.test(`${check.stdout} ${check.stderr}`)) {
+        foundPython = cand;
+        break;
+      }
+    }
+
+    if (!foundPython) {
+      return {
+        success: false,
+        error:
+          'Python 3 was not found on PATH. Install Python 3.10+ from python.org or winget install Python.Python.3.11 first.',
+      };
+    }
+
+    // 2. Create managed venv in userData/python-stt-venv
+    const venvDir = path.join(app.getPath('userData'), 'python-stt-venv');
+    const venvPy = getManagedSttVenvPythonPath();
+    if (!fs.existsSync(venvPy)) {
+      const createRes = await runCmd(
+        foundPython.bin,
+        [...foundPython.prefixArgs, '-m', 'venv', venvDir],
+        60000
+      );
+      if (!createRes.ok || !fs.existsSync(venvPy)) {
+        return {
+          success: false,
+          error:
+            createRes.stderr.trim() ||
+            'Failed to create Python virtual environment.',
+        };
+      }
+    }
+
+    // 3. Install faster-whisper into the managed venv
+    const pipRes = await runCmd(
+      venvPy,
+      ['-m', 'pip', 'install', '--upgrade', 'pip', 'faster-whisper'],
+      240000
+    );
+    if (!pipRes.ok) {
+      return {
+        success: false,
+        error:
+          pipRes.stderr.trim().slice(-280) ||
+          'pip install faster-whisper failed.',
+      };
+    }
+
+    // 4. Restart STT worker with new venv
+    if (sttWorkerProcess) {
+      try {
+        sttWorkerProcess.kill();
+      } catch {
+        // ignore
+      }
+      sttWorkerProcess = null;
+      sttWorkerReady = false;
+    }
+    sttStatusCache = null;
+    sttWorkerFailedAt = 0;
+    await ensureSttWorker();
+
+    const finalStatus = sttStatusCache || {
+      available: true,
+      fasterWhisperAvailable: true,
+      cudaAvailable: false,
+      windowsSapiAvailable: process.platform === 'win32',
+    };
+    return {
+      success: Boolean(finalStatus.fasterWhisperAvailable),
+      message: finalStatus.fasterWhisperAvailable
+        ? 'faster-whisper installed in SideFlow Python venv!'
+        : 'Installed faster-whisper; restart SideFlow to activate.',
+      status: finalStatus,
     };
   });
 

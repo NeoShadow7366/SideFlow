@@ -101,6 +101,21 @@ export interface SideFlowElectronAPI {
     windowsSapiAvailable: boolean;
     activeModel?: string;
   }>;
+  installLocalPythonStt?: () => Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+    status?: {
+      available: boolean;
+      fasterWhisperAvailable: boolean;
+      cudaAvailable: boolean;
+      gpuName?: string;
+      gpuVramMb?: number;
+      cpuThreads?: number;
+      windowsSapiAvailable: boolean;
+      activeModel?: string;
+    };
+  }>;
   warmupLocalStt: (payload?: {
     lang?: string;
     modelSize?: string;
@@ -259,6 +274,7 @@ const sideflowAPI: SideFlowElectronAPI = {
   storeGetAll: () => ipcRenderer.invoke('store-get-all'),
   storeSet: (key: string, value: unknown) => ipcRenderer.send('store-set', { key, value }),
   getLocalSttStatus: () => ipcRenderer.invoke('get-local-stt-status'),
+  installLocalPythonStt: () => ipcRenderer.invoke('install-local-python-stt'),
   warmupLocalStt: (payload) => ipcRenderer.invoke('warmup-local-stt', payload),
   transcribeAudioLocal: (payload) => ipcRenderer.invoke('transcribe-audio-local', payload),
   getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
