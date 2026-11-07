@@ -22,7 +22,7 @@ $RepoName  = "SideFlow"
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  SideFlow Desktop Utility — Warning-Free Windows Installer" -ForegroundColor Cyan
+Write-Host "  SideFlow Desktop Utility -- Warning-Free Windows Installer" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -32,28 +32,41 @@ $ExpectedSha512Base64 = $null
 if ($Local) {
   $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
   $ReleaseDir = Join-Path $ScriptRoot "release"
-  $LocalCandidate = Get-ChildItem -Path $ReleaseDir -Filter "SideFlow-Setup-*.exe" -ErrorAction SilentlyContinue |
+  $PkgJsonPath = Join-Path $ScriptRoot "package.json"
+  $TargetFilter = "SideFlow-Setup-*.exe"
+  if (Test-Path $PkgJsonPath) {
+    try {
+      $PkgVersion = (Get-Content -Path $PkgJsonPath -Raw | ConvertFrom-Json).version
+      if ($PkgVersion) {
+        $TargetFilter = "SideFlow-Setup-$PkgVersion.exe"
+      }
+    } catch {
+      # fallback to wildcard
+    }
+  }
+
+  $LocalCandidate = Get-ChildItem -Path $ReleaseDir -Filter $TargetFilter -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 
   if (-not $LocalCandidate) {
-    Write-Host "[1/4] No local installer found in release\. Building NSIS installer (npm run electron:dist)..." -ForegroundColor Yellow
+    Write-Host "[1/4] Building local NSIS installer ($TargetFilter) via npm run electron:dist..." -ForegroundColor Yellow
     Push-Location $ScriptRoot
     try {
-      & npm run electron:dist
+      & npm.cmd run electron:dist
       if ($LASTEXITCODE -ne 0) {
         throw "npm run electron:dist failed with exit code $LASTEXITCODE"
       }
     } finally {
       Pop-Location
     }
-    $LocalCandidate = Get-ChildItem -Path $ReleaseDir -Filter "SideFlow-Setup-*.exe" -ErrorAction SilentlyContinue |
+    $LocalCandidate = Get-ChildItem -Path $ReleaseDir -Filter $TargetFilter -ErrorAction SilentlyContinue |
       Sort-Object LastWriteTime -Descending |
       Select-Object -First 1
   }
 
   if (-not $LocalCandidate) {
-    throw "Could not locate SideFlow-Setup-*.exe in $ReleaseDir"
+    throw "Could not locate $TargetFilter in $ReleaseDir"
   }
 
   $InstallerPath = $LocalCandidate.FullName
@@ -131,12 +144,14 @@ if ($Proc.ExitCode -ne 0) {
   throw "SideFlow installer exited with code $($Proc.ExitCode)."
 }
 
-$InstalledExe = Join-Path $env:LOCALAPPDATA "Programs\SideFlow\SideFlow.exe"
-if (-not (Test-Path $InstalledExe)) {
-  $InstalledExe = Join-Path $env:LOCALAPPDATA "SideFlow\SideFlow.exe"
-}
+$CandidateExes = @(
+  (Join-Path $env:LOCALAPPDATA "Programs\sideflow-desktop\SideFlow.exe"),
+  (Join-Path $env:LOCALAPPDATA "Programs\SideFlow\SideFlow.exe"),
+  (Join-Path $env:LOCALAPPDATA "SideFlow\SideFlow.exe")
+)
+$InstalledExe = $CandidateExes | Where-Object { Test-Path $_ } | Select-Object -First 1
 
-if (-not $NoLaunch -and (Test-Path $InstalledExe)) {
+if (-not $NoLaunch -and $InstalledExe) {
   Unblock-File -Path $InstalledExe -ErrorAction SilentlyContinue
   Start-Process -FilePath $InstalledExe
 }
