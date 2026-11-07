@@ -5,6 +5,15 @@ All notable changes to **SideFlow** (`sideflow-desktop`) will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-11-07
+
+### Added
+- **1-Click Local Python Faster-Whisper Provisioner (`electron/main.ts`, `electron/preload.ts`, `src/components/Notes/VoiceBar.tsx`, `src/test/SettingsUpdates.test.tsx`):** Added `install-local-python-stt` IPC (`window.sideflow.installLocalPythonStt`) and the **Native Python Faster-Whisper (CTranslate2)** status card (`native-python-stt-card` / `install-python-stt-btn`) in `VoiceBar` to automatically create an isolated Python virtual environment in `%AppData%\sideflow-desktop\python-stt-venv`, install `faster-whisper`, and activate the persistent native CTranslate2 worker with one click.
+- **Command Palette Setup Wizard Action (`src/components/CommandPalette.tsx`, `src/App.tsx`):** Added **Launch 60-Second Setup Wizard** (`action-open-onboarding-wizard`) to the global `Ctrl+K` / `Cmd+K` Command Palette.
+
+### Changed
+- **Vendor Bundle Splitting (`vite.config.ts`):** Configured Rollup `manualChunks` to split `react`/`react-dom` (`vendor-react`) and `lucide-react` (`vendor-icons`) into dedicated cached vendor chunks, reducing the primary application bundle size and eliminating Vite's chunk size warning.
+
 ## [1.6.0] - 2026-11-07
 
 ### Added

@@ -79,6 +79,7 @@ export interface CommandPaletteProps {
   onToggleDockLock: () => void;
   onExportBackup: () => void;
   onCheckForUpdates: () => void;
+  onOpenOnboardingWizard?: () => void;
   onClosePanel: () => void;
 }
 
@@ -307,6 +308,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onToggleDockLock,
   onExportBackup,
   onCheckForUpdates,
+  onOpenOnboardingWizard,
   onClosePanel,
 }) => {
   const [query, setQuery] = useState('');
@@ -632,6 +634,28 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           onCheckForUpdates();
         },
       },
+      ...(onOpenOnboardingWizard
+        ? [
+            {
+              id: 'action-open-onboarding-wizard',
+              section: 'actions' as CommandSection,
+              title: 'Launch 60-Second Setup Wizard',
+              subtitle:
+                'Guided setup for global shortcut, screen edge, and multi-monitor routing',
+              keywords:
+                'onboarding setup wizard welcome tour hotkey monitor edge',
+              badge: '60s Setup',
+              accent: 'indigo' as AccentColor,
+              renderIcon: () => (
+                <Sparkles className="w-4 h-4" aria-hidden="true" />
+              ),
+              onSelect: () => {
+                onClose();
+                onOpenOnboardingWizard();
+              },
+            },
+          ]
+        : []),
       {
         id: 'action-hide-panel',
         section: 'actions',
@@ -674,6 +698,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     onToggleDockLock,
     onExportBackup,
     onCheckForUpdates,
+    onOpenOnboardingWizard,
     onClosePanel,
   ]);
 

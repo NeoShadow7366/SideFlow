@@ -1,8 +1,9 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { SettingsView } from '../components/Settings/SettingsView';
 import { OnboardingModal } from '../components/OnboardingModal';
+import { VoiceBar } from '../components/Notes/VoiceBar';
 import { defaultMonitorSettings, defaultShortcut } from '../utils/defaults';
 
 describe('SettingsView Work Laptop Startup & Auto-Update Controls', () => {
@@ -195,5 +196,54 @@ describe('SettingsView Work Laptop Startup & Auto-Update Controls', () => {
     // Complete wizard
     fireEvent.click(screen.getByTestId('onboarding-finish-btn'));
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('provisions Native Python Faster-Whisper via 1-Click Install Python Engine button in VoiceBar', async () => {
+    const installLocalPythonStt = vi.fn().mockResolvedValue({
+      success: true,
+      message: 'faster-whisper installed in SideFlow Python venv!',
+      status: {
+        available: true,
+        fasterWhisperAvailable: true,
+        cudaAvailable: false,
+        cpuThreads: 8,
+        windowsSapiAvailable: true,
+      },
+    });
+    window.sideflow = {
+      isElectron: true,
+      installLocalPythonStt,
+    } as unknown as typeof window.sideflow;
+
+    const onNotify = vi.fn();
+    render(
+      <VoiceBar
+        onTranscript={vi.fn()}
+        onInsertTimestamp={vi.fn()}
+        onDictatingChange={vi.fn()}
+        onNotify={onNotify}
+      />
+    );
+
+    // Open the STT configuration drawer
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /Configure Local STT Engine & Microphone/i,
+      })
+    );
+
+    expect(screen.getByTestId('native-python-stt-badge')).toHaveTextContent(
+      'Not Installed'
+    );
+
+    const installBtn = screen.getByTestId('install-python-stt-btn');
+    fireEvent.click(installBtn);
+
+    await waitFor(() => {
+      expect(installLocalPythonStt).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId('native-python-stt-badge')).toHaveTextContent(
+        'CPU INT8 Ready (8T)'
+      );
+    });
   });
 });

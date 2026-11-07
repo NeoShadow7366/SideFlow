@@ -2502,6 +2502,7 @@ export const App: React.FC = () => {
         }}
         onExportBackup={handleExportBackup}
         onCheckForUpdates={handleCheckForUpdates}
+        onOpenOnboardingWizard={() => setIsOnboardingModalOpen(true)}
         onClosePanel={() => togglePanel(false)}
       />
 
