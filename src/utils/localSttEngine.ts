@@ -4,6 +4,7 @@ import {
   SttEngineMode,
   WhisperModelId,
 } from '../types/sideflow';
+import { readSharedStorage } from '../hooks/useLocalStorage';
 
 /**
  * Computes root-mean-square (RMS) normalized audio level in [0, 1]
@@ -320,8 +321,13 @@ function getCachedCapabilitiesForCurrentBridge():
   return null;
 }
 
-// Singleton WebGPU/WASM Whisper & Moonshine Worker instance
+// Singleton WebGPU/WASM Whisper & Moonshine Worker instance + 5-min idle memory reaper
+export const WHISPER_WORKER_IDLE_MS = 5 * 60 * 1000;
+let whisperWorkerIdleMs = WHISPER_WORKER_IDLE_MS;
+let whisperWorkerIdleTimer: ReturnType<typeof setTimeout> | null = null;
 let whisperWorkerInstance: Worker | null = null;
+let customWorkerFactory: (() => Worker | null) | null = null;
+
 const workerCallbacks = new Map<
   string,
   (result: LocalTranscriptionResult) => void
@@ -336,23 +342,115 @@ export function setWhisperProgressListener(
   progressListener = cb;
 }
 
+export function isStrictOfflineModeEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  return Boolean(readSharedStorage<boolean>('sideflow_strict_offline', false));
+}
+
+export function isWhisperWorkerActive(): boolean {
+  return whisperWorkerInstance !== null;
+}
+
+export function setWhisperWorkerIdleTimeoutForTests(ms: number): void {
+  whisperWorkerIdleMs = ms > 0 ? ms : WHISPER_WORKER_IDLE_MS;
+}
+
+export function setWhisperWorkerFactoryForTests(
+  factory: (() => Worker | null) | null
+): void {
+  customWorkerFactory = factory;
+}
+
+function clearWhisperWorkerIdleTimer(): void {
+  if (whisperWorkerIdleTimer) {
+    clearTimeout(whisperWorkerIdleTimer);
+    whisperWorkerIdleTimer = null;
+  }
+}
+
+export async function disposeWhisperWorkerNow(): Promise<void> {
+  clearWhisperWorkerIdleTimer();
+  const worker = whisperWorkerInstance;
+  if (!worker) return;
+  whisperWorkerInstance = null;
+
+  for (const [, cb] of workerCallbacks) {
+    cb({ success: false, error: 'Local STT worker disposed while idle' });
+  }
+  workerCallbacks.clear();
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        worker.terminate();
+      } catch {
+        // ignore termination errors
+      }
+      resolve();
+    };
+    const prevOnMessage = worker.onmessage;
+    worker.onmessage = (ev: MessageEvent) => {
+      if (ev?.data?.type === 'disposed') {
+        finish();
+        return;
+      }
+      prevOnMessage?.call(worker, ev);
+    };
+    const timer = setTimeout(finish, 120);
+    try {
+      worker.postMessage({ type: 'dispose', id: `disp-${Date.now()}` });
+    } catch {
+      clearTimeout(timer);
+      finish();
+    }
+  });
+}
+
+function scheduleWhisperWorkerIdleReap(): void {
+  clearWhisperWorkerIdleTimer();
+  if (!whisperWorkerInstance || workerCallbacks.size > 0) return;
+  whisperWorkerIdleTimer = setTimeout(() => {
+    whisperWorkerIdleTimer = null;
+    if (workerCallbacks.size === 0) {
+      void disposeWhisperWorkerNow();
+    }
+  }, whisperWorkerIdleMs);
+}
+
 function getOrCreateWhisperWorker(): Worker | null {
-  if (whisperWorkerInstance) return whisperWorkerInstance;
-  if (typeof Worker === 'undefined') return null;
-  // Avoid spawning background module workers inside jsdom test environment
-  if (
-    typeof navigator !== 'undefined' &&
-    /jsdom/i.test(navigator.userAgent || '')
-  ) {
-    return null;
+  if (whisperWorkerInstance) {
+    clearWhisperWorkerIdleTimer();
+    return whisperWorkerInstance;
+  }
+
+  let worker: Worker | null = null;
+  if (customWorkerFactory) {
+    worker = customWorkerFactory();
+    if (!worker) return null;
+  } else {
+    if (typeof Worker === 'undefined') return null;
+    // Avoid spawning background module workers inside jsdom test environment
+    if (
+      typeof navigator !== 'undefined' &&
+      /jsdom/i.test(navigator.userAgent || '')
+    ) {
+      return null;
+    }
+    try {
+      worker = new Worker(new URL('./whisperWorker.ts', import.meta.url), {
+        type: 'module',
+      });
+    } catch {
+      return null;
+    }
   }
 
   try {
-    const worker = new Worker(new URL('./whisperWorker.ts', import.meta.url), {
-      type: 'module',
-    });
-
-    worker.onmessage = (event) => {
+    const activeWorker = worker;
+    activeWorker.onmessage = (event) => {
       const data = event.data || {};
       if (data.type === 'progress') {
         progressListener?.({
@@ -362,10 +460,75 @@ function getOrCreateWhisperWorker(): Worker | null {
         return;
       }
 
+      if (data.type === 'cache-get' && data.cacheReqId) {
+        const cacheReqId = String(data.cacheReqId);
+        const url = String(data.url || '');
+        const getter = window.sideflow?.onnxModelCacheGet;
+        if (!getter) {
+          activeWorker.postMessage({
+            type: 'cache-get-res',
+            cacheReqId,
+            hit: null,
+          });
+          return;
+        }
+        void getter(url)
+          .then((hit) => {
+            if (hit && hit.bytes) {
+              const copy = new Uint8Array(hit.bytes);
+              activeWorker.postMessage(
+                {
+                  type: 'cache-get-res',
+                  cacheReqId,
+                  hit: { bytes: copy, headers: hit.headers || {} },
+                },
+                [copy.buffer]
+              );
+            } else {
+              activeWorker.postMessage({
+                type: 'cache-get-res',
+                cacheReqId,
+                hit: null,
+              });
+            }
+          })
+          .catch(() => {
+            activeWorker.postMessage({
+              type: 'cache-get-res',
+              cacheReqId,
+              hit: null,
+            });
+          });
+        return;
+      }
+
+      if (data.type === 'cache-put' && data.cacheReqId) {
+        const cacheReqId = String(data.cacheReqId);
+        const url = String(data.url || '');
+        const bytes =
+          data.bytes instanceof Uint8Array
+            ? data.bytes
+            : new Uint8Array(data.bytes || 0);
+        const headers =
+          data.headers && typeof data.headers === 'object' ? data.headers : {};
+        const putter = window.sideflow?.onnxModelCachePut;
+        if (!putter || bytes.byteLength === 0) {
+          activeWorker.postMessage({ type: 'cache-put-res', cacheReqId });
+          return;
+        }
+        void putter({ url, bytes, headers })
+          .catch(() => false)
+          .finally(() => {
+            activeWorker.postMessage({ type: 'cache-put-res', cacheReqId });
+          });
+        return;
+      }
+
       const id = String(data.id || '');
       const cb = workerCallbacks.get(id);
       if (!cb) return;
       workerCallbacks.delete(id);
+      scheduleWhisperWorkerIdleReap();
 
       if (data.type === 'result' || data.type === 'preloaded') {
         cb({
@@ -382,7 +545,8 @@ function getOrCreateWhisperWorker(): Worker | null {
       }
     };
 
-    worker.onerror = () => {
+    activeWorker.onerror = () => {
+      clearWhisperWorkerIdleTimer();
       for (const [, cb] of workerCallbacks) {
         cb({ success: false, error: 'Local STT Web Worker crashed' });
       }
@@ -390,8 +554,23 @@ function getOrCreateWhisperWorker(): Worker | null {
       whisperWorkerInstance = null;
     };
 
-    whisperWorkerInstance = worker;
-    return worker;
+    const shouldUseElectronCache = Boolean(
+      typeof window !== 'undefined' &&
+        window.sideflow?.onnxModelCacheGet &&
+        window.sideflow?.onnxModelCachePut &&
+        (typeof caches === 'undefined' ||
+          window.location?.protocol === 'file:')
+    );
+
+    activeWorker.postMessage({
+      type: 'configure',
+      useElectronCache: shouldUseElectronCache,
+      strictOffline: isStrictOfflineModeEnabled(),
+    });
+
+    whisperWorkerInstance = activeWorker;
+    scheduleWhisperWorkerIdleReap();
+    return activeWorker;
   } catch {
     return null;
   }
@@ -467,18 +646,23 @@ export function transcribeViaWebGpuWorker(
   options?: { lowLatency?: boolean; isPartial?: boolean }
 ): Promise<LocalTranscriptionResult> {
   return new Promise((resolve) => {
+    const strictOffline = isStrictOfflineModeEnabled();
     const worker = getOrCreateWhisperWorker();
     if (!worker) {
       resolve({
         success: false,
-        error: 'Web Worker unavailable in this environment',
+        error: strictOffline
+          ? 'Strict Offline Mode is active: remote STT model download blocked'
+          : 'Web Worker unavailable in this environment',
       });
       return;
     }
 
+    clearWhisperWorkerIdleTimer();
     const reqId = `w-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const timer = window.setTimeout(() => {
       workerCallbacks.delete(reqId);
+      scheduleWhisperWorkerIdleReap();
       resolve({ success: false, error: 'Local ONNX STT timed out' });
     }, timeoutMs);
 
@@ -497,6 +681,7 @@ export function transcribeViaWebGpuWorker(
         lang,
         lowLatency: options?.lowLatency ?? true,
         isPartial: Boolean(options?.isPartial),
+        strictOffline,
       },
       [copy.buffer]
     );
@@ -625,9 +810,15 @@ export async function preloadLocalSttEngine(options: {
   }
 
   // 3. In-App ONNX Moonshine / Whisper Web Worker preload + dummy pass
+  const strictOffline = isStrictOfflineModeEnabled();
   const worker = getOrCreateWhisperWorker();
   if (!worker) {
-    return { success: false, error: 'Worker unavailable' };
+    return {
+      success: false,
+      error: strictOffline
+        ? 'Strict Offline Mode is active: remote STT model download blocked'
+        : 'Worker unavailable',
+    };
   }
 
   const effectiveWorkerModel = resolveEffectiveModelSize({
@@ -640,9 +831,11 @@ export async function preloadLocalSttEngine(options: {
   });
 
   return new Promise((resolve) => {
+    clearWhisperWorkerIdleTimer();
     const reqId = `pre-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const timer = window.setTimeout(() => {
       workerCallbacks.delete(reqId);
+      scheduleWhisperWorkerIdleReap();
       resolve({ success: false, error: 'Model warmup timed out' });
     }, 45000);
 
@@ -657,6 +850,7 @@ export async function preloadLocalSttEngine(options: {
       modelSize: effectiveWorkerModel,
       lang,
       lowLatency: instantMode,
+      strictOffline,
     });
   });
 }

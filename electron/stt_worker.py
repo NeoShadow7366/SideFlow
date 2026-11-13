@@ -13,7 +13,11 @@ import time
 import base64
 import subprocess
 from collections import OrderedDict
-import numpy as np
+
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 MAX_CACHED_MODELS = 2
 ALLOWED_CT2_MODELS = {
@@ -73,7 +77,7 @@ if cuda_available:
 
 try:
     from faster_whisper import WhisperModel
-    faster_whisper_available = True
+    faster_whisper_available = np is not None
 except Exception:
     WhisperModel = None
 
@@ -115,7 +119,7 @@ def normalize_ct2_model_name(
     return m
 
 
-def normalize_audio_gain(audio_f32: np.ndarray) -> np.ndarray:
+def normalize_audio_gain(audio_f32):
     """
     Removes DC offset and normalizes peak amplitude to 0.85 (max 8x boost)
     so quiet laptop microphones achieve crisp consonant recognition.
@@ -132,8 +136,10 @@ def normalize_audio_gain(audio_f32: np.ndarray) -> np.ndarray:
     return centered.astype(np.float32)
 
 
-def get_or_load_model(model_size: str, force_cpu: bool = False):
-    if not faster_whisper_available or WhisperModel is None:
+def get_or_load_model(
+    model_size: str, force_cpu: bool = False, local_files_only: bool = False
+):
+    if not faster_whisper_available or WhisperModel is None or np is None:
         raise RuntimeError("faster-whisper is not installed")
 
     normalized = model_size or ("distil-small.en" if cuda_available else "base.en")
@@ -158,7 +164,10 @@ def get_or_load_model(model_size: str, force_cpu: bool = False):
         for compute_candidate in (cuda_compute, "int8_float16", "int8"):
             try:
                 model = WhisperModel(
-                    normalized, device="cuda", compute_type=compute_candidate
+                    normalized,
+                    device="cuda",
+                    compute_type=compute_candidate,
+                    local_files_only=bool(local_files_only),
                 )
                 label = f"faster-whisper CUDA {compute_candidate.upper()} ({gpu_name or 'GPU'})"
                 store_loaded_model(model, label)
@@ -173,14 +182,22 @@ def get_or_load_model(model_size: str, force_cpu: bool = False):
         compute_type="int8",
         cpu_threads=CPU_THREADS,
         num_workers=1,
+        local_files_only=bool(local_files_only),
     )
     label = f"faster-whisper CPU INT8 ({CPU_THREADS}T - {normalized})"
     store_loaded_model(model, label)
     return cache_key, model, label
 
 
-def warmup_model(model_size: str, lang_code: str, force_cpu: bool = False):
-    cache_key, model, label = get_or_load_model(model_size, force_cpu=force_cpu)
+def warmup_model(
+    model_size: str,
+    lang_code: str,
+    force_cpu: bool = False,
+    local_files_only: bool = False,
+):
+    cache_key, model, label = get_or_load_model(
+        model_size, force_cpu=force_cpu, local_files_only=local_files_only
+    )
     if cache_key not in warmed_models:
         dummy_audio = np.zeros(8000, dtype=np.float32)
         segments, _ = model.transcribe(
@@ -231,7 +248,13 @@ def handle_request(req: dict) -> dict:
             is_partial=False,
             use_cuda=use_cuda,
         )
-        label = warmup_model(model_size, lang_code, force_cpu=force_cpu)
+        strict_offline = bool(req.get("strictOffline", False))
+        label = warmup_model(
+            model_size,
+            lang_code,
+            force_cpu=force_cpu,
+            local_files_only=strict_offline,
+        )
         return {
             "id": req_id,
             "success": True,
@@ -240,6 +263,8 @@ def handle_request(req: dict) -> dict:
         }
 
     if cmd == "transcribe":
+        if np is None:
+            return {"id": req_id, "success": False, "error": "numpy is not installed"}
         t0 = time.time()
         pcm16_b64 = req.get("pcm16Base64", "")
         raw_model_size = req.get("modelSize", "distil-small.en" if cuda_available else "base.en")
@@ -251,6 +276,7 @@ def handle_request(req: dict) -> dict:
         is_partial = bool(req.get("isPartial", False))
         pre_trimmed = bool(req.get("preTrimmed", False))
         pre_normalized = bool(req.get("preNormalized", False))
+        strict_offline = bool(req.get("strictOffline", False))
         lang = req.get("lang", "en-US")
         lang_code = lang.split("-")[0].lower() if lang else "en"
 
@@ -258,6 +284,8 @@ def handle_request(req: dict) -> dict:
             return {"id": req_id, "success": False, "error": "Empty audio buffer"}
 
         raw_bytes = base64.b64decode(pcm16_b64)
+        if len(raw_bytes) % 2 != 0:
+            raw_bytes = raw_bytes[:-1]
         pcm_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
         if pcm_int16.size < 800:
             return {"id": req_id, "success": True, "text": "", "durationMs": 0}
@@ -273,7 +301,11 @@ def handle_request(req: dict) -> dict:
             use_cuda=use_cuda,
         )
 
-        cache_key, model, engine_label = get_or_load_model(model_size, force_cpu=force_cpu)
+        cache_key, model, engine_label = get_or_load_model(
+            model_size,
+            force_cpu=force_cpu,
+            local_files_only=strict_offline,
+        )
         warmed_models.add(cache_key)
 
         initial_prompt = (

@@ -176,6 +176,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
   onInsertTimestamp,
   onCopyNote,
   onExportNote,
+  isPanelOpen = true,
   isActiveTab = true,
   promptContext = '',
   onDictatingChange,
@@ -407,11 +408,13 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
     secondarySpeakerLabel,
   ]);
 
-  // GPU-composited ~24fps visualizer loop for Primary Mic (and External Source when Dialogue Mode is active)
+  // GPU-composited ~24fps visualizer loop (suspended when panel is closed or Notes tab is hidden)
   useEffect(() => {
-    if (!isDictating) {
-      channelsRef.current.primary.audioLevel = 0;
-      channelsRef.current.external.audioLevel = 0;
+    if (!isDictating || !isPanelOpen || !isActiveTab) {
+      if (!isDictating) {
+        channelsRef.current.primary.audioLevel = 0;
+        channelsRef.current.external.audioLevel = 0;
+      }
       const idleCls =
         'w-1 h-full rounded-full origin-bottom bg-slate-700 transition-colors duration-75';
       for (const bar of meterBarRefs.current) {
@@ -431,6 +434,8 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
 
     let lastPaint = 0;
     let active = true;
+    const prevPrimScales = new Float32Array(METER_WEIGHTS.length);
+    const prevExtScales = new Float32Array(METER_WEIGHTS.length);
     const tick = (now: number) => {
       if (!active) return;
       if (now - lastPaint >= 42) {
@@ -452,7 +457,10 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
             0.18,
             Math.min(1, Number((primLevel * METER_WEIGHTS[i]).toFixed(3)))
           );
-          bar.style.transform = `scaleY(${scale})`;
+          if (Math.abs(scale - prevPrimScales[i]) >= 0.012) {
+            prevPrimScales[i] = scale;
+            bar.style.transform = `scaleY(${scale})`;
+          }
           if (bar.className !== primCls) {
             bar.className = primCls;
           }
@@ -472,7 +480,10 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
               0.18,
               Math.min(1, Number((extLevel * METER_WEIGHTS[i]).toFixed(3)))
             );
-            bar.style.transform = `scaleY(${scale})`;
+            if (Math.abs(scale - prevExtScales[i]) >= 0.012) {
+              prevExtScales[i] = scale;
+              bar.style.transform = `scaleY(${scale})`;
+            }
             if (bar.className !== extCls) {
               bar.className = extCls;
             }
@@ -490,7 +501,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
         meterRafRef.current = null;
       }
     };
-  }, [isDictating, dialogueMode]);
+  }, [isDictating, dialogueMode, isPanelOpen, isActiveTab]);
 
   const setDictatingState = useCallback((next: boolean) => {
     isDictatingRef.current = next;
@@ -562,6 +573,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
   }, []);
 
   useEffect(() => {
+    if (!isActiveTab) return;
     let mounted = true;
     void refreshMicDevices();
     if (window.sideflow?.getLocalSttStatus) {
@@ -595,21 +607,19 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
       mounted = false;
       setWhisperProgressListener(null);
     };
-  }, [refreshMicDevices]);
+  }, [isActiveTab, refreshMicDevices]);
 
-  // Pre-warm the active local STT engine when the Notes tab is viewed or engine settings change
+  // Reset warmup state when engine/model settings change; defer model allocation until mic hover/focus/record
   useEffect(() => {
-    if (!isActiveTab) return;
-    const isJsdom =
-      typeof navigator !== 'undefined' &&
-      /jsdom/i.test(navigator.userAgent || '');
-    if (isJsdom && !window.sideflow?.warmupLocalStt) return;
+    warmupKeyRef.current = '';
+    setWarmupState('idle');
+    if (!isDictatingRef.current) return;
 
     const timer = window.setTimeout(() => {
       void triggerWarmup();
-    }, 180);
+    }, 120);
     return () => window.clearTimeout(timer);
-  }, [isActiveTab, engineMode, modelSize, lang, instantMode, triggerWarmup]);
+  }, [engineMode, modelSize, lang, instantMode, triggerWarmup]);
 
   const runLivePartialPreview = useCallback(
     async (

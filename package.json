@@ -68,6 +68,10 @@
       "electron/edge-tab.js",
       "electron/stt_worker.py"
     ],
+    "asarUnpack": [
+      "dist/assets/*.wasm",
+      "dist/assets/*.mjs"
+    ],
     "extraResources": [
       {
         "from": "electron/icon.png",

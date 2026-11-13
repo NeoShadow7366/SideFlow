@@ -1,9 +1,29 @@
 /// <reference lib="webworker" />
+/// <reference types="vite/client" />
 import { pipeline, env } from '@huggingface/transformers';
+import ortWasmMjsUrl from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.mjs?url';
+import ortWasmBinaryUrl from 'onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url';
 
-// Configure Transformers.js for browser/Electron caching & safe multi-threaded CPU WASM SIMD
+// Configure Transformers.js for local/Electron caching & offline bundled multi-threaded CPU WASM SIMD
 env.allowLocalModels = false;
-env.useBrowserCache = true;
+env.useBrowserCache = typeof caches !== 'undefined';
+
+let strictOfflineActive = false;
+const defaultFetch = env.fetch ? env.fetch.bind(env) : fetch.bind(globalThis);
+
+env.fetch = (async (input: string | URL, init?: RequestInit) => {
+  const urlStr = typeof input === 'string' ? input : String(input);
+  if (
+    strictOfflineActive &&
+    /^https?:\/\//i.test(urlStr) &&
+    !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(urlStr)
+  ) {
+    throw new Error(
+      'Strict Offline Mode is active: outbound model download blocked. Disable Strict Offline Mode once to cache the model locally.'
+    );
+  }
+  return defaultFetch(input, init);
+}) as typeof env.fetch;
 
 const canUseMultiThreadWasm =
   typeof SharedArrayBuffer !== 'undefined' &&
@@ -21,16 +41,109 @@ const hardwareThreads =
 if (env.backends?.onnx?.wasm) {
   env.backends.onnx.wasm.numThreads = hardwareThreads;
   env.backends.onnx.wasm.simd = true;
+  env.backends.onnx.wasm.wasmPaths = {
+    mjs: ortWasmMjsUrl,
+    wasm: ortWasmBinaryUrl,
+  };
+}
+
+interface CacheBridgeHit {
+  bytes: Uint8Array;
+  headers: Record<string, string>;
+}
+
+const pendingCacheGets = new Map<
+  string,
+  (hit: CacheBridgeHit | null) => void
+>();
+const pendingCachePuts = new Map<string, () => void>();
+
+function enableElectronCustomCache(): void {
+  if (env.useCustomCache && env.customCache) return;
+  env.useCustomCache = true;
+  env.customCache = {
+    async match(request: string): Promise<Response | undefined> {
+      const cacheReqId = `cg-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      const hit = await new Promise<CacheBridgeHit | null>((resolve) => {
+        const timer = setTimeout(() => {
+          pendingCacheGets.delete(cacheReqId);
+          resolve(null);
+        }, 10000);
+        pendingCacheGets.set(cacheReqId, (res) => {
+          clearTimeout(timer);
+          resolve(res);
+        });
+        self.postMessage({
+          type: 'cache-get',
+          cacheReqId,
+          url: String(request),
+        });
+      });
+      if (!hit || !hit.bytes) return undefined;
+      return new Response(new Uint8Array(hit.bytes), {
+        status: 200,
+        headers: hit.headers || { 'content-type': 'application/octet-stream' },
+      });
+    },
+    async put(request: string, response: Response): Promise<void> {
+      try {
+        const cloned = response.clone();
+        const ab = await cloned.arrayBuffer();
+        const headers: Record<string, string> = {};
+        cloned.headers.forEach((val, key) => {
+          headers[key] = val;
+        });
+        const cacheReqId = `cp-${Date.now()}-${Math.random()
+          .toString(36)
+          .slice(2, 8)}`;
+        const bytes = new Uint8Array(ab);
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            pendingCachePuts.delete(cacheReqId);
+            resolve();
+          }, 15000);
+          pendingCachePuts.set(cacheReqId, () => {
+            clearTimeout(timer);
+            resolve();
+          });
+          self.postMessage(
+            {
+              type: 'cache-put',
+              cacheReqId,
+              url: String(request),
+              bytes,
+              headers,
+            },
+            [bytes.buffer]
+          );
+        });
+      } catch {
+        // Ignore non-fatal cache persistence errors
+      }
+    },
+  };
 }
 
 interface TranscribeMessage {
-  type: 'transcribe' | 'preload';
-  id: string;
+  type:
+    | 'transcribe'
+    | 'preload'
+    | 'dispose'
+    | 'configure'
+    | 'cache-get-res'
+    | 'cache-put-res';
+  id?: string;
   audio?: Float32Array;
   modelSize?: string;
   lang?: string;
   lowLatency?: boolean;
   isPartial?: boolean;
+  strictOffline?: boolean;
+  useElectronCache?: boolean;
+  cacheReqId?: string;
+  hit?: CacheBridgeHit | null;
 }
 
 export interface CachedPipelineEntry {
@@ -187,8 +300,22 @@ export async function storePipelineInCache(entry: CachedPipelineEntry): Promise<
   }
 }
 
+export async function disposeAllCachedPipelines(): Promise<void> {
+  const entries = Array.from(pipelineCache.values());
+  pipelineCache.clear();
+  warmedModelIds.clear();
+  for (const entry of entries) {
+    try {
+      await entry.transcriber?.dispose?.();
+    } catch {
+      // ignore disposal errors
+    }
+  }
+}
+
 async function loadPipelineInternal(
-  modelId: string
+  modelId: string,
+  localFilesOnly = false
 ): Promise<CachedPipelineEntry> {
   const shortName = modelId
     .replace('onnx-community/', '')
@@ -229,6 +356,7 @@ async function loadPipelineInternal(
           modelId,
           {
             device: 'webgpu',
+            local_files_only: localFilesOnly,
             dtype: {
               encoder_model: encoderDtype,
               decoder_model_merged: 'q4',
@@ -255,15 +383,20 @@ async function loadPipelineInternal(
   try {
     loaded = await pipeline('automatic-speech-recognition', modelId, {
       device: 'wasm',
+      local_files_only: localFilesOnly,
       dtype: {
         encoder_model: 'q8',
         decoder_model_merged: 'q4',
       },
       progress_callback: progressCallback,
     });
-  } catch {
+  } catch (err) {
+    if (localFilesOnly) {
+      throw err;
+    }
     loaded = await pipeline('automatic-speech-recognition', modelId, {
       device: 'wasm',
+      local_files_only: localFilesOnly,
       dtype: 'q8',
       progress_callback: progressCallback,
     });
@@ -281,7 +414,8 @@ async function loadPipelineInternal(
 
 async function getWhisperPipeline(
   modelSize = 'moonshine-tiny',
-  lang = 'en-US'
+  lang = 'en-US',
+  localFilesOnly = false
 ): Promise<CachedPipelineEntry> {
   const modelId = resolveHuggingFaceModelId(modelSize, lang);
   const existing = pipelineCache.get(modelId);
@@ -297,9 +431,11 @@ async function getWhisperPipeline(
     return inFlight;
   }
 
-  const loadPromise = loadPipelineInternal(modelId).finally(() => {
-    pendingPipelineLoads.delete(modelId);
-  });
+  const loadPromise = loadPipelineInternal(modelId, localFilesOnly).finally(
+    () => {
+      pendingPipelineLoads.delete(modelId);
+    }
+  );
   pendingPipelineLoads.set(modelId, loadPromise);
   return loadPromise;
 }
@@ -341,14 +477,34 @@ async function handleWorkerMessage(
     lang = 'en-US',
     lowLatency = true,
     isPartial = false,
+    strictOffline,
+    useElectronCache,
   } = data || {};
+
+  if (typeof strictOffline === 'boolean') {
+    strictOfflineActive = strictOffline;
+  }
+  if (useElectronCache) {
+    enableElectronCustomCache();
+  }
+
+  if (type === 'configure') {
+    return;
+  }
+
+  if (type === 'dispose') {
+    await disposeAllCachedPipelines();
+    self.postMessage({ type: 'disposed', id });
+    return;
+  }
 
   if (type === 'preload') {
     const t0 = performance.now();
     try {
       const { transcriber, label, modelId } = await getWhisperPipeline(
         modelSize,
-        lang
+        lang,
+        strictOfflineActive
       );
       await ensureModelWarmupPass(transcriber, modelId);
       self.postMessage({
@@ -398,7 +554,8 @@ async function handleWorkerMessage(
     try {
       const { transcriber, label, modelId } = await getWhisperPipeline(
         modelSize,
-        lang
+        lang,
+        strictOfflineActive
       );
       warmedModelIds.add(modelId);
 
@@ -458,11 +615,25 @@ async function handleWorkerMessage(
   }
 }
 
-self.addEventListener('message', (event: MessageEvent<TranscribeMessage>) => {
-  const data = event.data;
-  const gen =
-    data?.type === 'transcribe' ? ++latestTranscribeGen : latestTranscribeGen;
-  workerQueue = workerQueue
-    .then(() => handleWorkerMessage(data, gen))
-    .catch(() => {});
-});
+if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') {
+  self.addEventListener('message', (event: MessageEvent<TranscribeMessage>) => {
+    const data = event.data;
+    if (data?.type === 'cache-get-res' && data.cacheReqId) {
+      const resolver = pendingCacheGets.get(data.cacheReqId);
+      pendingCacheGets.delete(data.cacheReqId);
+      resolver?.(data.hit ?? null);
+      return;
+    }
+    if (data?.type === 'cache-put-res' && data.cacheReqId) {
+      const resolver = pendingCachePuts.get(data.cacheReqId);
+      pendingCachePuts.delete(data.cacheReqId);
+      resolver?.();
+      return;
+    }
+    const gen =
+      data?.type === 'transcribe' ? ++latestTranscribeGen : latestTranscribeGen;
+    workerQueue = workerQueue
+      .then(() => handleWorkerMessage(data, gen))
+      .catch(() => {});
+  });
+}
