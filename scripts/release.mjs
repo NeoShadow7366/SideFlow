@@ -25,6 +25,7 @@ const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
 const isLocalBuild = args.includes('--local');
 const skipTests = args.includes('--skip-tests');
+const allowDirty = args.includes('--allow-dirty');
 
 const positional = args.filter((a) => !a.startsWith('--'));
 const bumpType = (positional[0] || 'patch').toLowerCase();
@@ -125,12 +126,38 @@ function main() {
     return;
   }
 
-  // 4. Commit any pending working tree changes before tagging
+  // 4. Verify working tree cleanliness so arbitrary untracked/secret files are never staged via git add -A
   const dirtyStatus = run('git status --porcelain', { silent: true });
   if (dirtyStatus) {
-    console.log('Staging and committing working tree changes...');
-    run('git add -A');
-    run(`git commit -m "chore: prepare release ${nextTag}"`);
+    const allowedReleaseFiles = new Set([
+      'package.json',
+      'package-lock.json',
+      'CHANGELOG.md',
+    ]);
+    const dirtyPaths = dirtyStatus
+      .split(/\r?\n/)
+      .map((line) => line.slice(3).trim().replace(/^"|"$/g, ''))
+      .filter(Boolean);
+    const unexpectedDirty = dirtyPaths.filter(
+      (p) => !allowedReleaseFiles.has(p)
+    );
+    if (unexpectedDirty.length > 0 && !allowDirty) {
+      throw new Error(
+        `Refusing to release with uncommitted changes outside release metadata (${unexpectedDirty.join(
+          ', '
+        )}). Commit your changes first or pass --allow-dirty.`
+      );
+    }
+    const filesToStage = allowDirty
+      ? dirtyPaths
+      : dirtyPaths.filter((p) => allowedReleaseFiles.has(p));
+    if (filesToStage.length > 0) {
+      console.log(`Staging release metadata (${filesToStage.join(', ')})...`);
+      for (const relPath of filesToStage) {
+        run(`git add -- "${relPath}"`);
+      }
+      run(`git commit -m "chore: prepare release ${nextTag}"`);
+    }
   }
 
   // 5. Bump version in package.json (if version changed) and create git tag

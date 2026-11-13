@@ -1,13 +1,18 @@
 ; SideFlow Custom NSIS Installer Hooks
-; Automatically terminates any running SideFlow background tray process before
-; installing, upgrading, or uninstalling so Windows never displays a file-in-use warning.
+; Requests graceful shutdown of SideFlow.exe (allowing sideflow-config.json to flush cleanly)
+; before falling back to targeted termination of SideFlow.exe ONLY (never `/T` tree-kill,
+; which would terminate user IDEs/browsers/terminals launched from SideFlow Drawers).
 
 !macro customInit
-  nsExec::ExecToLog 'taskkill /F /IM "SideFlow.exe" /T'
-  Sleep 300
+  nsExec::ExecToLog 'taskkill /IM "SideFlow.exe"'
+  Sleep 600
+  nsExec::ExecToLog 'taskkill /F /IM "SideFlow.exe"'
+  Sleep 250
 !macroend
 
 !macro customUnInit
-  nsExec::ExecToLog 'taskkill /F /IM "SideFlow.exe" /T'
-  Sleep 300
+  nsExec::ExecToLog 'taskkill /IM "SideFlow.exe"'
+  Sleep 600
+  nsExec::ExecToLog 'taskkill /F /IM "SideFlow.exe"'
+  Sleep 250
 !macroend

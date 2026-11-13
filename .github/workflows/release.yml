@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   release-windows:
-    name: Build & Publish Windows Installer (NSIS + Auto-Update Metadata)
+    name: Build, Scan & Publish Windows Installer (NSIS + Auto-Update Metadata)
     runs-on: windows-latest
 
     steps:
@@ -42,8 +42,11 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      - name: Run Automated Test Suite
-        run: npm test
+      - name: Typecheck & Run Automated Test Suite
+        run: |
+          npx tsc -b --noEmit
+          npx tsc -p tsconfig.electron.json --noEmit
+          npm test
 
       - name: Bump Version & Push Tag (when triggered via workflow_dispatch)
         id: version_step
@@ -71,25 +74,36 @@ jobs:
       - name: Build Renderer & Electron Bundles
         run: npm run build
 
-      - name: Package & Publish NSIS Installer + Auto-Update Artifacts to GitHub Releases
+      - name: Package Windows NSIS & Portable Artifacts Locally (Before Malware Scan)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-        run: npx electron-builder --win nsis portable --publish always
+        run: npx electron-builder --win nsis portable --publish never
 
-      - name: Windows Defender Antivirus Clean-Scan & Generate SHA256SUMS.txt
+      - name: Gate Release on Windows Defender Scan, Checksums & Ed25519 Manifest Signature
         id: checksums_step
         shell: pwsh
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY }}
         run: |
           $defenderExe = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
           if (Test-Path $defenderExe) {
             Write-Host "Running Windows Defender Antivirus scan on release binaries..."
             & $defenderExe -Scan -ScanType 3 -File "$PWD\release"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows Defender scan failed with exit code $LASTEXITCODE. Aborting release publication."
+            }
+          } else {
+            throw "Windows Defender MpCmdRun.exe not found on runner."
           }
+
+          $exeFiles = Get-ChildItem -Path "release" -Filter "*.exe" -File -ErrorAction Stop
+          if (-not $exeFiles -or $exeFiles.Count -eq 0) {
+            throw "No built .exe artifacts found in release/."
+          }
+
           $lines = @()
-          $files = Get-ChildItem -Path "release" -Filter "*.exe" -File -ErrorAction SilentlyContinue
-          foreach ($f in $files) {
+          foreach ($f in $exeFiles) {
             $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             $lines += "$hash  $($f.Name)"
           }
@@ -101,49 +115,68 @@ jobs:
           $lines | Set-Content -Path $sumsPath -Encoding UTF8
           Get-Content $sumsPath | Write-Host
 
+          $latestYml = Join-Path "release" "latest.yml"
+          if ($env:UPDATE_SIGNING_PRIVATE_KEY -and (Test-Path $latestYml)) {
+            Write-Host "Signing release/latest.yml with Ed25519 private key..."
+            node scripts/generate-update-keys.mjs --sign $latestYml
+          }
+
       - name: Attest Build Provenance (SLSA Cryptographic Attestation)
         uses: actions/attest-build-provenance@v2
-        continue-on-error: true
         with:
           subject-path: 'release/*.exe'
 
-      - name: Upload Warning-Free PowerShell Installer, SHA256SUMS.txt & Finalize GitHub Release
+      - name: Create Draft Release, Upload Verified Assets & Publish Atomically
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $tag = "${{ steps.version_step.outputs.TAG }}"
           $ver = "${{ steps.version_step.outputs.VERSION }}"
-          try {
-            if (Test-Path "install.ps1") {
-              gh release upload $tag "install.ps1" --clobber
-            }
-            $sumsPath = Join-Path "release" "SHA256SUMS.txt"
-            $sumsContent = ""
-            if (Test-Path $sumsPath) {
-              gh release upload $tag $sumsPath --clobber
-              $sumsContent = (Get-Content -Path $sumsPath -Raw).Trim()
-            }
-            $notes = @"
+
+          $sumsPath = Join-Path "release" "SHA256SUMS.txt"
+          $sumsContent = (Get-Content -Path $sumsPath -Raw).Trim()
+
+          $notes = @"
           ### ⚡ Warning-Free 1-Line Windows Install / Upgrade (No SmartScreen or UAC Prompts)
           Run in PowerShell:
           ``````powershell
           irm https://raw.githubusercontent.com/NeoShadow7366/SideFlow/master/install.ps1 | iex
           ``````
-          *Verifies the SHA-512 checksum against ``latest.yml``, removes the browser Mark-of-the-Web (``Zone.Identifier``) stream, and installs silently per-user.*
+          *Strictly verifies the SHA-512 checksum against ``latest.yml`` (failing closed on mismatch), removes the browser Mark-of-the-Web (``Zone.Identifier``) stream, and installs silently per-user.*
 
           ### 🔒 Supply-Chain & Cryptographic Verification
-          - **Windows Defender Antivirus Scan**: Passed (`0` threats detected in CI)
+          - **Windows Defender Antivirus Scan**: Passed (``0`` threats detected prior to publication)
           - **Verify GitHub Build Provenance Attestation**:
             ``````powershell
-            gh attestation verify SideFlow-Setup-$ver.exe --repo NeoShadow7366/SideFlow
+            gh attestation verify "SideFlow-Setup-$ver.exe" --repo NeoShadow7366/SideFlow
             ``````
-          - **SHA-256 Checksums (`SHA256SUMS.txt`)**:
+          - **SHA-256 Checksums (``SHA256SUMS.txt``)**:
             ``````text
           $sumsContent
             ``````
           "@
-            gh release edit $tag --draft=false --latest --notes $notes
-          } catch {
-            Write-Host "Release $tag already published or finalized: $($_.Exception.Message)"
+
+          $existingRelease = gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --draft --title "SideFlow $tag" --notes $notes
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create draft GitHub release $tag" }
+          } else {
+            gh release edit $tag --draft --notes $notes
+            if ($LASTEXITCODE -ne 0) { throw "Failed to update draft GitHub release $tag" }
           }
+
+          $uploadAssets = @()
+          $uploadAssets += (Get-ChildItem -Path "release" -File | Where-Object {
+            $_.Extension -in @('.exe', '.blockmap', '.yml', '.sig', '.txt')
+          } | ForEach-Object { $_.FullName })
+          if (Test-Path "install.ps1") {
+            $uploadAssets += "install.ps1"
+          }
+
+          gh release upload $tag @uploadAssets --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload release assets for $tag" }
+
+          gh release edit $tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw "Failed to publish GitHub release $tag" }
