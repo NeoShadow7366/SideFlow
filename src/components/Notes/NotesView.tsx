@@ -72,8 +72,8 @@ import {
   replaceAllWordOccurrencesInAdfDoc,
   replaceAllWordOccurrencesInText,
 } from '../../utils/spellcheck';
-import {
-  JiraAdfEditor,
+import { lazyWithPreload } from '../../utils/lazyWithPreload';
+import type {
   JiraAdfEditorHandle,
   JiraAdfSpellcheckContextMenuPayload,
 } from './JiraAdfEditor';
@@ -83,6 +83,10 @@ import {
   SpellcheckProofingPopover,
 } from './SpellcheckMenu';
 import { VoiceBar, LiveInterimPayload } from './VoiceBar';
+
+const JiraAdfEditor = lazyWithPreload(() =>
+  import('./JiraAdfEditor').then((m) => ({ default: m.JiraAdfEditor }))
+);
 
 interface NotesViewProps {
   notes: NoteItem[];
@@ -151,6 +155,7 @@ const ACCENT_COLORS: {
 function snapshotEquals(a: NoteHistorySnapshot, b: NoteHistorySnapshot): boolean {
   if (a.format !== b.format || a.body !== b.body) return false;
   if (a.format === 'adf') {
+    if (a.adfDoc === b.adfDoc) return true;
     return JSON.stringify(a.adfDoc) === JSON.stringify(b.adfDoc);
   }
   return true;
@@ -356,17 +361,21 @@ export const NotesView: React.FC<NotesViewProps> = ({
     isEditingRawJsonRef.current = false;
   }, [currentNote.id, currentFormat]);
 
-  // Keep raw ADF JSON textarea synchronized when not actively mid-error edit
+  const isAdfJsonPaneVisible =
+    currentFormat === 'adf' &&
+    (viewMode === 'split' || viewMode === 'preview');
+
+  // Keep raw ADF JSON textarea synchronized only when the JSON inspector pane is actually visible
   useEffect(() => {
     if (currentFormat !== 'adf') {
       setAdfJsonError(null);
       return;
     }
-    if (!isEditingRawJsonRef.current) {
+    if (isAdfJsonPaneVisible && !isEditingRawJsonRef.current) {
       setAdfJsonDraft(JSON.stringify(currentAdfDoc, null, 2));
       setAdfJsonError(null);
     }
-  }, [currentNote.id, currentFormat, currentAdfDoc]);
+  }, [currentNote.id, currentFormat, currentAdfDoc, isAdfJsonPaneVisible]);
 
   const getNoteHistory = (noteId: string): NoteHistoryEntry => {
     if (!historyMapRef.current[noteId]) {
@@ -468,8 +477,10 @@ export const NotesView: React.FC<NotesViewProps> = ({
     const syncedMarkdown = adfToMarkdown(nextDoc);
     if (syncJsonDraft) {
       isEditingRawJsonRef.current = false;
-      setAdfJsonDraft(JSON.stringify(nextDoc, null, 2));
       setAdfJsonError(null);
+      if (isAdfJsonPaneVisible) {
+        setAdfJsonDraft(JSON.stringify(nextDoc, null, 2));
+      }
     }
     handleUpdateCurrentNote(
       {
@@ -1398,8 +1409,11 @@ export const NotesView: React.FC<NotesViewProps> = ({
   }, [notes, searchQuery, selectedTagFilter]);
 
   // Calculate word/char counts and task checklist progress across both MD & ADF modes
-  const effectiveTextForStats =
-    currentFormat === 'adf' ? adfToMarkdown(currentAdfDoc) : currentNote.body;
+  const effectiveTextForStats = useMemo(
+    () =>
+      currentFormat === 'adf' ? adfToMarkdown(currentAdfDoc) : currentNote.body,
+    [currentFormat, currentAdfDoc, currentNote.body]
+  );
   const wordsCount = effectiveTextForStats.trim()
     ? effectiveTextForStats.trim().split(/\s+/).length
     : 0;
@@ -1449,12 +1463,14 @@ export const NotesView: React.FC<NotesViewProps> = ({
       return findMisspellingsInAdfDoc(currentAdfDoc, {
         customDictionary: customDictSet,
         ignoredWords: ignoredWordsSet,
+        includeSuggestions: isProofingOpen,
       });
     }
     return findMisspellingsInText(currentNote.body || '', {
       isMarkdown: true,
       customDictionary: customDictSet,
       ignoredWords: ignoredWordsSet,
+      includeSuggestions: isProofingOpen,
     });
   }, [
     spellCheckEnabled,
@@ -1463,6 +1479,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
     currentNote.body,
     customDictSet,
     ignoredWordsSet,
+    isProofingOpen,
   ]);
 
   const countOccurrencesOfWord = useCallback(
@@ -1642,14 +1659,20 @@ export const NotesView: React.FC<NotesViewProps> = ({
       let workingDoc = currentAdfDoc;
       const seenWords = new Set<string>();
       for (const issue of activeMisspellings) {
-        if (issue.suggestions.length === 0) continue;
         const lower = issue.word.toLowerCase();
         if (seenWords.has(lower)) continue;
+        const topSuggestion =
+          issue.suggestions[0] ||
+          getSpellingSuggestions(issue.word, {
+            customDictionary: customDictSet,
+            maxSuggestions: 1,
+          })[0];
+        if (!topSuggestion) continue;
         seenWords.add(lower);
         workingDoc = replaceAllWordOccurrencesInAdfDoc(
           workingDoc,
           issue.word,
-          issue.suggestions[0]
+          topSuggestion
         ).nextDoc;
       }
       handleChangeAdfDoc(workingDoc, true);
@@ -1657,14 +1680,20 @@ export const NotesView: React.FC<NotesViewProps> = ({
       let workingBody = currentNote.body || '';
       const seenWords = new Set<string>();
       for (const issue of activeMisspellings) {
-        if (issue.suggestions.length === 0) continue;
         const lower = issue.word.toLowerCase();
         if (seenWords.has(lower)) continue;
+        const topSuggestion =
+          issue.suggestions[0] ||
+          getSpellingSuggestions(issue.word, {
+            customDictionary: customDictSet,
+            maxSuggestions: 1,
+          })[0];
+        if (!topSuggestion) continue;
         seenWords.add(lower);
         workingBody = replaceAllWordOccurrencesInText(
           workingBody,
           issue.word,
-          issue.suggestions[0],
+          topSuggestion,
           { isMarkdown: true }
         ).nextText;
       }
@@ -1675,7 +1704,14 @@ export const NotesView: React.FC<NotesViewProps> = ({
       'check',
       'Applied top suggestions across the note'
     );
-  }, [activeMisspellings, currentFormat, currentAdfDoc, currentNote.body, onNotify]);
+  }, [
+    activeMisspellings,
+    currentFormat,
+    currentAdfDoc,
+    currentNote.body,
+    customDictSet,
+    onNotify,
+  ]);
 
   const handleTitleContextMenu = (e: React.MouseEvent<HTMLInputElement>) => {
     e.preventDefault();
@@ -1761,7 +1797,12 @@ export const NotesView: React.FC<NotesViewProps> = ({
       if (caretMatch) {
         word = caretMatch.word;
         isMisspelled = true;
-        suggestions = caretMatch.suggestions;
+        suggestions =
+          caretMatch.suggestions.length > 0
+            ? caretMatch.suggestions
+            : getSpellingSuggestions(caretMatch.word, {
+                customDictionary: customDictSet,
+              });
         wordStart = caretMatch.start;
         wordEnd = caretMatch.end;
       } else {
@@ -1790,7 +1831,12 @@ export const NotesView: React.FC<NotesViewProps> = ({
           const firstIssue = activeMisspellings[0];
           word = firstIssue.word;
           isMisspelled = true;
-          suggestions = firstIssue.suggestions;
+          suggestions =
+            firstIssue.suggestions.length > 0
+              ? firstIssue.suggestions
+              : getSpellingSuggestions(firstIssue.word, {
+                  customDictionary: customDictSet,
+                });
           wordStart = firstIssue.start;
           wordEnd = firstIssue.end;
         } else if (wordAtCaret) {
@@ -1852,7 +1898,12 @@ export const NotesView: React.FC<NotesViewProps> = ({
             wordStart = firstForTarget.start;
             wordEnd = firstForTarget.end;
             isMisspelled = true;
-            suggestions = firstForTarget.suggestions;
+            suggestions =
+              firstForTarget.suggestions.length > 0
+                ? firstForTarget.suggestions
+                : getSpellingSuggestions(firstForTarget.word, {
+                    customDictionary: customDictSet,
+                  });
           }
         }
       }
@@ -2930,6 +2981,12 @@ export const NotesView: React.FC<NotesViewProps> = ({
                 type="button"
                 data-testid="format-mode-adf"
                 aria-pressed={currentFormat === 'adf'}
+                onPointerEnter={() => {
+                  void JiraAdfEditor.preload();
+                }}
+                onFocus={() => {
+                  void JiraAdfEditor.preload();
+                }}
                 onClick={() => handleSwitchFormatMode('adf')}
                 title="Option 2: Jira ADF (Atlassian Document Format v1) WYSIWYG Description Editor"
                 className={`min-h-[24px] px-2 py-0.5 rounded-md flex items-center gap-1 transition ${

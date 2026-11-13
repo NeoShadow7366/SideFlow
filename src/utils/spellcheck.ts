@@ -739,13 +739,23 @@ const IRREGULAR_WORDS = [
   "that's", "what's", "where's", "who's", "how's", "let's", "there's", "here's",
 ];
 
-// Build fast lookup structures once
+// Build fast lookup structures lazily on first spellcheck invocation (zero cold-boot cost)
 const BASE_WORD_SET: Set<string> = new Set();
 const BASE_WORD_LIST: string[] = [];
+let dictionaryInitialized = false;
 
-(() => {
+function ensureDictionaryInitialized(): void {
+  if (dictionaryInitialized) return;
+  dictionaryInitialized = true;
   const tokens = RAW_BASE_WORDS.split(/\s+/);
-  for (const raw of [...tokens, ...IRREGULAR_WORDS]) {
+  for (const raw of tokens) {
+    const clean = raw.trim().toLowerCase();
+    if (clean && /^[a-z']+$/.test(clean) && !BASE_WORD_SET.has(clean)) {
+      BASE_WORD_SET.add(clean);
+      BASE_WORD_LIST.push(clean);
+    }
+  }
+  for (const raw of IRREGULAR_WORDS) {
     const clean = raw.trim().toLowerCase();
     if (clean && /^[a-z']+$/.test(clean) && !BASE_WORD_SET.has(clean)) {
       BASE_WORD_SET.add(clean);
@@ -763,7 +773,25 @@ const BASE_WORD_LIST: string[] = [];
       }
     }
   }
-})();
+}
+
+const normalizedIterableCache = new WeakMap<object, Set<string>>();
+
+function getNormalizedLookupSet(words?: Iterable<string>): Set<string> | null {
+  if (!words) return null;
+  if (typeof words === 'object') {
+    const cached = normalizedIterableCache.get(words);
+    if (cached) return cached;
+    const built = new Set<string>();
+    for (const w of words) {
+      const clean = w.trim().toLowerCase();
+      if (clean) built.add(clean);
+    }
+    normalizedIterableCache.set(words, built);
+    return built;
+  }
+  return null;
+}
 
 const PREFIXES = [
   'un',
@@ -794,6 +822,7 @@ const PREFIXES = [
 ];
 
 function isValidStemOrDerived(lower: string): boolean {
+  ensureDictionaryInitialized();
   if (BASE_WORD_SET.has(lower)) return true;
 
   // Possessive suffix ('s)
@@ -987,13 +1016,19 @@ export function isWordSpelledCorrectly(
   const normalized = cleaned.replace(/’/g, "'");
   const lower = normalized.toLowerCase();
 
-  // Check user custom dictionary & session ignored words first
-  if (customDictionary) {
+  // Check user custom dictionary & session ignored words first (O(1) cached Set lookup)
+  const customSet = getNormalizedLookupSet(customDictionary);
+  if (customSet) {
+    if (customSet.has(lower)) return true;
+  } else if (customDictionary) {
     for (const w of customDictionary) {
       if (w.trim().toLowerCase() === lower) return true;
     }
   }
-  if (ignoredWords) {
+  const ignoredSet = getNormalizedLookupSet(ignoredWords);
+  if (ignoredSet) {
+    if (ignoredSet.has(lower)) return true;
+  } else if (ignoredWords) {
     for (const w of ignoredWords) {
       if (w.trim().toLowerCase() === lower) return true;
     }
@@ -1033,41 +1068,76 @@ export function isWordSpelledCorrectly(
   return isValidStemOrDerived(lower);
 }
 
+// Reusable typed-array row buffers for zero-allocation Damerau-Levenshtein evaluation
+let dlPrevPrevRow = new Int32Array(128);
+let dlPrevRow = new Int32Array(128);
+let dlCurrRow = new Int32Array(128);
+
 /**
  * Computes Damerau-Levenshtein distance (optimal string alignment) between `a` and `b`,
  * treating adjacent character transpositions (e.g., "teh" -> "the") as distance 1.
+ * Uses 3 reusable `Int32Array` row buffers (0 heap allocations) and early row cutoff.
  */
-export function damerauLevenshtein(a: string, b: string): number {
+export function damerauLevenshtein(a: string, b: string, maxDist = 2): number {
   const lenA = a.length;
   const lenB = b.length;
-  if (Math.abs(lenA - lenB) > 2) return 3;
+  if (Math.abs(lenA - lenB) > maxDist) return maxDist + 1;
+  if (lenA === 0) return lenB;
+  if (lenB === 0) return lenA;
 
-  const dp: number[][] = Array.from({ length: lenA + 1 }, () =>
-    new Array(lenB + 1).fill(0)
-  );
-
-  for (let i = 0; i <= lenA; i++) dp[i][0] = i;
-  for (let j = 0; j <= lenB; j++) dp[0][j] = j;
-
-  for (let i = 1; i <= lenA; i++) {
-    for (let j = 1; j <= lenB; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1, // deletion
-        dp[i][j - 1] + 1, // insertion
-        dp[i - 1][j - 1] + cost // substitution
-      );
-      if (
-        i > 1 &&
-        j > 1 &&
-        a[i - 1] === b[j - 2] &&
-        a[i - 2] === b[j - 1]
-      ) {
-        dp[i][j] = Math.min(dp[i][j], dp[i - 2][j - 2] + 1); // transposition
-      }
-    }
+  const requiredCols = lenB + 1;
+  if (dlPrevRow.length < requiredCols) {
+    const nextCap = Math.max(requiredCols, dlPrevRow.length * 2);
+    dlPrevPrevRow = new Int32Array(nextCap);
+    dlPrevRow = new Int32Array(nextCap);
+    dlCurrRow = new Int32Array(nextCap);
   }
-  return dp[lenA][lenB];
+
+  let prevPrev = dlPrevPrevRow;
+  let prev = dlPrevRow;
+  let curr = dlCurrRow;
+
+  for (let j = 0; j <= lenB; j++) {
+    prev[j] = j;
+  }
+
+  let prevCharA = 0;
+  for (let i = 1; i <= lenA; i++) {
+    curr[0] = i;
+    let rowMin = i;
+    const charA = a.charCodeAt(i - 1);
+    let prevCharB = 0;
+
+    for (let j = 1; j <= lenB; j++) {
+      const charB = b.charCodeAt(j - 1);
+      const cost = charA === charB ? 0 : 1;
+      const del = prev[j] + 1;
+      const ins = curr[j - 1] + 1;
+      const sub = prev[j - 1] + cost;
+      let val = del < ins ? (del < sub ? del : sub) : ins < sub ? ins : sub;
+
+      if (i > 1 && j > 1 && charA === prevCharB && prevCharA === charB) {
+        const trans = prevPrev[j - 2] + 1;
+        if (trans < val) val = trans;
+      }
+
+      curr[j] = val;
+      if (val < rowMin) rowMin = val;
+      prevCharB = charB;
+    }
+
+    if (rowMin > maxDist) {
+      return maxDist + 1;
+    }
+
+    prevCharA = charA;
+    const tmp = prevPrev;
+    prevPrev = prev;
+    prev = curr;
+    curr = tmp;
+  }
+
+  return prev[lenB];
 }
 
 const MAX_SUGGESTION_CACHE_ENTRIES = 256;
@@ -1086,6 +1156,7 @@ export function getSpellingSuggestions(
     nativeSuggestions?: string[];
   }
 ): string[] {
+  ensureDictionaryInitialized();
   const maxSuggestions = options?.maxSuggestions ?? 5;
   const cleaned = rawWord.replace(/^['’]+|['’]+$/g, '').trim();
   if (!cleaned) return [];
@@ -1156,7 +1227,7 @@ export function getSpellingSuggestions(
   const evaluateCandidate = (cand: string, isCustom: boolean) => {
     if (!cand || seenLower.has(cand) || cand === lower) return;
     if (Math.abs(cand.length - lower.length) > maxEditDist) return;
-    const dist = damerauLevenshtein(lower, cand);
+    const dist = damerauLevenshtein(lower, cand, maxEditDist);
     if (dist > maxEditDist) return;
 
     // Lower score is better: prioritize distance 1, matching first character, matching last character, and similar length
@@ -1304,11 +1375,13 @@ export function findMisspellingsInText(
     customDictionary?: Iterable<string>;
     ignoredWords?: Iterable<string>;
     maxMatches?: number;
+    includeSuggestions?: boolean;
   }
 ): MisspellingMatch[] {
   if (!text || !text.trim()) return [];
   const skipRanges = options?.isMarkdown ? buildMarkdownSkipRanges(text) : [];
   const maxMatches = options?.maxMatches ?? 100;
+  const includeSuggestions = options?.includeSuggestions !== false;
   const matches: MisspellingMatch[] = [];
   const wordRegex = /\b[A-Za-z]+(?:['’][A-Za-z]+)*\b/g;
 
@@ -1342,9 +1415,11 @@ export function findMisspellingsInText(
         normalizedWord: word.replace(/’/g, "'").toLowerCase(),
         start,
         end,
-        suggestions: getSpellingSuggestions(word, {
-          customDictionary: options?.customDictionary,
-        }),
+        suggestions: includeSuggestions
+          ? getSpellingSuggestions(word, {
+              customDictionary: options?.customDictionary,
+            })
+          : [],
         contextSnippet,
       });
 
@@ -1492,10 +1567,12 @@ export function findMisspellingsInAdfDoc(
     customDictionary?: Iterable<string>;
     ignoredWords?: Iterable<string>;
     maxMatches?: number;
+    includeSuggestions?: boolean;
   }
 ): MisspellingMatch[] {
   const matches: MisspellingMatch[] = [];
   const maxMatches = options?.maxMatches ?? 100;
+  const includeSuggestions = options?.includeSuggestions !== false;
 
   const scanInline = (
     nodes: AdfInlineNode[] | undefined,
@@ -1532,9 +1609,11 @@ export function findMisspellingsInAdfDoc(
           normalizedWord: word.replace(/’/g, "'").toLowerCase(),
           start,
           end,
-          suggestions: getSpellingSuggestions(word, {
-            customDictionary: options?.customDictionary,
-          }),
+          suggestions: includeSuggestions
+            ? getSpellingSuggestions(word, {
+                customDictionary: options?.customDictionary,
+              })
+            : [],
           contextSnippet,
           adfTargetId: targetId,
           locationLabel,

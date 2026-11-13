@@ -970,6 +970,17 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   const [tracePathMode, setTracePathMode] = useState<boolean>(false);
   const [isHealthPopoverOpen, setIsHealthPopoverOpen] = useState<boolean>(false);
   const draggingWaypointRef = useRef<{ edgeIdx: number } | null>(null);
+  const [dragWaypoint, setDragWaypoint] = useState<{
+    edgeIdx: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const dragWaypointRef = useRef<{
+    edgeIdx: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const dragWaypointRafRef = useRef<number | null>(null);
 
   // Transient drag coordinate map to prevent localStorage/IPC thrashing on mousemove
   const [dragNodePositions, setDragNodePositions] = useState<Record<
@@ -1095,6 +1106,10 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       }
 
       const activeCurve = edge.curve || currentEdgeCurve;
+      const effectiveWaypoint =
+        dragWaypoint && dragWaypoint.edgeIdx === idx
+          ? { x: dragWaypoint.x, y: dragWaypoint.y }
+          : edge.waypoint;
       const geom = computeEdgeGeometry(
         fromEntry.node,
         toEntry.node,
@@ -1105,7 +1120,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         toEntry.width,
         toEntry.height,
         parallelOffsets[idx] || 0,
-        edge.waypoint,
+        effectiveWaypoint,
         activeCurve === 'orthogonal' ? effectiveNodes : undefined
       );
       return {
@@ -1126,6 +1141,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     isSequenceDiagram,
     flowData.direction,
     currentEdgeCurve,
+    dragWaypoint,
   ]);
 
   // Helper that records undo history on discrete flowchart edits and syncs active saved diagram
@@ -1522,14 +1538,21 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         );
         const snappedX = snapToGridRef.current ? Math.round(wx / 8) * 8 : wx;
         const snappedY = snapToGridRef.current ? Math.round(wy / 8) * 8 : wy;
-        commitFlowUpdate((prev) => ({
-          ...prev,
-          edges: prev.edges.map((ed, idx) =>
-            idx === edgeIdx
-              ? { ...ed, waypoint: { x: snappedX, y: snappedY } }
-              : ed
-          ),
-        }));
+        const prevWp = dragWaypointRef.current;
+        if (
+          !prevWp ||
+          prevWp.edgeIdx !== edgeIdx ||
+          prevWp.x !== snappedX ||
+          prevWp.y !== snappedY
+        ) {
+          dragWaypointRef.current = { edgeIdx, x: snappedX, y: snappedY };
+          if (dragWaypointRafRef.current === null) {
+            dragWaypointRafRef.current = window.requestAnimationFrame(() => {
+              dragWaypointRafRef.current = null;
+              setDragWaypoint(dragWaypointRef.current);
+            });
+          }
+        }
         return;
       }
 
@@ -1765,6 +1788,36 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         }
       }
 
+      // Commit transient connector bend waypoint drag once to Undo history & persistent state
+      if (dragWaypointRafRef.current !== null) {
+        window.cancelAnimationFrame(dragWaypointRafRef.current);
+        dragWaypointRafRef.current = null;
+      }
+      if (dragWaypointRef.current) {
+        const finalWp = dragWaypointRef.current;
+        dragWaypointRef.current = null;
+        setDragWaypoint(null);
+        commitFlowUpdate((prev) => {
+          const targetEdge = prev.edges[finalWp.edgeIdx];
+          if (!targetEdge) return prev;
+          if (
+            targetEdge.waypoint &&
+            targetEdge.waypoint.x === finalWp.x &&
+            targetEdge.waypoint.y === finalWp.y
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            edges: prev.edges.map((ed, idx) =>
+              idx === finalWp.edgeIdx
+                ? { ...ed, waypoint: { x: finalWp.x, y: finalWp.y } }
+                : ed
+            ),
+          };
+        });
+      }
+
       // Commit transient node / subgraph drag once to Undo history & persistent state
       if (dragNodePositionsRef.current) {
         const finalPositions = dragNodePositionsRef.current;
@@ -1830,6 +1883,10 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     return () => {
+      if (dragWaypointRafRef.current !== null) {
+        window.cancelAnimationFrame(dragWaypointRafRef.current);
+        dragWaypointRafRef.current = null;
+      }
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
@@ -4029,7 +4086,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             />
             <input
               id="flow-node-search-input"
-              data-testid="flow-node-search-input"
+              data-testid="flow-search-nodes-input"
               type="text"
               aria-label="Find node on canvas"
               value={nodeSearchQuery}

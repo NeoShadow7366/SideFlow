@@ -48,6 +48,7 @@ import {
   resolveDroppedFilePath,
   resolveShortcutMetadata,
   sortDrawerApps,
+  splitCliArgs,
 } from '../../utils/fileMeta';
 
 interface DockViewProps {
@@ -130,6 +131,7 @@ export const DockView: React.FC<DockViewProps> = ({
   const [appName, setAppName] = useState('');
   const [appDrawerId, setAppDrawerId] = useState('');
   const [appCmd, setAppCmd] = useState('');
+  const [appArgs, setAppArgs] = useState('');
   const [appIcon, setAppIcon] = useState('terminal');
   const [appColor, setAppColor] = useState<AccentColor>('indigo');
   const [appCustomIconUrl, setAppCustomIconUrl] = useState('');
@@ -147,16 +149,25 @@ export const DockView: React.FC<DockViewProps> = ({
   const [targetBrowseDrawerId, setTargetBrowseDrawerId] = useState<string | null>(
     null
   );
+  const lastProcessSignatureRef = useRef<string>('');
 
   const refreshSystemTelemetry = useCallback(async () => {
-    setDockletTime(
-      new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    );
+    const nextTime = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    setDockletTime((prev) => (prev === nextTime ? prev : nextTime));
     if (window.sideflow?.getSystemMetrics) {
       try {
         const m = await window.sideflow.getSystemMetrics();
         if (m && typeof m.cpuPercent === 'number') {
-          setSystemMetrics(m);
+          setSystemMetrics((prev) =>
+            prev &&
+            prev.cpuPercent === m.cpuPercent &&
+            prev.memPercent === m.memPercent
+              ? prev
+              : m
+          );
         }
       } catch {
         // Ignore telemetry error
@@ -166,7 +177,18 @@ export const DockView: React.FC<DockViewProps> = ({
       try {
         const procs = await window.sideflow.getRunningProcesses();
         if (Array.isArray(procs) && procs.length > 0) {
-          setRunningProcesses(procs);
+          const normalized = Array.from(
+            new Set(
+              procs
+                .map((p) => String(p).toLowerCase().trim())
+                .filter(Boolean)
+            )
+          ).sort();
+          const signature = normalized.join('\n');
+          if (signature !== lastProcessSignatureRef.current) {
+            lastProcessSignatureRef.current = signature;
+            setRunningProcesses(procs);
+          }
         }
       } catch {
         // Ignore process list error
@@ -237,57 +259,67 @@ export const DockView: React.FC<DockViewProps> = ({
 
   const enrichAppsWithNativeIcons = (drawerId: string, appsToEnrich: AppItem[]) => {
     if (
-      !window.sideflow?.resolveShortcutItem &&
-      !window.sideflow?.extractFileIcon
+      appsToEnrich.length === 0 ||
+      (!window.sideflow?.resolveShortcutItem &&
+        !window.sideflow?.extractFileIcon)
     ) {
       return;
     }
-    appsToEnrich.forEach((item) => {
-      if (window.sideflow?.resolveShortcutItem) {
-        window.sideflow
-          .resolveShortcutItem(item.cmd)
-          .then((resolved) => {
-            if (!resolved) return;
-            onChangeDrawers((prev) =>
-              prev.map((d) =>
-                d.id === drawerId
-                  ? {
-                      ...d,
-                      apps: d.apps.map((a) =>
-                        a.id === item.id
-                          ? {
-                              ...a,
-                              ...(resolved.cmd ? { cmd: resolved.cmd } : {}),
-                              ...(resolved.iconDataUrl
-                                ? { customIconUrl: resolved.iconDataUrl }
-                                : {}),
-                            }
-                          : a
-                      ),
-                    }
-                  : d
-              )
-            );
-          })
-          .catch(() => {});
-        return;
-      }
 
-      fetchNativeFileIcon(item.cmd).then((iconUrl) => {
-        if (!iconUrl) return;
-        onChangeDrawers((prev) =>
-          prev.map((d) =>
-            d.id === drawerId
-              ? {
-                  ...d,
-                  apps: d.apps.map((a) =>
-                    a.id === item.id ? { ...a, customIconUrl: iconUrl } : a
-                  ),
-                }
-              : d
-          )
-        );
-      });
+    void Promise.allSettled(
+      appsToEnrich.map(async (item) => {
+        if (window.sideflow?.resolveShortcutItem) {
+          const resolved = await window.sideflow.resolveShortcutItem(item.cmd);
+          if (!resolved) return null;
+          return {
+            id: item.id,
+            cmd: resolved.cmd,
+            args: resolved.args,
+            customIconUrl: resolved.iconDataUrl || undefined,
+          };
+        }
+        const iconUrl = await fetchNativeFileIcon(item.cmd);
+        if (!iconUrl) return null;
+        return {
+          id: item.id,
+          cmd: undefined,
+          args: undefined,
+          customIconUrl: iconUrl,
+        };
+      })
+    ).then((results) => {
+      const updatesById = new Map<
+        string,
+        { cmd?: string; args?: string; customIconUrl?: string }
+      >();
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value) {
+          updatesById.set(result.value.id, result.value);
+        }
+      }
+      if (updatesById.size === 0) return;
+
+      onChangeDrawers((prev) =>
+        prev.map((d) =>
+          d.id === drawerId
+            ? {
+                ...d,
+                apps: d.apps.map((a) => {
+                  const patch = updatesById.get(a.id);
+                  if (!patch) return a;
+                  return {
+                    ...a,
+                    ...(patch.cmd ? { cmd: patch.cmd } : {}),
+                    ...(patch.args ? { args: patch.args } : {}),
+                    ...(patch.customIconUrl
+                      ? { customIconUrl: patch.customIconUrl }
+                      : {}),
+                  };
+                }),
+              }
+            : d
+        )
+      );
     });
   };
 
@@ -462,7 +494,7 @@ export const DockView: React.FC<DockViewProps> = ({
       appsToLaunch.map((a) => a.name).join(', ')
     );
     for (const app of appsToLaunch) {
-      await executeAppCommand(app.cmd);
+      await executeAppCommand(app.cmd, splitCliArgs(app.args));
     }
   };
 
@@ -548,7 +580,7 @@ export const DockView: React.FC<DockViewProps> = ({
         prev.includes(app.id) ? prev : [...prev, app.id]
       );
       onNotify(`Launching ${app.name}...`, app.icon || 'rocket', app.cmd);
-      const res = await executeAppCommand(app.cmd);
+      const res = await executeAppCommand(app.cmd, splitCliArgs(app.args));
       if (res && !res.success && res.error) {
         onNotify(`Unable to Launch ${app.name}`, 'zap', res.error, {
           variant: 'error',
@@ -632,7 +664,10 @@ export const DockView: React.FC<DockViewProps> = ({
       app.icon || 'rocket',
       `${app.cmd} "${filePath}"`
     );
-    const res = await executeAppCommand(app.cmd, [filePath]);
+    const res = await executeAppCommand(app.cmd, [
+      ...splitCliArgs(app.args),
+      filePath,
+    ]);
     if (res && !res.success && res.error) {
       onNotify(`Unable to Open ${fileName}`, 'zap', res.error, {
         variant: 'error',
@@ -838,6 +873,7 @@ export const DockView: React.FC<DockViewProps> = ({
         : drawers[0]?.id || '';
     setAppDrawerId(defaultDrawerId);
     setAppCmd('');
+    setAppArgs('');
     setAppIcon('terminal');
     setAppColor('indigo');
     setAppCustomIconUrl('');
@@ -851,6 +887,7 @@ export const DockView: React.FC<DockViewProps> = ({
     setAppName(app.name);
     setAppDrawerId(drawerId);
     setAppCmd(app.cmd);
+    setAppArgs(app.args || '');
     setAppIcon(app.icon || 'terminal');
     setAppColor(app.color || 'indigo');
     setAppCustomIconUrl(app.customIconUrl || '');
@@ -881,6 +918,9 @@ export const DockView: React.FC<DockViewProps> = ({
       }
       if (resolved.cmd && appCmd.trim().toLowerCase().endsWith('.lnk')) {
         setAppCmd(resolved.cmd);
+        if (resolved.args) {
+          setAppArgs(resolved.args);
+        }
       }
       setAppCustomIconUrl(resolved.customIconUrl);
     }
@@ -897,6 +937,7 @@ export const DockView: React.FC<DockViewProps> = ({
           setAppName(meta.name);
         }
         setAppCmd(pickedPath);
+        setAppArgs('');
         setAppIcon(meta.icon);
         setAppColor(meta.color);
         const resolved = await resolveShortcutMetadata(
@@ -906,6 +947,9 @@ export const DockView: React.FC<DockViewProps> = ({
         );
         if (resolved.cmd) {
           setAppCmd(resolved.cmd);
+        }
+        if (resolved.args) {
+          setAppArgs(resolved.args);
         }
         setAppCustomIconUrl(resolved.customIconUrl);
       }
@@ -930,12 +974,16 @@ export const DockView: React.FC<DockViewProps> = ({
       setAppName(meta.name);
     }
     setAppCmd(nativePath);
+    setAppArgs('');
     setAppIcon(meta.icon);
     setAppColor(meta.color);
     setAppCustomIconUrl(generateShortcutIconDataUrl(nextName, meta.color));
     resolveShortcutMetadata(nativePath, nextName, meta.color).then((resolved) => {
       if (resolved.cmd) {
         setAppCmd(resolved.cmd);
+      }
+      if (resolved.args) {
+        setAppArgs(resolved.args);
       }
       if (resolved.customIconUrl) {
         setAppCustomIconUrl(resolved.customIconUrl);
@@ -961,6 +1009,7 @@ export const DockView: React.FC<DockViewProps> = ({
     const trimmedName = appName.trim();
     if (!trimmedName) return;
     const finalCmd = appCmd.trim() || 'app://launch';
+    const finalArgs = appArgs.trim() || undefined;
     const finalCustomIcon = appCustomIconUrl.trim() || undefined;
     const finalHotkey = appHotkey.trim() || undefined;
     const targetDrawerId = appDrawerId || drawers[0]?.id;
@@ -984,6 +1033,7 @@ export const DockView: React.FC<DockViewProps> = ({
                       ...a,
                       name: trimmedName,
                       cmd: finalCmd,
+                      args: finalArgs,
                       icon: appIcon,
                       color: appColor,
                       customIconUrl: finalCustomIcon,
@@ -1007,6 +1057,7 @@ export const DockView: React.FC<DockViewProps> = ({
                       id: editingAppInfo.appId,
                       name: trimmedName,
                       cmd: finalCmd,
+                      ...(finalArgs ? { args: finalArgs } : {}),
                       icon: appIcon,
                       color: appColor,
                       ...(finalCustomIcon ? { customIconUrl: finalCustomIcon } : {}),
@@ -1025,6 +1076,7 @@ export const DockView: React.FC<DockViewProps> = ({
         id: `app-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         name: trimmedName,
         cmd: finalCmd,
+        ...(finalArgs ? { args: finalArgs } : {}),
         icon: appIcon,
         color: appColor,
         ...(finalCustomIcon ? { customIconUrl: finalCustomIcon } : {}),

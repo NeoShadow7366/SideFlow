@@ -340,6 +340,8 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
   });
   const pendingFocusRef = useRef<{ start: number; end: number } | null>(null);
   const suppressDomSyncOnceRef = useRef(false);
+  const isComposingRef = useRef(false);
+  const flushedCompositionOnBlurRef = useRef(false);
 
   const spellCtx = useContext(JiraSpellcheckContext);
   const spellOptions = useMemo(
@@ -368,7 +370,7 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
 
   useLayoutEffect(() => {
     const el = elRef.current;
-    if (!el) return;
+    if (!el || isComposingRef.current) return;
     if (suppressDomSyncOnceRef.current) {
       suppressDomSyncOnceRef.current = false;
       // Keep `data-adf-inline-index` synchronized on atomic chips when user types before them
@@ -445,6 +447,7 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
   };
 
   const handleInput = () => {
+    if (isComposingRef.current) return;
     const el = elRef.current;
     if (!el) return;
     const parsed = parseEditorDomToAdfInline(el);
@@ -563,6 +566,7 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
     } else {
       suppressDomSyncOnceRef.current = true;
     }
+    latestNodesRef.current = parsed;
     onChangeInline(parsed);
   };
 
@@ -602,6 +606,13 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (
+      isComposingRef.current ||
+      e.nativeEvent.isComposing ||
+      e.keyCode === 229
+    ) {
+      return;
+    }
     const rawTarget = e.target as HTMLElement | null;
     const focusedChip = rawTarget?.closest?.('[data-adf-inline-type]') as
       | HTMLElement
@@ -853,10 +864,35 @@ const RichInlineEditable: React.FC<RichInlineEditableProps> = ({
           syncSelection();
         }}
         onBlur={() => {
-          const el = elRef.current;
-          if (el && el.innerHTML !== renderedHtml) {
-            el.innerHTML = renderedHtml;
+          if (isComposingRef.current) {
+            isComposingRef.current = false;
+            flushedCompositionOnBlurRef.current = true;
+            handleInput();
+            suppressDomSyncOnceRef.current = false;
           }
+          const el = elRef.current;
+          if (el) {
+            const latestHtml = adfInlineToEditorHtml(
+              latestNodesRef.current,
+              spellOptionsRef.current
+            );
+            if (el.innerHTML !== latestHtml) {
+              el.innerHTML = latestHtml;
+            }
+          }
+        }}
+        onCompositionStart={() => {
+          isComposingRef.current = true;
+          flushedCompositionOnBlurRef.current = false;
+        }}
+        onCompositionEnd={() => {
+          isComposingRef.current = false;
+          if (flushedCompositionOnBlurRef.current) {
+            flushedCompositionOnBlurRef.current = false;
+            return;
+          }
+          handleInput();
+          suppressDomSyncOnceRef.current = false;
         }}
         onInput={handleInput}
         onPaste={handlePaste}
