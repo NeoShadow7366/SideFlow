@@ -17,6 +17,7 @@ import { SideFlowIcon } from './SideFlowIcon';
 interface HeaderProps {
   activeTab: TabId;
   onSelectTab: (tab: TabId) => void;
+  onPrefetchTab?: (tab: TabId) => void;
   isPinned: boolean;
   onTogglePin: () => void;
   onClosePanel: () => void;
@@ -31,6 +32,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   activeTab,
   onSelectTab,
+  onPrefetchTab,
   isPinned,
   onTogglePin,
   onClosePanel,
@@ -166,6 +168,8 @@ export const Header: React.FC<HeaderProps> = ({
                   : tab.label
               }
               title={tab.title}
+              onPointerEnter={() => onPrefetchTab?.(tab.id)}
+              onFocus={() => onPrefetchTab?.(tab.id)}
               onClick={() => onSelectTab(tab.id)}
               onKeyDown={(e) => handleTabKeyDown(e, idx)}
               className={`tab-btn min-h-[28px] px-2.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${

@@ -35,17 +35,11 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'jsdom',
+    pool: 'threads',
+    minWorkers: 1,
+    maxWorkers: 4,
     setupFiles: './src/test/setup.ts',
     css: false,
     testTimeout: 30000,
-    fileParallelism: false,
-    alias: {
-      'lucide-react': 'lucide-react/dist/cjs/lucide-react.js',
-    },
-    poolOptions: {
-      threads: {
-        singleThread: true,
-      },
-    },
   },
 });

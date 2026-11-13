@@ -30,6 +30,7 @@ import {
   TabId,
 } from '../types/sideflow';
 import { defaultFlowData } from '../utils/defaults';
+import { readSharedStorage } from '../hooks/useLocalStorage';
 import { extractFilenameFromPath, sortDrawerApps } from '../utils/fileMeta';
 import { getMermaidTemplatePreset } from '../utils/mermaid';
 import { DynamicIcon } from './DynamicIcon';
@@ -240,31 +241,20 @@ function readSavedDiagramsSnapshot(
   activeFlowData: FlowchartState
 ): { diagrams: FlowDiagramItem[]; activeDiagramId: string } {
   let activeDiagramId = 'flow-1';
-  try {
-    const rawActive = window.localStorage.getItem('sideflow_active_diagram_id');
-    if (rawActive) {
-      const parsedId = JSON.parse(rawActive);
-      if (typeof parsedId === 'string' && parsedId) {
-        activeDiagramId = parsedId;
-      }
-    }
-  } catch {
-    // ignore
+  const parsedId = readSharedStorage<unknown>('sideflow_active_diagram_id', null);
+  if (typeof parsedId === 'string' && parsedId) {
+    activeDiagramId = parsedId;
   }
 
-  try {
-    const rawDiagrams = window.localStorage.getItem('sideflow_flow_diagrams_v1');
-    if (rawDiagrams) {
-      const parsed = JSON.parse(rawDiagrams);
-      if (Array.isArray(parsed)) {
-        const validDiagrams = parsed.filter(isValidSavedDiagram);
-        if (validDiagrams.length > 0) {
-          return { diagrams: validDiagrams, activeDiagramId };
-        }
-      }
+  const parsedDiagrams = readSharedStorage<unknown>(
+    'sideflow_flow_diagrams_v1',
+    null
+  );
+  if (Array.isArray(parsedDiagrams)) {
+    const validDiagrams = parsedDiagrams.filter(isValidSavedDiagram);
+    if (validDiagrams.length > 0) {
+      return { diagrams: validDiagrams, activeDiagramId };
     }
-  } catch {
-    // ignore
   }
 
   const fallbackDiagrams: FlowDiagramItem[] = [

@@ -557,7 +557,7 @@ describe('SideFlow Phase 1-4 UI/UX & WCAG 2.2 AA Accessibility Suite', () => {
       ).not.toBeInTheDocument();
     });
 
-    it('renders electron-web-promo-card in web preview mode and suppresses it when window.sideflow.isElectron is true', () => {
+    it('renders electron-web-promo-card in web preview mode and suppresses it when window.sideflow.isElectron is true', async () => {
       const webRender = render(<App />);
       fireEvent.click(screen.getByRole('tab', { name: /^Config/i }));
       expect(screen.getByTestId('electron-web-promo-card')).toBeInTheDocument();
@@ -577,6 +577,9 @@ describe('SideFlow Phase 1-4 UI/UX & WCAG 2.2 AA Accessibility Suite', () => {
       } as unknown as Window['sideflow'];
 
       render(<App />);
+      await act(async () => {
+        await Promise.resolve();
+      });
       fireEvent.click(screen.getByRole('tab', { name: /^Config/i }));
       expect(
         screen.queryByTestId('electron-web-promo-card')
@@ -611,7 +614,7 @@ describe('SideFlow Phase 1-4 UI/UX & WCAG 2.2 AA Accessibility Suite', () => {
       expect(noteBody).toBeDefined();
     });
 
-    it('synchronizes sideflow_flow_diagrams_v1 with Electron storeSet when resetting defaults and enforces >= 24x24px quick-add targets', () => {
+    it('synchronizes sideflow_flow_diagrams_v1 with Electron storeSet when resetting defaults and enforces >= 24x24px quick-add targets', async () => {
       const storeSetMock = vi.fn().mockResolvedValue(true);
       window.sideflow = {
         isElectron: true,
@@ -628,6 +631,9 @@ describe('SideFlow Phase 1-4 UI/UX & WCAG 2.2 AA Accessibility Suite', () => {
       } as unknown as Window['sideflow'];
 
       render(<App />);
+      await act(async () => {
+        await Promise.resolve();
+      });
 
       // Verify Flow toolbar and quick-add buttons enforce >= 24x24px for WCAG 2.5.8 Target Size
       fireEvent.click(screen.getByRole('tab', { name: /^Flow$/i }));

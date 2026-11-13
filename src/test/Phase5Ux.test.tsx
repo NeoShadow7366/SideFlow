@@ -451,7 +451,7 @@ describe('SideFlow Phase 5 UX Suite — Global Command Palette & Flowchart Minim
       render(<Wrapper />);
 
       // 1. Canvas Node Search & Spotlight
-      const searchInput = screen.getByTestId('flow-node-search-input');
+      const searchInput = screen.getByTestId('flow-search-nodes-input');
       fireEvent.change(searchInput, { target: { value: 'Token' } });
       expect(screen.getByTestId('flow-search-match-count')).toHaveTextContent(
         '2'

@@ -44,6 +44,8 @@ import {
   sanitizeMonitorSettings,
   simulatedDisplays,
 } from '../../utils/defaults';
+import { replaceSharedStoreSnapshot } from '../../hooks/useLocalStorage';
+import { MAX_BACKUP_FILE_BYTES } from '../../utils/workspaceBackup';
 import { Modal } from '../Modal';
 
 type SettingsCategory = 'all' | 'shortcuts' | 'monitors' | 'dock' | 'system';
@@ -252,8 +254,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const handleRestoreSnapshot = async (fileName: string) => {
     if (window.sideflow?.restoreStoreBackup) {
       const res = await window.sideflow.restoreStoreBackup(fileName);
-      if (res?.success && res.store && onImportBackup) {
-        onImportBackup(JSON.stringify(res.store));
+      if (res?.success && res.store) {
+        replaceSharedStoreSnapshot(res.store);
+        if (onImportBackup) {
+          onImportBackup(JSON.stringify(res.store));
+        }
         setStatusFeedback(`Restored workspace from ${fileName}`);
       } else if (res?.success) {
         setStatusFeedback(`Restored ${fileName} (reload to apply)`);
@@ -409,6 +414,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   ) => {
     const file = e.target.files?.[0];
     if (!file || !onImportBackup) return;
+    if (typeof file.size === 'number' && file.size > MAX_BACKUP_FILE_BYTES) {
+      setStatusFeedback('Backup file exceeds maximum 25 MB limit');
+      onImportBackup('');
+      return;
+    }
     try {
       if (typeof file.text === 'function') {
         const text = await file.text();
@@ -1301,6 +1311,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </span>
             )}
           </div>
+
+          {(updateState?.status === 'available' ||
+            updateState?.status === 'downloaded') &&
+            updateState.releaseNotes && (
+              <div
+                data-testid="update-release-notes"
+                className="rounded-xl bg-slate-950/70 border border-slate-800/80 p-2.5 text-[11px] text-slate-300 max-h-28 overflow-y-auto whitespace-pre-wrap leading-relaxed"
+              >
+                {updateState.releaseNotes}
+              </div>
+            )}
 
           <div className="flex flex-wrap items-center gap-2">
             <button

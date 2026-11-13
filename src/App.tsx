@@ -28,6 +28,7 @@ import {
   DockIconSize,
   FlowchartState,
   FlowDiagramItem,
+  FlowNode,
   MonitorDisplayInfo,
   MonitorSettings,
   NoteItem,
@@ -46,6 +47,7 @@ import {
 } from './utils/adf';
 import {
   useLocalStorage,
+  readSharedStorage,
   writeSharedStorage,
   removeSharedStorage,
 } from './hooks/useLocalStorage';
@@ -65,33 +67,56 @@ import {
   sanitizeMonitorSettings,
   simulatedDisplays,
 } from './utils/defaults';
-import { executeAppCommand } from './utils/fileMeta';
-import { computeDagLayout, getMermaidTemplatePreset } from './utils/mermaid';
+import { executeAppCommand, splitCliArgs } from './utils/fileMeta';
+import {
+  lazyModule,
+  lazyWithPreload,
+  preloadAllLazyChunks,
+} from './utils/lazyWithPreload';
+import { normalizeWorkspaceBackupPayload } from './utils/workspaceBackup';
 import { Header } from './components/Header';
 import { DockView } from './components/DockDrawers/DockView';
-import { FlowCanvas } from './components/Flowchart/FlowCanvas';
-import { NotesView } from './components/Notes/NotesView';
-import { SettingsView } from './components/Settings/SettingsView';
-import { ElectronModal } from './components/ElectronModal';
-import { OnboardingModal } from './components/OnboardingModal';
-import { CommandPalette } from './components/CommandPalette';
 import { DynamicIcon } from './components/DynamicIcon';
 import { SideFlowIcon } from './components/SideFlowIcon';
 
-const DEFAULT_SAVED_FLOW_DIAGRAMS: FlowDiagramItem[] = [
-  {
-    id: 'flow-1',
-    title: 'Hotkey Launch Flow',
-    flowData: defaultFlowData,
-    updatedAt: 1700000000000,
-  },
-  {
-    id: 'flow-2',
-    title: 'CI/CD Deployment Pipeline',
-    flowData: getMermaidTemplatePreset('ci-cd') || defaultFlowData,
-    updatedAt: 1699999940000,
-  },
-];
+const FlowCanvas = lazyWithPreload(() =>
+  import('./components/Flowchart/FlowCanvas').then((m) => ({
+    default: m.FlowCanvas,
+  }))
+);
+const NotesView = lazyWithPreload(() =>
+  import('./components/Notes/NotesView').then((m) => ({
+    default: m.NotesView,
+  }))
+);
+const SettingsView = lazyWithPreload(() =>
+  import('./components/Settings/SettingsView').then((m) => ({
+    default: m.SettingsView,
+  }))
+);
+const CommandPalette = lazyWithPreload(() =>
+  import('./components/CommandPalette').then((m) => ({
+    default: m.CommandPalette,
+  }))
+);
+const ElectronModal = lazyWithPreload(() =>
+  import('./components/ElectronModal').then((m) => ({
+    default: m.ElectronModal,
+  }))
+);
+const OnboardingModal = lazyWithPreload(() =>
+  import('./components/OnboardingModal').then((m) => ({
+    default: m.OnboardingModal,
+  }))
+);
+const mermaidModule = lazyModule(() => import('./utils/mermaid'));
+
+function getSeededCiCdDiagramFlow(): FlowchartState {
+  return (
+    mermaidModule.current?.getMermaidTemplatePreset('ci-cd') ||
+    (JSON.parse(JSON.stringify(defaultFlowData)) as FlowchartState)
+  );
+}
 
 export const App: React.FC = () => {
   const [drawers, setDrawers] = useLocalStorage<AppDrawer[]>(
@@ -102,9 +127,9 @@ export const App: React.FC = () => {
     'sideflow_flow',
     defaultFlowData
   );
-  const [savedFlowDiagrams] = useLocalStorage<FlowDiagramItem[]>(
+  const [savedFlowDiagrams] = useLocalStorage<FlowDiagramItem[] | null>(
     'sideflow_flow_diagrams_v1',
-    DEFAULT_SAVED_FLOW_DIAGRAMS
+    null
   );
   const [notes, setNotes] = useLocalStorage<NoteItem[]>(
     'sideflow_notes',
@@ -176,6 +201,9 @@ export const App: React.FC = () => {
   });
   const [isPanelOpen, setIsPanelOpen] = useState<boolean>(true);
   const [isResizingPanel, setIsResizingPanel] = useState<boolean>(false);
+  const [dragPanelWidthPercent, setDragPanelWidthPercent] = useState<
+    number | null
+  >(null);
   const [activeTab, setActiveTab] = useState<TabId>('drawers');
   const [isDictating, setIsDictating] = useState<boolean>(false);
   const [isRecordingHotkey, setIsRecordingHotkey] = useState<boolean>(false);
@@ -201,16 +229,55 @@ export const App: React.FC = () => {
   const userModifiedDisplayStateRef = useRef<boolean>(false);
   const isPinnedRef = useRef<boolean>(isPinned);
   isPinnedRef.current = isPinned;
-  const panelWidthPercentRef = useRef<number>(
-    clampPanelWidthPercent(panelWidthPercent)
+  const effectivePanelWidthPercent = clampPanelWidthPercent(
+    dragPanelWidthPercent ?? panelWidthPercent
   );
-  panelWidthPercentRef.current = clampPanelWidthPercent(panelWidthPercent);
+  const panelWidthPercentRef = useRef<number>(effectivePanelWidthPercent);
+  panelWidthPercentRef.current = effectivePanelWidthPercent;
+  const resizeIpcRafRef = useRef<number | null>(null);
   const resizeDragStartRef = useRef<{
     startX: number;
     startScreenX: number;
     startPercent: number;
     hasChanged: boolean;
   } | null>(null);
+
+  const handlePrefetchTab = useCallback((tab: TabId) => {
+    if (tab === 'flowchart') {
+      void FlowCanvas.preload();
+      void mermaidModule.load();
+    } else if (tab === 'notes') {
+      void NotesView.preload();
+    } else if (tab === 'settings') {
+      void SettingsView.preload();
+    }
+  }, []);
+
+  // Warm secondary tab, modal & nested editor chunks during browser idle time after initial Dock paint
+  useEffect(() => {
+    const warmChunks = () => {
+      void preloadAllLazyChunks().catch(() => {});
+    };
+    const ric = (
+      window as Window & {
+        requestIdleCallback?: (
+          cb: () => void,
+          opts?: { timeout: number }
+        ) => number;
+        cancelIdleCallback?: (id: number) => void;
+      }
+    ).requestIdleCallback;
+    if (typeof ric === 'function') {
+      const idleId = ric(warmChunks, { timeout: 1500 });
+      return () => {
+        (
+          window as Window & { cancelIdleCallback?: (id: number) => void }
+        ).cancelIdleCallback?.(idleId);
+      };
+    }
+    const timer = window.setTimeout(warmChunks, 800);
+    return () => window.clearTimeout(timer);
+  }, []);
   const stableNotesResetEpochRef = useRef<number>(workspaceResetEpoch);
   if (!isDictating) {
     stableNotesResetEpochRef.current = workspaceResetEpoch;
@@ -291,7 +358,10 @@ export const App: React.FC = () => {
       clampPanelWidthPercent(panelWidthPercent)
     );
     const hasStoredMonitorSettings =
-      window.localStorage.getItem('sideflow_monitor_settings') !== null;
+      readSharedStorage<MonitorSettings | null>(
+        'sideflow_monitor_settings',
+        null
+      ) !== null;
     if (window.sideflow?.getDisplayState && !hasStoredMonitorSettings) {
       void window.sideflow
         .getDisplayState()
@@ -309,7 +379,10 @@ export const App: React.FC = () => {
           }
           if (
             !userModifiedDisplayStateRef.current &&
-            window.localStorage.getItem('sideflow_monitor_settings') === null
+            readSharedStorage<MonitorSettings | null>(
+              'sideflow_monitor_settings',
+              null
+            ) === null
           ) {
             if (typeof state.activeDisplayId === 'number') {
               setActiveDisplayId(state.activeDisplayId);
@@ -844,6 +917,7 @@ export const App: React.FC = () => {
   const handleChangePanelWidthPercent = useCallback(
     (nextPercent: number, showToast = false) => {
       const clamped = clampPanelWidthPercent(nextPercent);
+      setDragPanelWidthPercent(null);
       setPanelWidthPercent(clamped);
       panelWidthPercentRef.current = clamped;
       window.sideflow?.setPanelWidthPercent?.(clamped);
@@ -858,7 +932,7 @@ export const App: React.FC = () => {
     [setPanelWidthPercent, notify]
   );
 
-  // On-the-fly interactive drag resizing of the panel inner edge
+  // On-the-fly interactive drag resizing of the panel inner edge (coalesced via rAF, persisted once on mouseup)
   useEffect(() => {
     if (!isResizingPanel) return;
 
@@ -904,27 +978,49 @@ export const App: React.FC = () => {
 
       if (nextPercent !== panelWidthPercentRef.current) {
         dragState.hasChanged = true;
-        handleChangePanelWidthPercent(nextPercent, false);
+        panelWidthPercentRef.current = nextPercent;
+        setDragPanelWidthPercent(nextPercent);
+        if (resizeIpcRafRef.current === null) {
+          resizeIpcRafRef.current = window.requestAnimationFrame(() => {
+            resizeIpcRafRef.current = null;
+            window.sideflow?.setPanelWidthPercent?.(
+              panelWidthPercentRef.current
+            );
+          });
+        }
       }
     };
 
     const handleMouseUp = () => {
+      if (resizeIpcRafRef.current !== null) {
+        window.cancelAnimationFrame(resizeIpcRafRef.current);
+        resizeIpcRafRef.current = null;
+      }
       const dragState = resizeDragStartRef.current;
       resizeDragStartRef.current = null;
       setIsResizingPanel(false);
       if (dragState?.hasChanged) {
         const finalPct = panelWidthPercentRef.current;
+        setDragPanelWidthPercent(null);
+        setPanelWidthPercent(finalPct);
+        window.sideflow?.setPanelWidthPercent?.(finalPct);
         notify(
           `Screen Presence: ${finalPct}%`,
           'check',
           `Extended panel width saved at ${finalPct}% of screen`
         );
+      } else {
+        setDragPanelWidthPercent(null);
       }
     };
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     return () => {
+      if (resizeIpcRafRef.current !== null) {
+        window.cancelAnimationFrame(resizeIpcRafRef.current);
+        resizeIpcRafRef.current = null;
+      }
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
@@ -933,41 +1029,74 @@ export const App: React.FC = () => {
     isElectronWindow,
     activeDisplay?.workArea.width,
     activeEffectiveEdge,
-    handleChangePanelWidthPercent,
+    setPanelWidthPercent,
     notify,
   ]);
 
   const handleExportBackup = () => {
     let savedDiagrams: unknown = undefined;
-    try {
-      const rawDiagrams = window.localStorage.getItem('sideflow_flow_diagrams_v1');
-      if (rawDiagrams) {
-        const parsedDiagrams = JSON.parse(rawDiagrams);
-        if (Array.isArray(parsedDiagrams)) {
-          savedDiagrams = parsedDiagrams;
-        }
-      }
-    } catch {
-      // ignore
+    const parsedDiagrams = readSharedStorage<unknown>(
+      'sideflow_flow_diagrams_v1',
+      null
+    );
+    if (Array.isArray(parsedDiagrams)) {
+      savedDiagrams = parsedDiagrams;
     }
+    const activeDiagramId = readSharedStorage<string | undefined>(
+      'sideflow_active_diagram_id',
+      undefined
+    );
+    const notesViewMode = readSharedStorage<string | undefined>(
+      'sideflow_notes_view_mode',
+      undefined
+    );
+    const showDocklets = readSharedStorage<boolean | undefined>(
+      'sideflow_show_docklets',
+      undefined
+    );
+    const showMinimap = readSharedStorage<boolean | undefined>(
+      'sideflow_flow_minimap',
+      undefined
+    );
+    const spellcheckEnabled = readSharedStorage<boolean | undefined>(
+      'sideflow_spellcheck_enabled',
+      undefined
+    );
+    const customDictionary = readSharedStorage<string[] | undefined>(
+      'sideflow_custom_dictionary',
+      undefined
+    );
+    const sttSettings = readSharedStorage<Record<string, unknown> | undefined>(
+      'sideflow_stt_settings',
+      undefined
+    );
+
     const backup = {
-      version: '1.0.0',
+      version: '1.9.1',
       exportedAt: new Date().toISOString(),
       drawers,
       flowData,
       savedDiagrams,
+      activeDiagramId,
       notes,
       activeNoteId,
+      notesViewMode,
       shortcut,
       isPinned,
       showEdgeHandle,
       openAtLogin,
+      strictOfflineMode,
       panelEdge,
       panelWidthPercent,
       monitorSettings: safeMonitorSettings,
       dockEffect,
       dockIconSize,
       isDockLocked,
+      showDocklets,
+      showMinimap,
+      spellcheckEnabled,
+      customDictionary,
+      sttSettings,
     };
     try {
       const blob = new Blob([JSON.stringify(backup, null, 2)], {
@@ -989,205 +1118,112 @@ export const App: React.FC = () => {
 
   const handleImportBackup = (rawJson: string) => {
     try {
-      const parsed = JSON.parse(rawJson);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('Invalid backup object');
+      const normalized = normalizeWorkspaceBackupPayload(rawJson);
+
+      if (normalized.drawers !== undefined) {
+        setDrawers(normalized.drawers);
       }
-      let restoredAny = false;
-      if (
-        Array.isArray(parsed.drawers) &&
-        parsed.drawers.length > 0 &&
-        parsed.drawers.every(
-          (d: unknown) =>
-            Boolean(d) &&
-            typeof d === 'object' &&
-            typeof (d as AppDrawer).id === 'string' &&
-            Array.isArray((d as AppDrawer).apps)
-        )
-      ) {
-        const sanitizedDrawers: AppDrawer[] = (
-          parsed.drawers as AppDrawer[]
-        ).map((drawer) => ({
-          ...drawer,
-          title:
-            typeof drawer.title === 'string'
-              ? drawer.title.slice(0, 120)
-              : 'Drawer',
-          apps: (drawer.apps || [])
-            .filter(
-              (a): a is AppItem =>
-                Boolean(a) &&
-                typeof a === 'object' &&
-                typeof a.id === 'string' &&
-                typeof a.name === 'string' &&
-                typeof a.cmd === 'string'
-            )
-            .map((a) => ({
-              ...a,
-              name: a.name.slice(0, 120),
-              cmd: a.cmd.replace(/[\r\n\0]/g, '').trim(),
-            }))
-            .filter((a) => {
-              const lowerCmd = a.cmd.toLowerCase();
-              if (
-                lowerCmd.startsWith('javascript:') ||
-                lowerCmd.startsWith('vbscript:') ||
-                lowerCmd.startsWith('data:')
-              ) {
-                return false;
-              }
-              if (
-                lowerCmd.startsWith('shell:') &&
-                !/^shell:appsfolder\\/i.test(a.cmd)
-              ) {
-                return false;
-              }
-              return Boolean(a.cmd);
-            }),
-        }));
-        setDrawers(sanitizedDrawers);
-        restoredAny = true;
+      if (normalized.flowData !== undefined) {
+        setFlowData(normalized.flowData);
       }
-      if (
-        parsed.flowData &&
-        Array.isArray(parsed.flowData.nodes) &&
-        Array.isArray(parsed.flowData.edges)
-      ) {
-        setFlowData(parsed.flowData);
-        restoredAny = true;
+      if (normalized.savedDiagrams !== undefined) {
+        writeSharedStorage('sideflow_flow_diagrams_v1', normalized.savedDiagrams);
       }
-      if (
-        Array.isArray(parsed.savedDiagrams) &&
-        parsed.savedDiagrams.length > 0
-      ) {
-        try {
-          writeSharedStorage(
-            'sideflow_flow_diagrams_v1',
-            parsed.savedDiagrams
-          );
-          setWorkspaceResetEpoch((prev) => prev + 1);
-          restoredAny = true;
-        } catch {
-          // ignore
-        }
+      if (normalized.activeDiagramId !== undefined) {
+        writeSharedStorage('sideflow_active_diagram_id', normalized.activeDiagramId);
       }
-      if (
-        Array.isArray(parsed.notes) &&
-        parsed.notes.length > 0 &&
-        parsed.notes.every(
-          (n: unknown) =>
-            Boolean(n) &&
-            typeof n === 'object' &&
-            typeof (n as NoteItem).id === 'string' &&
-            typeof (n as NoteItem).body === 'string'
-        )
-      ) {
-        const sanitizedNotes: NoteItem[] = parsed.notes.map((rawNote: NoteItem) => {
-          const safeTitle =
-            typeof rawNote.title === 'string' ? rawNote.title : 'Untitled Note';
-          const safeTags = Array.isArray(rawNote.tags)
-            ? rawNote.tags.filter((t): t is string => typeof t === 'string')
-            : undefined;
-          if (rawNote.format === 'adf') {
-            const validated = rawNote.adfDoc
-              ? validateAndNormalizeAdfDoc(rawNote.adfDoc)
-              : null;
-            const resolvedDoc =
-              validated && validated.valid
-                ? validated.doc
-                : markdownToAdf(rawNote.body);
-            return {
-              ...rawNote,
-              title: safeTitle,
-              tags: safeTags,
-              format: 'adf',
-              adfDoc: resolvedDoc,
-              body: rawNote.body || adfToMarkdown(resolvedDoc),
-            };
-          }
-          const { adfDoc: _discardedAdfDoc, ...restNote } = rawNote;
-          void _discardedAdfDoc;
-          return {
-            ...restNote,
-            title: safeTitle,
-            tags: safeTags,
-            format: rawNote.format === 'markdown' ? 'markdown' : undefined,
-          };
-        });
-        setNotes(sanitizedNotes);
-        if (typeof parsed.activeNoteId === 'string') {
-          setActiveNoteId(parsed.activeNoteId);
-        }
-        restoredAny = true;
+      if (normalized.notes !== undefined) {
+        setNotes(normalized.notes);
       }
-      if (parsed.shortcut && typeof parsed.shortcut.label === 'string') {
-        setShortcut(parsed.shortcut);
-        window.sideflow?.updateGlobalShortcut?.(
-          parsed.shortcut.label.replace(/\s+/g, '')
+      if (normalized.activeNoteId !== undefined) {
+        setActiveNoteId(normalized.activeNoteId);
+      }
+      if (normalized.notesViewMode !== undefined) {
+        writeSharedStorage('sideflow_notes_view_mode', normalized.notesViewMode);
+      }
+      if (normalized.shortcut !== undefined) {
+        setShortcut(normalized.shortcut);
+        void window.sideflow?.updateGlobalShortcut?.(
+          normalized.shortcut.label.replace(/\s+/g, '')
         );
-        restoredAny = true;
       }
-      if (typeof parsed.isPinned === 'boolean') {
-        setIsPinned(parsed.isPinned);
-        restoredAny = true;
+      if (normalized.isPinned !== undefined) {
+        setIsPinned(normalized.isPinned);
       }
-      if (typeof parsed.showEdgeHandle === 'boolean') {
-        setShowEdgeHandle(parsed.showEdgeHandle);
-        restoredAny = true;
+      if (normalized.showEdgeHandle !== undefined) {
+        setShowEdgeHandle(normalized.showEdgeHandle);
       }
-      if (parsed.panelEdge === 'left' || parsed.panelEdge === 'right') {
-        setPanelEdge(parsed.panelEdge);
-        window.sideflow?.setPanelEdge?.(parsed.panelEdge);
-        restoredAny = true;
+      if (normalized.openAtLogin !== undefined) {
+        setOpenAtLogin(normalized.openAtLogin);
+        void window.sideflow?.setAutoLaunch?.(normalized.openAtLogin);
       }
-      if (typeof parsed.panelWidthPercent === 'number') {
-        const clampedPct = clampPanelWidthPercent(parsed.panelWidthPercent);
+      if (normalized.strictOfflineMode !== undefined) {
+        setStrictOfflineMode(normalized.strictOfflineMode);
+      }
+      if (normalized.panelEdge !== undefined) {
+        setPanelEdge(normalized.panelEdge);
+        window.sideflow?.setPanelEdge?.(normalized.panelEdge);
+      }
+      if (normalized.panelWidthPercent !== undefined) {
+        const clampedPct = clampPanelWidthPercent(normalized.panelWidthPercent);
         setPanelWidthPercent(clampedPct);
         panelWidthPercentRef.current = clampedPct;
         window.sideflow?.setPanelWidthPercent?.(clampedPct);
-        restoredAny = true;
       }
-      if (parsed.monitorSettings && typeof parsed.monitorSettings === 'object') {
+      if (normalized.monitorSettings !== undefined) {
         userModifiedDisplayStateRef.current = true;
-        const restoredMonitors = sanitizeMonitorSettings(parsed.monitorSettings);
+        const restoredMonitors = sanitizeMonitorSettings(
+          normalized.monitorSettings
+        );
         setMonitorSettings(restoredMonitors);
-        const restoredEnabled = resolveEnabledDisplays(displays, restoredMonitors);
+        const restoredEnabled = resolveEnabledDisplays(
+          displays,
+          restoredMonitors
+        );
         if (restoredEnabled.length > 0) {
           setActiveDisplayId(restoredEnabled[0].id);
         }
         void window.sideflow?.setMonitorSettings?.(restoredMonitors);
-        restoredAny = true;
       }
-      if (
-        parsed.dockEffect === 'zoom' ||
-        parsed.dockEffect === 'swing' ||
-        parsed.dockEffect === 'glow' ||
-        parsed.dockEffect === 'none'
-      ) {
-        setDockEffect(parsed.dockEffect);
-        restoredAny = true;
+      if (normalized.dockEffect !== undefined) {
+        setDockEffect(normalized.dockEffect);
       }
-      if (
-        parsed.dockIconSize === 'compact' ||
-        parsed.dockIconSize === 'normal' ||
-        parsed.dockIconSize === 'large'
-      ) {
-        setDockIconSize(parsed.dockIconSize);
-        restoredAny = true;
+      if (normalized.dockIconSize !== undefined) {
+        setDockIconSize(normalized.dockIconSize);
       }
-      if (typeof parsed.isDockLocked === 'boolean') {
-        setIsDockLocked(parsed.isDockLocked);
-        restoredAny = true;
+      if (normalized.isDockLocked !== undefined) {
+        setIsDockLocked(normalized.isDockLocked);
       }
-      if (typeof parsed.openAtLogin === 'boolean') {
-        setOpenAtLogin(parsed.openAtLogin);
-        void window.sideflow?.setAutoLaunch?.(parsed.openAtLogin);
-        restoredAny = true;
+      if (normalized.showDocklets !== undefined) {
+        writeSharedStorage('sideflow_show_docklets', normalized.showDocklets);
+      }
+      if (normalized.showMinimap !== undefined) {
+        writeSharedStorage('sideflow_flow_minimap', normalized.showMinimap);
+      }
+      if (normalized.spellcheckEnabled !== undefined) {
+        writeSharedStorage(
+          'sideflow_spellcheck_enabled',
+          normalized.spellcheckEnabled
+        );
+      }
+      if (normalized.customDictionary !== undefined) {
+        writeSharedStorage(
+          'sideflow_custom_dictionary',
+          normalized.customDictionary
+        );
+      }
+      if (normalized.sttSettings !== undefined) {
+        writeSharedStorage('sideflow_stt_settings', normalized.sttSettings);
       }
 
-      if (!restoredAny) {
-        throw new Error('No SideFlow workspace keys found');
+      if (
+        normalized.savedDiagrams !== undefined ||
+        normalized.activeDiagramId !== undefined
+      ) {
+        setFlowDiagramSyncEpoch((prev) => prev + 1);
       }
+      setWorkspaceResetEpoch((prev) => prev + 1);
+
       notify(
         'Restored SideFlow Backup',
         'check',
@@ -1301,6 +1337,7 @@ export const App: React.FC = () => {
     } catch {
       // ignore storage errors
     }
+    void window.sideflow?.clearSpellCheckerDictionary?.();
     setDrawers(defaultDrawers);
     setFlowData(defaultFlowData);
     setNotes(defaultNotes);
@@ -1865,7 +1902,7 @@ export const App: React.FC = () => {
       <aside
         id="side-panel"
         data-testid="side-panel"
-        data-width-percent={clampPanelWidthPercent(panelWidthPercent)}
+        data-width-percent={effectivePanelWidthPercent}
         data-active-display-id={activeDisplay?.id ?? 1}
         data-effective-edge={activeEffectiveEdge}
         aria-label="SideFlow Utility Panel"
@@ -1874,7 +1911,7 @@ export const App: React.FC = () => {
           isElectronWindow
             ? undefined
             : {
-                width: `${clampPanelWidthPercent(panelWidthPercent)}%`,
+                width: `${effectivePanelWidthPercent}%`,
                 minWidth: '320px',
                 maxWidth: '90vw',
               }
@@ -1902,11 +1939,9 @@ export const App: React.FC = () => {
           aria-label="Resize SideFlow Panel Width"
           aria-valuemin={MIN_PANEL_WIDTH_PERCENT}
           aria-valuemax={MAX_PANEL_WIDTH_PERCENT}
-          aria-valuenow={clampPanelWidthPercent(panelWidthPercent)}
+          aria-valuenow={effectivePanelWidthPercent}
           tabIndex={isPanelOpen ? 0 : -1}
-          title={`Drag to resize panel (${clampPanelWidthPercent(
-            panelWidthPercent
-          )}% of screen) • Double-click to reset`}
+          title={`Drag to resize panel (${effectivePanelWidthPercent}% of screen) • Double-click to reset`}
           onMouseDown={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -1974,7 +2009,7 @@ export const App: React.FC = () => {
                 activeEffectiveEdge === 'left' ? 'left-4' : 'right-4'
               } px-2.5 py-1 rounded-lg bg-indigo-600 text-white font-mono text-xs font-semibold shadow-xl border border-indigo-300/60 whitespace-nowrap pointer-events-none`}
             >
-              {clampPanelWidthPercent(panelWidthPercent)}%
+              {effectivePanelWidthPercent}%
             </div>
           )}
         </div>
@@ -1982,6 +2017,7 @@ export const App: React.FC = () => {
         <Header
           activeTab={activeTab}
           onSelectTab={setActiveTab}
+          onPrefetchTab={handlePrefetchTab}
           isPinned={isPinned}
           onTogglePin={() => togglePin()}
           onClosePanel={() => togglePanel(false)}
@@ -1992,9 +2028,9 @@ export const App: React.FC = () => {
           shortcutLabel={shortcut.label}
           isDictating={isDictating}
           effectiveEdge={activeEffectiveEdge}
-          isWideStudio={clampPanelWidthPercent(panelWidthPercent) >= 55}
+          isWideStudio={effectivePanelWidthPercent >= 55}
           onToggleWideStudio={() => {
-            const currentW = clampPanelWidthPercent(panelWidthPercent);
+            const currentW = effectivePanelWidthPercent;
             const nextW = currentW >= 55 ? DEFAULT_PANEL_WIDTH_PERCENT : 65;
             handleChangePanelWidthPercent(nextW, true);
           }}
@@ -2032,7 +2068,7 @@ export const App: React.FC = () => {
               flowData={flowData}
               onChangeFlowData={setFlowData}
               onNotify={notify}
-              panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
+              panelWidthPercent={effectivePanelWidthPercent}
               onInsertMermaidToNote={(mermaidCode) => {
                 const fenced = `\n\`\`\`mermaid\n${mermaidCode.trim()}\n\`\`\`\n`;
                 if (notes.length === 0) {
@@ -2108,55 +2144,44 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        <div
-          role="tabpanel"
-          id="tabpanel-notes"
-          aria-labelledby="tab-btn-notes"
-          hidden={activeTab !== 'notes'}
-          className={
-            activeTab === 'notes'
-              ? 'flex-1 flex flex-col overflow-hidden'
-              : 'hidden'
-          }
-        >
-          <NotesView
-            key={stableNotesResetEpochRef.current}
-            notes={notes}
-            onChangeNotes={setNotes}
-            activeNoteId={activeNoteId}
-            onChangeActiveNoteId={setActiveNoteId}
-            isPanelOpen={isPanelOpen}
-            isActiveTab={activeTab === 'notes'}
-            onDictatingChange={setIsDictating}
-            onNotify={notify}
-            onOpenMermaidInFlow={(nextFlow) => {
-              const previousFlow = JSON.parse(
-                JSON.stringify(flowData)
-              ) as FlowchartState;
-              const prevDiagramsRaw = (() => {
+        {(activeTab === 'notes' || isDictating) && (
+          <div
+            role="tabpanel"
+            id="tabpanel-notes"
+            aria-labelledby="tab-btn-notes"
+            hidden={activeTab !== 'notes'}
+            className={
+              activeTab === 'notes'
+                ? 'flex-1 flex flex-col overflow-hidden'
+                : 'hidden'
+            }
+          >
+            <NotesView
+              key={stableNotesResetEpochRef.current}
+              notes={notes}
+              onChangeNotes={setNotes}
+              activeNoteId={activeNoteId}
+              onChangeActiveNoteId={setActiveNoteId}
+              isPanelOpen={isPanelOpen}
+              isActiveTab={activeTab === 'notes'}
+              onDictatingChange={setIsDictating}
+              onNotify={notify}
+              onOpenMermaidInFlow={(nextFlow) => {
+                const previousFlow = JSON.parse(
+                  JSON.stringify(flowData)
+                ) as FlowchartState;
+                const prevDiagrams = readSharedStorage<FlowDiagramItem[] | null>(
+                  'sideflow_flow_diagrams_v1',
+                  null
+                );
+                const prevActiveDiagramId = readSharedStorage<string | null>(
+                  'sideflow_active_diagram_id',
+                  null
+                );
                 try {
-                  return window.localStorage.getItem('sideflow_flow_diagrams_v1');
-                } catch {
-                  return null;
-                }
-              })();
-              const prevActiveDiagramRaw = (() => {
-                try {
-                  return window.localStorage.getItem(
-                    'sideflow_active_diagram_id'
-                  );
-                } catch {
-                  return null;
-                }
-              })();
-              try {
-                const activeDiagId = prevActiveDiagramRaw
-                  ? JSON.parse(prevActiveDiagramRaw)
-                  : 'flow-1';
-                if (prevDiagramsRaw) {
-                  const parsedDiags = JSON.parse(prevDiagramsRaw);
-                  if (Array.isArray(parsedDiags)) {
-                    const updatedDiags = parsedDiags.map((d) =>
+                  const activeDiagId = prevActiveDiagramId || 'flow-1';
+                  if (Array.isArray(prevDiagrams)) {
+                    const updatedDiags = prevDiagrams.map((d) =>
                       d.id === activeDiagId
                         ? { ...d, flowData: nextFlow, updatedAt: Date.now() }
                         : d
@@ -2165,72 +2190,71 @@ export const App: React.FC = () => {
                       'sideflow_flow_diagrams_v1',
                       updatedDiags
                     );
+                  } else {
+                    const seeded: FlowDiagramItem[] = [
+                      {
+                        id: 'flow-1',
+                        title: 'Hotkey Launch Flow',
+                        flowData:
+                          activeDiagId === 'flow-1'
+                            ? nextFlow
+                            : JSON.parse(JSON.stringify(flowData)),
+                        updatedAt: Date.now(),
+                      },
+                      {
+                        id: 'flow-2',
+                        title: 'CI/CD Deployment Pipeline',
+                        flowData:
+                          activeDiagId === 'flow-2'
+                            ? nextFlow
+                            : getSeededCiCdDiagramFlow(),
+                        updatedAt: Date.now() - 60000,
+                      },
+                    ];
+                    writeSharedStorage('sideflow_flow_diagrams_v1', seeded);
                   }
-                } else {
-                  const seeded: FlowDiagramItem[] = [
-                    {
-                      id: 'flow-1',
-                      title: 'Hotkey Launch Flow',
-                      flowData:
-                        activeDiagId === 'flow-1'
-                          ? nextFlow
-                          : JSON.parse(JSON.stringify(flowData)),
-                      updatedAt: Date.now(),
-                    },
-                    {
-                      id: 'flow-2',
-                      title: 'CI/CD Deployment Pipeline',
-                      flowData:
-                        activeDiagId === 'flow-2'
-                          ? nextFlow
-                          : getMermaidTemplatePreset('ci-cd') ||
-                            JSON.parse(JSON.stringify(defaultFlowData)),
-                      updatedAt: Date.now() - 60000,
-                    },
-                  ];
-                  writeSharedStorage('sideflow_flow_diagrams_v1', seeded);
+                } catch {
+                  // ignore
                 }
-              } catch {
-                // ignore
-              }
-              setFlowData(nextFlow);
-              setActiveTab('flowchart');
-              notify(
-                'Opened Mermaid in Flow Tab',
-                'check',
-                `${nextFlow.nodes.length} nodes loaded onto canvas`,
-                {
-                  variant: 'info',
-                  undoLabel: 'Undo',
-                  onUndo: () => {
-                    try {
-                      if (prevDiagramsRaw !== null) {
-                        writeSharedStorage(
-                          'sideflow_flow_diagrams_v1',
-                          JSON.parse(prevDiagramsRaw)
-                        );
-                      } else {
-                        removeSharedStorage('sideflow_flow_diagrams_v1');
+                setFlowData(nextFlow);
+                setActiveTab('flowchart');
+                notify(
+                  'Opened Mermaid in Flow Tab',
+                  'check',
+                  `${nextFlow.nodes.length} nodes loaded onto canvas`,
+                  {
+                    variant: 'info',
+                    undoLabel: 'Undo',
+                    onUndo: () => {
+                      try {
+                        if (prevDiagrams !== null) {
+                          writeSharedStorage(
+                            'sideflow_flow_diagrams_v1',
+                            prevDiagrams
+                          );
+                        } else {
+                          removeSharedStorage('sideflow_flow_diagrams_v1');
+                        }
+                        if (prevActiveDiagramId !== null) {
+                          writeSharedStorage(
+                            'sideflow_active_diagram_id',
+                            prevActiveDiagramId
+                          );
+                        } else {
+                          removeSharedStorage('sideflow_active_diagram_id');
+                        }
+                      } catch {
+                        // ignore
                       }
-                      if (prevActiveDiagramRaw !== null) {
-                        writeSharedStorage(
-                          'sideflow_active_diagram_id',
-                          JSON.parse(prevActiveDiagramRaw)
-                        );
-                      } else {
-                        removeSharedStorage('sideflow_active_diagram_id');
-                      }
-                    } catch {
-                      // ignore
-                    }
-                    setFlowData(previousFlow);
-                    setWorkspaceResetEpoch((prev) => prev + 1);
-                  },
-                }
-              );
-            }}
-          />
-        </div>
+                      setFlowData(previousFlow);
+                      setWorkspaceResetEpoch((prev) => prev + 1);
+                    },
+                  }
+                );
+              }}
+            />
+          </div>
+        )}
 
         {activeTab === 'settings' && (
           <div
@@ -2255,7 +2279,7 @@ export const App: React.FC = () => {
               onInstallUpdate={handleInstallUpdate}
               panelEdge={panelEdge}
               onChangePanelEdge={handleChangePanelEdge}
-              panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
+              panelWidthPercent={effectivePanelWidthPercent}
               onChangePanelWidthPercent={(nextPct) =>
                 handleChangePanelWidthPercent(nextPct, true)
               }
@@ -2327,279 +2351,291 @@ export const App: React.FC = () => {
       </aside>
 
       {/* Global Ctrl+K Command Palette */}
-      <CommandPalette
-        isOpen={isCommandPaletteOpen}
-        onClose={() => setIsCommandPaletteOpen(false)}
-        drawers={drawers}
-        notes={notes}
-        activeNoteId={activeNoteId}
-        flowData={flowData}
-        activeTab={activeTab}
-        isPinned={isPinned}
-        panelEdge={panelEdge}
-        isDockLocked={isDockLocked}
-        shortcutLabel={shortcut.label}
-        onLaunchApp={(app: AppItem) => {
-          notify(`Launching ${app.name}...`, app.icon || 'rocket', app.cmd);
-          void executeAppCommand(app.cmd).then((res) => {
-            if (res && !res.success && res.error) {
-              notify(`Unable to Launch ${app.name}`, 'zap', res.error, {
-                variant: 'error',
-              });
+      {isCommandPaletteOpen && (
+        <CommandPalette
+          isOpen={isCommandPaletteOpen}
+          onClose={() => setIsCommandPaletteOpen(false)}
+          drawers={drawers}
+          notes={notes}
+          activeNoteId={activeNoteId}
+          flowData={flowData}
+          activeTab={activeTab}
+          isPinned={isPinned}
+          panelEdge={panelEdge}
+          isDockLocked={isDockLocked}
+          shortcutLabel={shortcut.label}
+          onLaunchApp={(app: AppItem) => {
+            notify(`Launching ${app.name}...`, app.icon || 'rocket', app.cmd);
+            void executeAppCommand(app.cmd, splitCliArgs(app.args)).then((res) => {
+              if (res && !res.success && res.error) {
+                notify(`Unable to Launch ${app.name}`, 'zap', res.error, {
+                  variant: 'error',
+                });
+              }
+            });
+          }}
+          onSelectDiagram={(diagram: FlowDiagramItem) => {
+            try {
+              const existingDiags = readSharedStorage<FlowDiagramItem[] | null>(
+                'sideflow_flow_diagrams_v1',
+                null
+              );
+              if (!Array.isArray(existingDiags)) {
+                const seeded: FlowDiagramItem[] = [
+                  {
+                    id: 'flow-1',
+                    title: 'Hotkey Launch Flow',
+                    flowData: JSON.parse(JSON.stringify(flowData)),
+                    updatedAt: Date.now(),
+                  },
+                  {
+                    id: 'flow-2',
+                    title: 'CI/CD Deployment Pipeline',
+                    flowData: getSeededCiCdDiagramFlow(),
+                    updatedAt: Date.now() - 60000,
+                  },
+                ];
+                writeSharedStorage('sideflow_flow_diagrams_v1', seeded);
+              }
+              writeSharedStorage('sideflow_active_diagram_id', diagram.id);
+            } catch {
+              // ignore storage errors
             }
-          });
-        }}
-        onSelectDiagram={(diagram: FlowDiagramItem) => {
-          try {
-            const rawDiags = window.localStorage.getItem(
-              'sideflow_flow_diagrams_v1'
+            setFlowData(JSON.parse(JSON.stringify(diagram.flowData)));
+            setFlowDiagramSyncEpoch((prev) => prev + 1);
+            setActiveTab('flowchart');
+            window.requestAnimationFrame(() => {
+              document.getElementById('tab-btn-flowchart')?.focus();
+            });
+            notify(
+              `Switched to "${diagram.title}"`,
+              'check',
+              `${diagram.flowData.nodes.length} nodes loaded`
             );
-            if (!rawDiags) {
-              const seeded: FlowDiagramItem[] = [
+          }}
+          onCreateDiagram={() => {
+            let existing: FlowDiagramItem[] = [];
+            const parsedDiags = readSharedStorage<unknown>(
+              'sideflow_flow_diagrams_v1',
+              null
+            );
+            if (Array.isArray(parsedDiags)) {
+              existing = parsedDiags as FlowDiagramItem[];
+            }
+            if (existing.length === 0) {
+              existing = [
                 {
                   id: 'flow-1',
                   title: 'Hotkey Launch Flow',
                   flowData: JSON.parse(JSON.stringify(flowData)),
-                  updatedAt: Date.now(),
+                  updatedAt: Date.now() - 1000,
                 },
                 {
                   id: 'flow-2',
                   title: 'CI/CD Deployment Pipeline',
-                  flowData:
-                    getMermaidTemplatePreset('ci-cd') ||
-                    JSON.parse(JSON.stringify(defaultFlowData)),
+                  flowData: getSeededCiCdDiagramFlow(),
                   updatedAt: Date.now() - 60000,
                 },
               ];
-              writeSharedStorage('sideflow_flow_diagrams_v1', seeded);
             }
-            writeSharedStorage('sideflow_active_diagram_id', diagram.id);
-          } catch {
-            // ignore storage errors
-          }
-          setFlowData(JSON.parse(JSON.stringify(diagram.flowData)));
-          setFlowDiagramSyncEpoch((prev) => prev + 1);
-          setActiveTab('flowchart');
-          window.requestAnimationFrame(() => {
-            document.getElementById('tab-btn-flowchart')?.focus();
-          });
-          notify(
-            `Switched to "${diagram.title}"`,
-            'check',
-            `${diagram.flowData.nodes.length} nodes loaded`
-          );
-        }}
-        onCreateDiagram={() => {
-          let existing: FlowDiagramItem[] = [];
-          try {
-            const raw = window.localStorage.getItem('sideflow_flow_diagrams_v1');
-            if (raw) {
-              const parsed = JSON.parse(raw);
-              if (Array.isArray(parsed)) existing = parsed;
+            const nextFlow: FlowchartState = {
+              nodes: [
+                {
+                  id: 'n1',
+                  type: 'start',
+                  text: 'Start',
+                  x: 180,
+                  y: 80,
+                },
+              ],
+              edges: [],
+              direction: 'TD',
+              diagramType: 'flowchart',
+            };
+            const newDiag: FlowDiagramItem = {
+              id: `flow-${Date.now()}`,
+              title: `Flowchart ${existing.length + 1}`,
+              flowData: nextFlow,
+              updatedAt: Date.now(),
+            };
+            try {
+              writeSharedStorage('sideflow_flow_diagrams_v1', [
+                ...existing,
+                newDiag,
+              ]);
+              writeSharedStorage('sideflow_active_diagram_id', newDiag.id);
+            } catch {
+              // ignore
             }
-          } catch {
-            // ignore
-          }
-          if (existing.length === 0) {
-            existing = [
-              {
-                id: 'flow-1',
-                title: 'Hotkey Launch Flow',
-                flowData: JSON.parse(JSON.stringify(flowData)),
-                updatedAt: Date.now() - 1000,
-              },
-              {
-                id: 'flow-2',
-                title: 'CI/CD Deployment Pipeline',
-                flowData:
-                  getMermaidTemplatePreset('ci-cd') ||
-                  JSON.parse(JSON.stringify(defaultFlowData)),
-                updatedAt: Date.now() - 60000,
-              },
-            ];
-          }
-          const nextFlow: FlowchartState = {
-            nodes: [
-              {
-                id: 'n1',
-                type: 'start',
-                text: 'Start',
-                x: 180,
-                y: 80,
-              },
-            ],
-            edges: [],
-            direction: 'TD',
-            diagramType: 'flowchart',
-          };
-          const newDiag: FlowDiagramItem = {
-            id: `flow-${Date.now()}`,
-            title: `Flowchart ${existing.length + 1}`,
-            flowData: nextFlow,
-            updatedAt: Date.now(),
-          };
-          try {
-            writeSharedStorage('sideflow_flow_diagrams_v1', [
-              ...existing,
-              newDiag,
-            ]);
-            writeSharedStorage('sideflow_active_diagram_id', newDiag.id);
-          } catch {
-            // ignore
-          }
-          setFlowData(nextFlow);
-          setFlowDiagramSyncEpoch((prev) => prev + 1);
-          setActiveTab('flowchart');
-          window.requestAnimationFrame(() => {
-            document.getElementById('tab-btn-flowchart')?.focus();
-          });
-          notify('Created New Flowchart', 'check', newDiag.title);
-        }}
-        onAutoLayoutFlow={() => {
-          const arrangedNodes = computeDagLayout(flowData);
-          const nextFlow: FlowchartState = {
-            ...flowData,
-            nodes: arrangedNodes,
-          };
-          try {
-            const rawActive = window.localStorage.getItem(
-              'sideflow_active_diagram_id'
-            );
-            const activeDiagId = rawActive ? JSON.parse(rawActive) : 'flow-1';
-            const rawDiags = window.localStorage.getItem(
-              'sideflow_flow_diagrams_v1'
-            );
-            if (rawDiags) {
-              const parsed = JSON.parse(rawDiags);
-              if (Array.isArray(parsed)) {
-                writeSharedStorage(
+            setFlowData(nextFlow);
+            setFlowDiagramSyncEpoch((prev) => prev + 1);
+            setActiveTab('flowchart');
+            window.requestAnimationFrame(() => {
+              document.getElementById('tab-btn-flowchart')?.focus();
+            });
+            notify('Created New Flowchart', 'check', newDiag.title);
+          }}
+          onAutoLayoutFlow={() => {
+            const applyDagLayout = (
+              computeDagLayoutFn: (state: FlowchartState) => FlowNode[]
+            ) => {
+              const arrangedNodes = computeDagLayoutFn(flowData);
+              const nextFlow: FlowchartState = {
+                ...flowData,
+                nodes: arrangedNodes,
+              };
+              try {
+                const activeDiagId =
+                  readSharedStorage<string | null>(
+                    'sideflow_active_diagram_id',
+                    null
+                  ) || 'flow-1';
+                const parsedDiags = readSharedStorage<unknown>(
                   'sideflow_flow_diagrams_v1',
-                  parsed.map((d: FlowDiagramItem) =>
-                    d.id === activeDiagId
-                      ? { ...d, flowData: nextFlow, updatedAt: Date.now() }
-                      : d
-                  )
+                  null
                 );
+                if (Array.isArray(parsedDiags)) {
+                  writeSharedStorage(
+                    'sideflow_flow_diagrams_v1',
+                    (parsedDiags as FlowDiagramItem[]).map(
+                      (d: FlowDiagramItem) =>
+                        d.id === activeDiagId
+                          ? { ...d, flowData: nextFlow, updatedAt: Date.now() }
+                          : d
+                    )
+                  );
+                }
+              } catch {
+                // ignore
               }
+              setFlowData(nextFlow);
+              setActiveTab('flowchart');
+              window.requestAnimationFrame(() => {
+                document.getElementById('tab-btn-flowchart')?.focus();
+              });
+              notify(
+                'Auto-Arranged Flowchart (DAG)',
+                'check',
+                `Tidied ${arrangedNodes.length} nodes`
+              );
+            };
+            if (mermaidModule.current) {
+              applyDagLayout(mermaidModule.current.computeDagLayout);
+            } else {
+              void mermaidModule
+                .load()
+                .then((mod) => applyDagLayout(mod.computeDagLayout));
             }
-          } catch {
-            // ignore
-          }
-          setFlowData(nextFlow);
-          setActiveTab('flowchart');
-          window.requestAnimationFrame(() => {
-            document.getElementById('tab-btn-flowchart')?.focus();
-          });
-          notify(
-            'Auto-Arranged Flowchart (DAG)',
-            'check',
-            `Tidied ${arrangedNodes.length} nodes`
-          );
-        }}
-        onSelectNote={(noteId: string) => {
-          setActiveNoteId(noteId);
-          setActiveTab('notes');
-          window.requestAnimationFrame(() => {
-            document.getElementById('tab-btn-notes')?.focus();
-          });
-        }}
-        onCreateNote={() => {
-          const newNote: NoteItem = {
-            id: `note-${Date.now()}`,
-            title: `Quick Note ${notes.length + 1}`,
-            body: '',
-            updatedAt: Date.now(),
-          };
-          setNotes((prev) => [newNote, ...prev]);
-          setActiveNoteId(newNote.id);
-          setActiveTab('notes');
-          window.requestAnimationFrame(() => {
-            document.getElementById('tab-btn-notes')?.focus();
-          });
-          notify('Created New Scratchpad Note', 'check', newNote.title);
-        }}
-        onSelectTab={(tab: TabId) => {
-          setActiveTab(tab);
-          window.requestAnimationFrame(() => {
-            document.getElementById(`tab-btn-${tab}`)?.focus();
-          });
-        }}
-        onTogglePin={() => togglePin()}
-        onChangePanelEdge={handleChangePanelEdge}
-        onToggleDockLock={() => {
-          const nextLocked = !isDockLocked;
-          setIsDockLocked(nextLocked);
-          notify(
-            nextLocked ? 'Dock Icons Locked' : 'Dock Icons Unlocked',
-            'check',
-            nextLocked ? 'Reordering disabled' : 'Reordering enabled'
-          );
-        }}
-        onExportBackup={handleExportBackup}
-        onCheckForUpdates={handleCheckForUpdates}
-        onOpenOnboardingWizard={() => setIsOnboardingModalOpen(true)}
-        onClosePanel={() => togglePanel(false)}
-      />
+          }}
+          onSelectNote={(noteId: string) => {
+            setActiveNoteId(noteId);
+            setActiveTab('notes');
+            window.requestAnimationFrame(() => {
+              document.getElementById('tab-btn-notes')?.focus();
+            });
+          }}
+          onCreateNote={() => {
+            const newNote: NoteItem = {
+              id: `note-${Date.now()}`,
+              title: `Quick Note ${notes.length + 1}`,
+              body: '',
+              updatedAt: Date.now(),
+            };
+            setNotes((prev) => [newNote, ...prev]);
+            setActiveNoteId(newNote.id);
+            setActiveTab('notes');
+            window.requestAnimationFrame(() => {
+              document.getElementById('tab-btn-notes')?.focus();
+            });
+            notify('Created New Scratchpad Note', 'check', newNote.title);
+          }}
+          onSelectTab={(tab: TabId) => {
+            setActiveTab(tab);
+            window.requestAnimationFrame(() => {
+              document.getElementById(`tab-btn-${tab}`)?.focus();
+            });
+          }}
+          onTogglePin={() => togglePin()}
+          onChangePanelEdge={handleChangePanelEdge}
+          onToggleDockLock={() => {
+            const nextLocked = !isDockLocked;
+            setIsDockLocked(nextLocked);
+            notify(
+              nextLocked ? 'Dock Icons Locked' : 'Dock Icons Unlocked',
+              'check',
+              nextLocked ? 'Reordering disabled' : 'Reordering enabled'
+            );
+          }}
+          onExportBackup={handleExportBackup}
+          onCheckForUpdates={handleCheckForUpdates}
+          onOpenOnboardingWizard={() => setIsOnboardingModalOpen(true)}
+          onClosePanel={() => togglePanel(false)}
+        />
+      )}
 
       {/* Electron Wrapper Modal */}
-      <ElectronModal
-        isOpen={isElectronModalOpen}
-        onClose={() => setIsElectronModalOpen(false)}
-        onNotify={notify}
-      />
+      {isElectronModalOpen && (
+        <ElectronModal
+          isOpen={isElectronModalOpen}
+          onClose={() => setIsElectronModalOpen(false)}
+          onNotify={notify}
+        />
+      )}
 
       {/* 60-Second First-Run Onboarding Wizard */}
-      <OnboardingModal
-        isOpen={isOnboardingModalOpen || (autoOnboarding && !hasOnboarded)}
-        onClose={() => {
-          setIsOnboardingModalOpen(false);
-          setHasOnboarded(true);
-          setAutoOnboarding(false);
-          setIsRecordingHotkey(false);
-        }}
-        onComplete={() => {
-          setIsOnboardingModalOpen(false);
-          setHasOnboarded(true);
-          setAutoOnboarding(false);
-          setIsRecordingHotkey(false);
-          notify(
-            'SideFlow Setup Complete',
-            'check',
-            `Toggle anytime with ${shortcut.label}`
-          );
-        }}
-        shortcut={shortcut}
-        isRecordingHotkey={isRecordingHotkey}
-        onStartRecordingHotkey={() => setIsRecordingHotkey((prev) => !prev)}
-        onSelectShortcutPreset={(preset) => {
-          setIsRecordingHotkey(false);
-          setShortcut(preset);
-          void window.sideflow?.updateGlobalShortcut?.(
-            preset.label.replace(/\s+/g, '')
-          );
-          notify('Updated Toggle Shortcut', 'check', preset.label);
-        }}
-        isPinned={isPinned}
-        onTogglePin={togglePin}
-        openAtLogin={openAtLogin}
-        onToggleOpenAtLogin={handleToggleOpenAtLogin}
-        panelEdge={panelEdge}
-        onChangePanelEdge={handleChangePanelEdge}
-        panelWidthPercent={clampPanelWidthPercent(panelWidthPercent)}
-        onChangePanelWidthPercent={(nextPct) =>
-          handleChangePanelWidthPercent(nextPct, true)
-        }
-        monitorSettings={safeMonitorSettings}
-        onChangeMonitorSettings={(next) =>
-          handleChangeMonitorSettings(
-            next,
-            'Updated Monitor Routing',
-            next.mode === 'all'
-              ? 'Follows your mouse across all monitors'
-              : 'Pinned to Primary Monitor'
-          )
-        }
-      />
+      {(isOnboardingModalOpen || (autoOnboarding && !hasOnboarded)) && (
+        <OnboardingModal
+          isOpen={isOnboardingModalOpen || (autoOnboarding && !hasOnboarded)}
+          onClose={() => {
+            setIsOnboardingModalOpen(false);
+            setHasOnboarded(true);
+            setAutoOnboarding(false);
+            setIsRecordingHotkey(false);
+          }}
+          onComplete={() => {
+            setIsOnboardingModalOpen(false);
+            setHasOnboarded(true);
+            setAutoOnboarding(false);
+            setIsRecordingHotkey(false);
+            notify(
+              'SideFlow Setup Complete',
+              'check',
+              `Toggle anytime with ${shortcut.label}`
+            );
+          }}
+          shortcut={shortcut}
+          isRecordingHotkey={isRecordingHotkey}
+          onStartRecordingHotkey={() => setIsRecordingHotkey((prev) => !prev)}
+          onSelectShortcutPreset={(preset) => {
+            setIsRecordingHotkey(false);
+            setShortcut(preset);
+            void window.sideflow?.updateGlobalShortcut?.(
+              preset.label.replace(/\s+/g, '')
+            );
+            notify('Updated Toggle Shortcut', 'check', preset.label);
+          }}
+          isPinned={isPinned}
+          onTogglePin={togglePin}
+          openAtLogin={openAtLogin}
+          onToggleOpenAtLogin={handleToggleOpenAtLogin}
+          panelEdge={panelEdge}
+          onChangePanelEdge={handleChangePanelEdge}
+          panelWidthPercent={effectivePanelWidthPercent}
+          onChangePanelWidthPercent={(nextPct) =>
+            handleChangePanelWidthPercent(nextPct, true)
+          }
+          monitorSettings={safeMonitorSettings}
+          onChangeMonitorSettings={(next) =>
+            handleChangeMonitorSettings(
+              next,
+              'Updated Monitor Routing',
+              next.mode === 'all'
+                ? 'Follows your mouse across all monitors'
+                : 'Pinned to Primary Monitor'
+            )
+          }
+        />
+      )}
     </div>
   );
 };
