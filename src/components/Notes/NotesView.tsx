@@ -83,6 +83,7 @@ import {
   SpellcheckProofingPopover,
 } from './SpellcheckMenu';
 import { VoiceBar, LiveInterimPayload } from './VoiceBar';
+import { FloatingPortal } from '../FloatingPortal';
 
 const JiraAdfEditor = lazyWithPreload(() =>
   import('./JiraAdfEditor').then((m) => ({ default: m.JiraAdfEditor }))
@@ -244,8 +245,22 @@ export const NotesView: React.FC<NotesViewProps> = ({
   );
   const [ignoredWords, setIgnoredWords] = useState<string[]>([]);
   const [isProofingOpen, setIsProofingOpen] = useState<boolean>(false);
+  const proofingBtnRef = useRef<HTMLButtonElement | null>(null);
   const [contextMenuTarget, setContextMenuTarget] =
     useState<SpellcheckContextTarget | null>(null);
+
+  useEffect(() => {
+    if (!isProofingOpen) return;
+    const onMouseDownWindow = (ev: MouseEvent) => {
+      const targetEl = ev.target as HTMLElement | null;
+      if (!targetEl) return;
+      if (proofingBtnRef.current?.contains(targetEl)) return;
+      if (targetEl.closest('[data-sideflow-portal="true"]')) return;
+      setIsProofingOpen(false);
+    };
+    window.addEventListener('mousedown', onMouseDownWindow);
+    return () => window.removeEventListener('mousedown', onMouseDownWindow);
+  }, [isProofingOpen]);
 
   // Merge native Electron Hunspell dictionary suggestions when right-clicking in Electron
   useEffect(() => {
@@ -1081,6 +1096,8 @@ export const NotesView: React.FC<NotesViewProps> = ({
       typeof el.selectionEnd === 'number' &&
       el.selectionEnd > el.selectionStart
         ? el.value.slice(el.selectionStart, el.selectionEnd)
+        : currentFormat === 'adf'
+        ? jiraEditorRef.current?.getSelectedTextInActiveTarget?.() || ''
         : '';
     const sourceMarkdown = (selectedText || effectiveTextForStats || '').trim();
     const generatedFlow = convertMarkdownListToFlowchart(
@@ -1404,7 +1421,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
       if (Boolean(a.pinned) !== Boolean(b.pinned)) {
         return a.pinned ? -1 : 1;
       }
-      return 0;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
     });
   }, [notes, searchQuery, selectedTagFilter]);
 
@@ -2769,6 +2786,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
         onDictatingChange={handleDictatingStateChange}
         onInterimChange={handleLiveInterimChange}
         promptContext={effectiveTextForStats.slice(-240)}
+        customDictionary={customDictionary}
         onNotify={onNotify}
       />
 
@@ -3068,19 +3086,6 @@ export const NotesView: React.FC<NotesViewProps> = ({
                   >
                     <GitBranch className="w-3.5 h-3.5" aria-hidden="true" />
                   </button>
-                  {onOpenMermaidInFlow && (
-                    <button
-                      type="button"
-                      data-testid="convert-note-to-flow-btn"
-                      onClick={handleConvertNoteToFlow}
-                      aria-label="Convert List to Flowchart"
-                      title="Convert note bullets or checklist items into an interactive Flowchart on the Flow tab"
-                      className="min-h-[24px] px-2 py-0.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/30 text-[10px] font-medium text-emerald-300 hover:text-white flex items-center gap-1 transition ml-0.5"
-                    >
-                      <GitBranch className="w-3 h-3" aria-hidden="true" />
-                      <span>List → Flow</span>
-                    </button>
-                  )}
                   {taskStats.total > 0 && (
                     <div className="inline-flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded-lg bg-slate-950/90 border border-slate-800 text-[10px]">
                       <span
@@ -3105,6 +3110,20 @@ export const NotesView: React.FC<NotesViewProps> = ({
                   )}
                 </div>
               </>
+            )}
+
+            {onOpenMermaidInFlow && (
+              <button
+                type="button"
+                data-testid="convert-note-to-flow-btn"
+                onClick={handleConvertNoteToFlow}
+                aria-label="Convert List to Flowchart"
+                title="Convert note bullets, numbered steps, or checklist items into an interactive Flowchart on the Flow tab"
+                className="min-h-[24px] px-2 py-0.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-500/30 text-[10px] font-medium text-emerald-300 hover:text-white flex items-center gap-1 transition ml-0.5"
+              >
+                <GitBranch className="w-3 h-3" aria-hidden="true" />
+                <span>List → Flow</span>
+              </button>
             )}
 
             <div className="h-3.5 w-px bg-slate-800 mx-0.5" />
@@ -3182,6 +3201,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
             {/* Chrome / Word-Style Spellcheck & Proofing Button (F7) */}
             <div className="relative inline-flex items-center">
               <button
+                ref={proofingBtnRef}
                 type="button"
                 data-testid="toggle-spellcheck-proofing-btn"
                 aria-label="Spellcheck & Proofing"
@@ -3229,7 +3249,15 @@ export const NotesView: React.FC<NotesViewProps> = ({
               </button>
 
               {isProofingOpen && (
-                <div className="absolute left-0 top-full mt-1.5 z-50 w-80 sm:w-96">
+                <FloatingPortal
+                  isOpen={isProofingOpen}
+                  anchorRef={proofingBtnRef}
+                  returnFocusRef={proofingBtnRef}
+                  placement="bottom-start"
+                  offsetPx={6}
+                  onClose={() => setIsProofingOpen(false)}
+                  className="w-80 sm:w-96 max-w-[calc(100vw-16px)]"
+                >
                   <SpellcheckProofingPopover
                     spellCheckEnabled={spellCheckEnabled}
                     onToggleSpellCheck={(next) => setSpellCheckEnabled(next)}
@@ -3253,7 +3281,7 @@ export const NotesView: React.FC<NotesViewProps> = ({
                     onRemoveWordFromDictionary={handleRemoveWordFromDictionary}
                     onClose={() => setIsProofingOpen(false)}
                   />
-                </div>
+                </FloatingPortal>
               )}
             </div>
           </div>

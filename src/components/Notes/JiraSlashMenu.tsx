@@ -37,6 +37,7 @@ import {
   JIRA_STATUS_COLORS,
   JIRA_TEXT_COLORS,
 } from '../../utils/adf';
+import { FloatingPortal } from '../FloatingPortal';
 
 export type JiraSlashCommandId =
   | 'paragraph'
@@ -359,85 +360,102 @@ export const JiraSlashMenu: React.FC<JiraSlashMenuProps> = ({
       ? -1
       : Math.min(Math.max(0, activeIndex), matches.length - 1);
   const activeOptionRef = useRef<HTMLButtonElement | null>(null);
+  const anchorSpanRef = useRef<HTMLSpanElement | null>(null);
 
   useEffect(() => {
     activeOptionRef.current?.scrollIntoView?.({ block: 'nearest' });
   }, [safeIdx, query]);
 
   return (
-    <div
-      id="jira-slash-menu-listbox"
-      data-testid="jira-slash-menu"
-      role="listbox"
-      aria-label="Jira Quick Insert Slash Commands"
-      className="mt-1.5 w-full max-w-xs rounded-xl bg-slate-900/98 border border-sky-500/40 shadow-2xl overflow-hidden z-30"
-    >
-      <div className="px-2.5 py-1.5 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between text-[10px]">
-        <span className="font-semibold text-sky-300">
-          Quick Insert {query ? `"/${query}"` : '("/")'}
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close slash menu"
-          className="w-6 h-6 flex items-center justify-center text-slate-400 hover:text-white rounded"
+    <>
+      <span
+        ref={anchorSpanRef}
+        className="inline-block w-0 h-0 overflow-hidden pointer-events-none"
+        aria-hidden="true"
+      />
+      <FloatingPortal
+        isOpen={true}
+        anchorRef={anchorSpanRef}
+        placement="bottom-start"
+        offsetPx={6}
+        onClose={onClose}
+        className="w-72 max-w-[calc(100vw-16px)]"
+      >
+        <div
+          id="jira-slash-menu-listbox"
+          data-testid="jira-slash-menu"
+          role="listbox"
+          aria-label="Jira Quick Insert Slash Commands"
+          className="w-full rounded-xl bg-slate-900/98 border border-sky-500/40 shadow-2xl overflow-hidden"
         >
-          <X className="w-3.5 h-3.5" />
-        </button>
-      </div>
+          <div className="px-2.5 py-1.5 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between text-[10px]">
+            <span className="font-semibold text-sky-300">
+              Quick Insert {query ? `"/${query}"` : '("/")'}
+            </span>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close slash menu"
+              className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center text-slate-400 hover:text-white rounded"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
-      {matches.length === 0 ? (
-        <div className="px-3 py-3 text-[11px] text-slate-400 italic">
-          No Jira blocks match &ldquo;/{query}&rdquo;
-        </div>
-      ) : (
-        <div className="max-h-52 overflow-y-auto py-1">
-          {matches.map((cmd, idx) => {
-            const isSelected = idx === safeIdx;
-            return (
-              <button
-                key={cmd.id}
-                ref={isSelected ? activeOptionRef : null}
-                id={`jira-slash-opt-${cmd.id}`}
-                type="button"
-                role="option"
-                aria-selected={isSelected}
-                data-testid={`slash-cmd-${cmd.id}`}
-                onMouseEnter={() => onHighlightIndex(idx)}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                }}
-                onClick={() => onSelect(cmd)}
-                className={`w-full px-2.5 py-1.5 text-left flex items-center justify-between gap-2 transition ${
-                  isSelected
-                    ? 'bg-sky-600/25 text-white'
-                    : 'text-slate-300 hover:bg-slate-800/80'
-                }`}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="w-6 h-6 rounded-lg bg-slate-950/90 border border-slate-800 flex items-center justify-center shrink-0">
-                    {cmd.renderIcon()}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-semibold text-white truncate">
-                      {cmd.title}
+          {matches.length === 0 ? (
+            <div className="px-3 py-3 text-[11px] text-slate-400 italic">
+              No Jira blocks match &ldquo;/{query}&rdquo;
+            </div>
+          ) : (
+            <div className="max-h-52 overflow-y-auto py-1">
+              {matches.map((cmd, idx) => {
+                const isSelected = idx === safeIdx;
+                return (
+                  <button
+                    key={cmd.id}
+                    ref={isSelected ? activeOptionRef : null}
+                    id={`jira-slash-opt-${cmd.id}`}
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    data-testid={`slash-cmd-${cmd.id}`}
+                    onMouseEnter={() => onHighlightIndex(idx)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                    }}
+                    onClick={() => onSelect(cmd)}
+                    className={`w-full px-2.5 py-1.5 text-left flex items-center justify-between gap-2 transition ${
+                      isSelected
+                        ? 'bg-sky-600/25 text-white'
+                        : 'text-slate-300 hover:bg-slate-800/80'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-6 h-6 rounded-lg bg-slate-950/90 border border-slate-800 flex items-center justify-center shrink-0">
+                        {cmd.renderIcon()}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-semibold text-white truncate">
+                          {cmd.title}
+                        </div>
+                        <div className="text-[10px] text-slate-400 truncate">
+                          {cmd.description}
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-[10px] text-slate-400 truncate">
-                      {cmd.description}
-                    </div>
-                  </div>
-                </div>
-                {cmd.shortcut && (
-                  <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 font-mono text-[9px] text-slate-400 shrink-0">
-                    {cmd.shortcut}
-                  </span>
-                )}
-              </button>
-            );
-          })}
+                    {cmd.shortcut && (
+                      <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 font-mono text-[9px] text-slate-400 shrink-0">
+                        {cmd.shortcut}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
-      )}
-    </div>
+      </FloatingPortal>
+    </>
   );
 };
 
@@ -694,7 +712,7 @@ export const ColorPickerPopover: React.FC<ColorPickerPopoverProps> = ({
       data-testid="jira-color-popover"
       role="dialog"
       aria-label="Jira Text and Highlight Colors"
-      className="p-2.5 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl flex flex-col gap-2 w-full max-w-[15rem] z-30"
+      className="p-2.5 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl flex flex-col gap-2 w-[15.5rem] max-w-[calc(100vw-16px)] z-30"
     >
       <div className="flex items-center justify-between">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-300">
@@ -704,7 +722,7 @@ export const ColorPickerPopover: React.FC<ColorPickerPopoverProps> = ({
           type="button"
           onClick={onClose}
           aria-label="Close color picker"
-          className="w-6 h-6 flex items-center justify-center text-slate-400 hover:text-white rounded"
+          className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center text-slate-400 hover:text-white rounded"
         >
           <X className="w-3.5 h-3.5" />
         </button>
@@ -720,7 +738,7 @@ export const ColorPickerPopover: React.FC<ColorPickerPopoverProps> = ({
               onSelectTextColor(c.value);
               onClose();
             }}
-            className={`w-6 h-6 rounded border border-slate-600 hover:scale-110 transition ${c.swatchClass}`}
+            className={`w-6 h-6 min-w-[24px] min-h-[24px] rounded border border-slate-600 hover:scale-110 transition ${c.swatchClass}`}
           />
         ))}
       </div>
@@ -739,7 +757,7 @@ export const ColorPickerPopover: React.FC<ColorPickerPopoverProps> = ({
               onSelectHighlightColor(c.value);
               onClose();
             }}
-            className={`w-6 h-6 rounded border border-slate-600 hover:scale-110 transition ${c.swatchClass}`}
+            className={`w-6 h-6 min-w-[24px] min-h-[24px] rounded border border-slate-600 hover:scale-110 transition ${c.swatchClass}`}
           />
         ))}
       </div>

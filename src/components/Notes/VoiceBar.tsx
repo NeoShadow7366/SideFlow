@@ -81,6 +81,7 @@ interface VoiceBarProps {
   isPanelOpen?: boolean;
   isActiveTab?: boolean;
   promptContext?: string;
+  customDictionary?: string[];
   onDictatingChange?: (isDictating: boolean) => void;
   onInterimChange?: (payload: LiveInterimPayload) => void;
   onNotify: NotifyFn;
@@ -179,6 +180,7 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
   isPanelOpen = true,
   isActiveTab = true,
   promptContext = '',
+  customDictionary = [],
   onDictatingChange,
   onInterimChange,
   onNotify,
@@ -318,8 +320,22 @@ export const VoiceBar: React.FC<VoiceBarProps> = ({
   onTranscriptRef.current = onTranscript;
   const onNotifyRef = useRef(onNotify);
   onNotifyRef.current = onNotify;
-  const promptContextRef = useRef(promptContext);
-  promptContextRef.current = promptContext;
+  const rawVocabTerms =
+    customDictionary && customDictionary.length > 0
+      ? customDictionary
+          .map((w) => w.trim())
+          .filter(Boolean)
+          .slice(0, 40)
+          .join(', ')
+          .slice(0, 220)
+      : '';
+  const vocabPrefix = rawVocabTerms ? `Vocabulary: ${rawVocabTerms}. ` : '';
+  const trimmedTailContext = promptContext
+    ? promptContext.slice(-Math.max(80, 560 - vocabPrefix.length))
+    : '';
+  const effectivePromptContext = `${vocabPrefix}${trimmedTailContext}`.trim();
+  const promptContextRef = useRef(effectivePromptContext);
+  promptContextRef.current = effectivePromptContext;
   const onDictatingChangeRef = useRef(onDictatingChange);
   onDictatingChangeRef.current = onDictatingChange;
   const onInterimChangeRef = useRef(onInterimChange);

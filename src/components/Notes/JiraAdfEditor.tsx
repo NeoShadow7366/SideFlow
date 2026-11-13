@@ -73,6 +73,7 @@ import {
   getInlineNodesLength,
   insertInlineNodeAtOffset,
   isLightHexColor,
+  isSafeAdfMediaUrl,
   isSafeAdfUrl,
   JIRA_CODE_LANGUAGES,
   JIRA_TABLE_CELL_COLORS,
@@ -110,6 +111,7 @@ import {
   LinkEditorPopover,
   StatusEditorPopover,
 } from './JiraSlashMenu';
+import { FloatingPortal } from '../FloatingPortal';
 
 export interface JiraAdfSpellcheckContextMenuPayload {
   targetId: string;
@@ -936,6 +938,12 @@ export const JiraAdfEditor = forwardRef<
 
   // Toolbar dropdown & popover states
   const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const moreBtnRef = useRef<HTMLButtonElement | null>(null);
+  const colorBtnRef = useRef<HTMLButtonElement | null>(null);
+  const linkBtnRef = useRef<HTMLButtonElement | null>(null);
+  const emojiBtnRef = useRef<HTMLButtonElement | null>(null);
+  const statusBtnRef = useRef<HTMLButtonElement | null>(null);
+  const insertBtnRef = useRef<HTMLButtonElement | null>(null);
   const [openMenu, setOpenMenu] = useState<
     null | 'more' | 'color' | 'insert' | 'link' | 'emoji' | 'status-new'
   >(null);
@@ -958,22 +966,28 @@ export const JiraAdfEditor = forwardRef<
   const [mentionDraft, setMentionDraft] = useState<string>('');
   const [dateDraft, setDateDraft] = useState<string>('');
 
-  // Dismiss open toolbar dropdowns/popovers on Escape or outside pointer down
+  // Dismiss open toolbar dropdowns, inline popovers, or slash menu on Escape or outside pointer down
   useEffect(() => {
-    if (!openMenu && !editingWidget) return;
+    if (!openMenu && !editingWidget && !slashState) return;
     const onKeyDownWindow = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') {
         setOpenMenu(null);
         setEditingWidget(null);
+        setSlashState(null);
       }
     };
     const onPointerDownWindow = (ev: MouseEvent) => {
+      const targetEl = ev.target as HTMLElement | null;
+      if (targetEl?.closest('[data-sideflow-portal="true"]')) return;
       if (
         openMenu &&
         toolbarRef.current &&
         !toolbarRef.current.contains(ev.target as Node)
       ) {
         setOpenMenu(null);
+      }
+      if (slashState && !targetEl?.closest('[data-adf-target-id]')) {
+        setSlashState(null);
       }
     };
     window.addEventListener('keydown', onKeyDownWindow);
@@ -982,7 +996,39 @@ export const JiraAdfEditor = forwardRef<
       window.removeEventListener('keydown', onKeyDownWindow);
       window.removeEventListener('mousedown', onPointerDownWindow);
     };
-  }, [openMenu, editingWidget]);
+  }, [openMenu, editingWidget, slashState]);
+
+  // Move keyboard focus into portaled toolbar menus on open so Arrow/Tab navigation works immediately
+  useEffect(() => {
+    if (
+      openMenu !== 'more' &&
+      openMenu !== 'insert' &&
+      openMenu !== 'color' &&
+      openMenu !== 'emoji'
+    ) {
+      return;
+    }
+    const testId =
+      openMenu === 'more'
+        ? 'jira-more-formatting-menu'
+        : openMenu === 'insert'
+        ? 'jira-insert-dropdown'
+        : openMenu === 'color'
+        ? 'jira-color-popover'
+        : 'jira-emoji-popover';
+    const selector =
+      openMenu === 'more' || openMenu === 'insert'
+        ? '[role="menuitem"], [role="menuitemcheckbox"]'
+        : 'button:not([disabled]):not([aria-label^="Close"])';
+    const rafId = window.requestAnimationFrame(() => {
+      const container = document.querySelector<HTMLElement>(
+        `[data-testid="${testId}"]`
+      );
+      const firstControl = container?.querySelector<HTMLElement>(selector);
+      firstControl?.focus();
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [openMenu]);
 
   // Collapsible expand open/closed map (default open in editor so users can edit immediately)
   const [collapsedExpands, setCollapsedExpands] = useState<
@@ -1798,7 +1844,20 @@ export const JiraAdfEditor = forwardRef<
         setLinkInitialMode('inlineCard');
         setOpenMenu('link');
         break;
-      case 'image':
+      case 'image': {
+        const offlinePlaceholderSvg =
+          '<svg xmlns="http://www.w3.org/2000/svg" width="560" height="220" viewBox="0 0 560 220">' +
+          '<rect width="560" height="220" rx="14" fill="#0f172a" stroke="#334155" stroke-width="2"/>' +
+          '<rect x="44" y="76" width="128" height="68" rx="10" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>' +
+          '<text x="108" y="114" fill="#e2e8f0" font-family="sans-serif" font-size="13" font-weight="600" text-anchor="middle">Client UI</text>' +
+          '<line x1="172" y1="110" x2="216" y2="110" stroke="#38bdf8" stroke-width="2"/>' +
+          '<rect x="216" y="76" width="128" height="68" rx="10" fill="#1e293b" stroke="#818cf8" stroke-width="2"/>' +
+          '<text x="280" y="114" fill="#e2e8f0" font-family="sans-serif" font-size="13" font-weight="600" text-anchor="middle">API Service</text>' +
+          '<line x1="344" y1="110" x2="388" y2="110" stroke="#818cf8" stroke-width="2"/>' +
+          '<rect x="388" y="76" width="128" height="68" rx="10" fill="#1e293b" stroke="#34d399" stroke-width="2"/>' +
+          '<text x="452" y="114" fill="#e2e8f0" font-family="sans-serif" font-size="13" font-weight="600" text-anchor="middle">Data Store</text>' +
+          '<text x="280" y="42" fill="#94a3b8" font-family="sans-serif" font-size="11" text-anchor="middle">Offline Architecture Diagram Placeholder</text>' +
+          '</svg>';
         placeOrReplaceTopBlock({
           type: 'mediaSingle',
           attrs: { layout: 'center' },
@@ -1807,13 +1866,14 @@ export const JiraAdfEditor = forwardRef<
               type: 'media',
               attrs: {
                 type: 'external',
-                url: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?auto=format&fit=crop&w=800&q=80',
-                alt: 'Architecture Screenshot',
+                url: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(offlinePlaceholderSvg)}`,
+                alt: 'Architecture Diagram Placeholder',
               },
             },
           ],
         });
         break;
+      }
     }
   };
 
@@ -3762,7 +3822,7 @@ export const JiraAdfEditor = forwardRef<
                 <Trash2 className="w-3 h-3" />
               </button>
             </div>
-            {media.attrs.url && isSafeAdfUrl(media.attrs.url) && (
+            {media.attrs.url && isSafeAdfMediaUrl(media.attrs.url) && (
               <img
                 src={media.attrs.url}
                 alt={media.attrs.alt || 'Jira embedded media'}
@@ -3918,6 +3978,7 @@ export const JiraAdfEditor = forwardRef<
         {/* More Formatting Dropdown (Strike, Code, Sub, Sup, Clear) */}
         <div>
           <button
+            ref={moreBtnRef}
             type="button"
             data-testid="jira-more-formatting-btn"
             aria-label="More formatting"
@@ -3938,141 +3999,152 @@ export const JiraAdfEditor = forwardRef<
           </button>
 
           {openMenu === 'more' && (
-            <div
-              data-testid="jira-more-formatting-menu"
-              role="menu"
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setOpenMenu(null);
-                  return;
-                }
-                if (
-                  e.key === 'ArrowDown' ||
-                  e.key === 'ArrowUp' ||
-                  e.key === 'Home' ||
-                  e.key === 'End'
-                ) {
-                  const items = Array.from(
-                    e.currentTarget.querySelectorAll<HTMLButtonElement>(
-                      '[role="menuitem"], [role="menuitemcheckbox"]'
-                    )
-                  );
-                  if (items.length === 0) return;
-                  e.preventDefault();
-                  const idx = items.indexOf(
-                    document.activeElement as HTMLButtonElement
-                  );
-                  const next =
-                    e.key === 'Home'
-                      ? 0
-                      : e.key === 'End'
-                      ? items.length - 1
-                      : e.key === 'ArrowDown'
-                      ? idx < 0
-                        ? 0
-                        : (idx + 1) % items.length
-                      : idx <= 0
-                      ? items.length - 1
-                      : (idx - 1) % items.length;
-                  items[next]?.focus();
-                }
-              }}
-              className="absolute left-2 top-full mt-1 w-48 max-w-[calc(100%-1rem)] rounded-xl bg-slate-900 border border-slate-700 shadow-2xl py-1 z-30 text-xs"
+            <FloatingPortal
+              isOpen={true}
+              anchorRef={moreBtnRef}
+              returnFocusRef={moreBtnRef}
+              placement="bottom-start"
+              offsetPx={6}
+              onClose={() => setOpenMenu(null)}
+              className="w-48 max-w-[calc(100vw-16px)]"
             >
-              <button
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={hasActiveMark('strike')}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => applyMarkToActiveTarget({ type: 'strike' })}
-                className={`w-full px-3 py-1.5 text-left hover:bg-slate-800 flex items-center justify-between ${
-                  hasActiveMark('strike') ? 'text-sky-300 font-semibold' : 'text-slate-200'
-                }`}
+              <div
+                data-testid="jira-more-formatting-menu"
+                role="menu"
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setOpenMenu(null);
+                    return;
+                  }
+                  if (
+                    e.key === 'ArrowDown' ||
+                    e.key === 'ArrowUp' ||
+                    e.key === 'Home' ||
+                    e.key === 'End'
+                  ) {
+                    const items = Array.from(
+                      e.currentTarget.querySelectorAll<HTMLButtonElement>(
+                        '[role="menuitem"], [role="menuitemcheckbox"]'
+                      )
+                    );
+                    if (items.length === 0) return;
+                    e.preventDefault();
+                    const idx = items.indexOf(
+                      document.activeElement as HTMLButtonElement
+                    );
+                    const next =
+                      e.key === 'Home'
+                        ? 0
+                        : e.key === 'End'
+                        ? items.length - 1
+                        : e.key === 'ArrowDown'
+                        ? idx < 0
+                          ? 0
+                          : (idx + 1) % items.length
+                        : idx <= 0
+                        ? items.length - 1
+                        : (idx - 1) % items.length;
+                    items[next]?.focus();
+                  }
+                }}
+                className="w-full rounded-xl bg-slate-900 border border-slate-700 shadow-2xl py-1 text-xs"
               >
-                <span className="flex items-center gap-2">
-                  <Strikethrough className="w-3.5 h-3.5 text-slate-400" />
-                  Strikethrough
-                </span>
-                <span className="text-[9px] font-mono text-slate-400">
-                  Ctrl+Shift+S
-                </span>
-              </button>
-              <button
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={hasActiveMark('code')}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => applyMarkToActiveTarget({ type: 'code' })}
-                className={`w-full px-3 py-1.5 text-left hover:bg-slate-800 flex items-center justify-between ${
-                  hasActiveMark('code') ? 'text-amber-300 font-semibold' : 'text-slate-200'
-                }`}
-              >
-                <span className="flex items-center gap-2">
-                  <Code className="w-3.5 h-3.5 text-amber-400" />
-                  Code
-                </span>
-                <span className="text-[9px] font-mono text-slate-400">
-                  Ctrl+Shift+M
-                </span>
-              </button>
-              <button
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={hasActiveMark('subsup', 'sub')}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() =>
-                  applyMarkToActiveTarget({
-                    type: 'subsup',
-                    attrs: { type: 'sub' },
-                  })
-                }
-                className={`w-full px-3 py-1.5 text-left hover:bg-slate-800 flex items-center gap-2 ${
-                  hasActiveMark('subsup', 'sub')
-                    ? 'text-sky-300 font-semibold'
-                    : 'text-slate-200'
-                }`}
-              >
-                <Subscript className="w-3.5 h-3.5 text-slate-400" /> Subscript
-              </button>
-              <button
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={hasActiveMark('subsup', 'sup')}
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() =>
-                  applyMarkToActiveTarget({
-                    type: 'subsup',
-                    attrs: { type: 'sup' },
-                  })
-                }
-                className={`w-full px-3 py-1.5 text-left hover:bg-slate-800 flex items-center gap-2 ${
-                  hasActiveMark('subsup', 'sup')
-                    ? 'text-sky-300 font-semibold'
-                    : 'text-slate-200'
-                }`}
-              >
-                <Superscript className="w-3.5 h-3.5 text-slate-400" />{' '}
-                Superscript
-              </button>
-              <div className="my-1 border-t border-slate-800" />
-              <button
-                type="button"
-                role="menuitem"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={handleClearFormatting}
-                className="w-full px-3 py-1.5 text-left text-rose-300 hover:bg-slate-800 flex items-center gap-2"
-              >
-                <Eraser className="w-3.5 h-3.5" /> Clear formatting
-              </button>
-            </div>
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={hasActiveMark('strike')}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => applyMarkToActiveTarget({ type: 'strike' })}
+                  className={`w-full px-3 py-1.5 text-left hover:bg-slate-800 flex items-center justify-between ${
+                    hasActiveMark('strike') ? 'text-sky-300 font-semibold' : 'text-slate-200'
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <Strikethrough className="w-3.5 h-3.5 text-slate-400" />
+                    Strikethrough
+                  </span>
+                  <span className="text-[9px] font-mono text-slate-400">
+                    Ctrl+Shift+S
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={hasActiveMark('code')}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => applyMarkToActiveTarget({ type: 'code' })}
+                  className={`w-full px-3 py-1.5 text-left hover:bg-slate-800 flex items-center justify-between ${
+                    hasActiveMark('code') ? 'text-amber-300 font-semibold' : 'text-slate-200'
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <Code className="w-3.5 h-3.5 text-amber-400" />
+                    Code
+                  </span>
+                  <span className="text-[9px] font-mono text-slate-400">
+                    Ctrl+Shift+M
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={hasActiveMark('subsup', 'sub')}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    applyMarkToActiveTarget({
+                      type: 'subsup',
+                      attrs: { type: 'sub' },
+                    })
+                  }
+                  className={`w-full px-3 py-1.5 text-left hover:bg-slate-800 flex items-center gap-2 ${
+                    hasActiveMark('subsup', 'sub')
+                      ? 'text-sky-300 font-semibold'
+                      : 'text-slate-200'
+                  }`}
+                >
+                  <Subscript className="w-3.5 h-3.5 text-slate-400" /> Subscript
+                </button>
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={hasActiveMark('subsup', 'sup')}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    applyMarkToActiveTarget({
+                      type: 'subsup',
+                      attrs: { type: 'sup' },
+                    })
+                  }
+                  className={`w-full px-3 py-1.5 text-left hover:bg-slate-800 flex items-center gap-2 ${
+                    hasActiveMark('subsup', 'sup')
+                      ? 'text-sky-300 font-semibold'
+                      : 'text-slate-200'
+                  }`}
+                >
+                  <Superscript className="w-3.5 h-3.5 text-slate-400" />{' '}
+                  Superscript
+                </button>
+                <div className="my-1 border-t border-slate-800" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={handleClearFormatting}
+                  className="w-full px-3 py-1.5 text-left text-rose-300 hover:bg-slate-800 flex items-center gap-2"
+                >
+                  <Eraser className="w-3.5 h-3.5" /> Clear formatting
+                </button>
+              </div>
+            </FloatingPortal>
           )}
         </div>
 
         {/* 3. Text & Highlight Color Swatches */}
         <div>
           <button
+            ref={colorBtnRef}
             type="button"
             data-testid="jira-color-picker-btn"
             aria-label="Text and highlight colors"
@@ -4088,7 +4160,14 @@ export const JiraAdfEditor = forwardRef<
             <Palette className="w-3.5 h-3.5 text-sky-400" />
           </button>
           {openMenu === 'color' && (
-            <div className="absolute left-2 right-2 top-full mt-1 z-30 flex justify-start pointer-events-none [&>*]:pointer-events-auto">
+            <FloatingPortal
+              isOpen={true}
+              anchorRef={colorBtnRef}
+              returnFocusRef={colorBtnRef}
+              placement="bottom-start"
+              offsetPx={6}
+              onClose={() => setOpenMenu(null)}
+            >
               <ColorPickerPopover
                 onSelectTextColor={(hex) => {
                   if (!hex) {
@@ -4112,7 +4191,7 @@ export const JiraAdfEditor = forwardRef<
                 }}
                 onClose={() => setOpenMenu(null)}
               />
-            </div>
+            </FloatingPortal>
           )}
         </div>
 
@@ -4250,6 +4329,7 @@ export const JiraAdfEditor = forwardRef<
         {/* 6. Rich Jira Inserts: Link/Smart Card, @Mention, Emoji, Status, Table, Code, Panel, + Insert */}
         <div>
           <button
+            ref={linkBtnRef}
             type="button"
             aria-label="Insert Jira Link"
             aria-haspopup="dialog"
@@ -4265,7 +4345,15 @@ export const JiraAdfEditor = forwardRef<
             <Link2 className="w-3.5 h-3.5" />
           </button>
           {openMenu === 'link' && (
-            <div className="absolute left-2 right-2 top-full mt-1 z-30 flex justify-end pointer-events-none [&>*]:pointer-events-auto">
+            <FloatingPortal
+              isOpen={true}
+              anchorRef={linkBtnRef}
+              returnFocusRef={linkBtnRef}
+              placement="bottom-end"
+              offsetPx={6}
+              onClose={() => setOpenMenu(null)}
+              className="w-72 max-w-[calc(100vw-16px)]"
+            >
               <LinkEditorPopover
                 initialText=""
                 initialUrl="https://"
@@ -4310,7 +4398,7 @@ export const JiraAdfEditor = forwardRef<
                 }}
                 onClose={() => setOpenMenu(null)}
               />
-            </div>
+            </FloatingPortal>
           )}
         </div>
 
@@ -4332,6 +4420,7 @@ export const JiraAdfEditor = forwardRef<
 
         <div>
           <button
+            ref={emojiBtnRef}
             type="button"
             aria-label="Insert Emoji"
             aria-haspopup="dialog"
@@ -4346,7 +4435,15 @@ export const JiraAdfEditor = forwardRef<
             <Smile className="w-3.5 h-3.5" />
           </button>
           {openMenu === 'emoji' && (
-            <div className="absolute left-2 right-2 top-full mt-1 z-30 flex justify-end pointer-events-none [&>*]:pointer-events-auto">
+            <FloatingPortal
+              isOpen={true}
+              anchorRef={emojiBtnRef}
+              returnFocusRef={emojiBtnRef}
+              placement="bottom-end"
+              offsetPx={6}
+              onClose={() => setOpenMenu(null)}
+              className="w-60 max-w-[calc(100vw-16px)]"
+            >
               <EmojiPickerPopover
                 onSelectEmoji={(em) =>
                   insertInlineIntoActiveTarget({
@@ -4356,12 +4453,13 @@ export const JiraAdfEditor = forwardRef<
                 }
                 onClose={() => setOpenMenu(null)}
               />
-            </div>
+            </FloatingPortal>
           )}
         </div>
 
         <div>
           <button
+            ref={statusBtnRef}
             type="button"
             aria-label="Insert Status Lozenge"
             aria-haspopup="dialog"
@@ -4378,7 +4476,15 @@ export const JiraAdfEditor = forwardRef<
             <Tag className="w-3.5 h-3.5" />
           </button>
           {openMenu === 'status-new' && (
-            <div className="absolute left-2 right-2 top-full mt-1 z-30 flex justify-end pointer-events-none [&>*]:pointer-events-auto">
+            <FloatingPortal
+              isOpen={true}
+              anchorRef={statusBtnRef}
+              returnFocusRef={statusBtnRef}
+              placement="bottom-end"
+              offsetPx={6}
+              onClose={() => setOpenMenu(null)}
+              className="w-64 max-w-[calc(100vw-16px)]"
+            >
               <StatusEditorPopover
                 initialText="IN PROGRESS"
                 initialColor="blue"
@@ -4395,7 +4501,7 @@ export const JiraAdfEditor = forwardRef<
                 }}
                 onClose={() => setOpenMenu(null)}
               />
-            </div>
+            </FloatingPortal>
           )}
         </div>
 
@@ -4432,6 +4538,7 @@ export const JiraAdfEditor = forwardRef<
         {/* Jira "+ Insert" Full Element Menu */}
         <div>
           <button
+            ref={insertBtnRef}
             type="button"
             data-testid="jira-insert-menu-btn"
             aria-label="Insert Jira Block"
@@ -4453,72 +4560,82 @@ export const JiraAdfEditor = forwardRef<
           </button>
 
           {openMenu === 'insert' && (
-            <div
-              data-testid="jira-insert-dropdown"
-              role="menu"
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setOpenMenu(null);
-                  return;
-                }
-                if (
-                  e.key === 'ArrowDown' ||
-                  e.key === 'ArrowUp' ||
-                  e.key === 'Home' ||
-                  e.key === 'End'
-                ) {
-                  const items = Array.from(
-                    e.currentTarget.querySelectorAll<HTMLButtonElement>(
-                      '[role="menuitem"]'
-                    )
-                  );
-                  if (items.length === 0) return;
-                  e.preventDefault();
-                  const idx = items.indexOf(
-                    document.activeElement as HTMLButtonElement
-                  );
-                  const next =
-                    e.key === 'Home'
-                      ? 0
-                      : e.key === 'End'
-                      ? items.length - 1
-                      : e.key === 'ArrowDown'
-                      ? idx < 0
-                        ? 0
-                        : (idx + 1) % items.length
-                      : idx <= 0
-                      ? items.length - 1
-                      : (idx - 1) % items.length;
-                  items[next]?.focus();
-                }
-              }}
-              className="absolute right-2 top-full mt-1 w-64 max-w-[calc(100%-1rem)] max-h-72 overflow-y-auto rounded-xl bg-slate-900 border border-sky-500/40 shadow-2xl py-1 z-30"
+            <FloatingPortal
+              isOpen={true}
+              anchorRef={insertBtnRef}
+              returnFocusRef={insertBtnRef}
+              placement="bottom-end"
+              offsetPx={6}
+              onClose={() => setOpenMenu(null)}
+              className="w-64 max-w-[calc(100vw-16px)]"
             >
-              {JIRA_SLASH_COMMANDS.map((cmd) => (
-                <button
-                  key={cmd.id}
-                  type="button"
-                  role="menuitem"
-                  data-testid={`jira-insert-item-${cmd.id}`}
-                  onClick={() => executeInsertCommand(cmd.id)}
-                  className="w-full px-2.5 py-1.5 text-left hover:bg-slate-800 flex items-center justify-between gap-2 transition"
-                >
-                  <span className="flex items-center gap-2 min-w-0">
-                    {cmd.renderIcon()}
-                    <span className="text-[11px] font-medium text-slate-100 truncate">
-                      {cmd.title}
+              <div
+                data-testid="jira-insert-dropdown"
+                role="menu"
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setOpenMenu(null);
+                    return;
+                  }
+                  if (
+                    e.key === 'ArrowDown' ||
+                    e.key === 'ArrowUp' ||
+                    e.key === 'Home' ||
+                    e.key === 'End'
+                  ) {
+                    const items = Array.from(
+                      e.currentTarget.querySelectorAll<HTMLButtonElement>(
+                        '[role="menuitem"]'
+                      )
+                    );
+                    if (items.length === 0) return;
+                    e.preventDefault();
+                    const idx = items.indexOf(
+                      document.activeElement as HTMLButtonElement
+                    );
+                    const next =
+                      e.key === 'Home'
+                        ? 0
+                        : e.key === 'End'
+                        ? items.length - 1
+                        : e.key === 'ArrowDown'
+                        ? idx < 0
+                          ? 0
+                          : (idx + 1) % items.length
+                        : idx <= 0
+                        ? items.length - 1
+                        : (idx - 1) % items.length;
+                    items[next]?.focus();
+                  }
+                }}
+                className="w-full max-h-72 overflow-y-auto rounded-xl bg-slate-900 border border-sky-500/40 shadow-2xl py-1"
+              >
+                {JIRA_SLASH_COMMANDS.map((cmd) => (
+                  <button
+                    key={cmd.id}
+                    type="button"
+                    role="menuitem"
+                    data-testid={`jira-insert-item-${cmd.id}`}
+                    onClick={() => executeInsertCommand(cmd.id)}
+                    className="w-full px-2.5 py-1.5 text-left hover:bg-slate-800 flex items-center justify-between gap-2 transition"
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      {cmd.renderIcon()}
+                      <span className="text-[11px] font-medium text-slate-100 truncate">
+                        {cmd.title}
+                      </span>
                     </span>
-                  </span>
-                  {cmd.shortcut && (
-                    <span className="text-[9px] font-mono text-slate-400">
-                      {cmd.shortcut}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
+                    {cmd.shortcut && (
+                      <span className="text-[9px] font-mono text-slate-400">
+                        {cmd.shortcut}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </FloatingPortal>
           )}
         </div>
       </div>

@@ -82,6 +82,7 @@ import {
   generateStandaloneSVG,
   getMermaidTemplatePreset,
   getNodeDimensions,
+  hasSideflowLayoutMetadata,
   insertNodeOnEdge,
   MERMAID_TEMPLATES,
   MermaidTemplateId,
@@ -91,6 +92,7 @@ import {
 } from '../../utils/mermaid';
 import { LucidModal } from './LucidModal';
 import { FlowMinimap } from './FlowMinimap';
+import { FloatingPortal } from '../FloatingPortal';
 
 interface FlowCanvasProps {
   flowData: FlowchartState;
@@ -969,6 +971,22 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   const [nodeSearchFocusIdx, setNodeSearchFocusIdx] = useState<number>(0);
   const [tracePathMode, setTracePathMode] = useState<boolean>(false);
   const [isHealthPopoverOpen, setIsHealthPopoverOpen] = useState<boolean>(false);
+  const [isCompactToolsExpanded, setIsCompactToolsExpanded] =
+    useState<boolean>(false);
+  const healthBtnRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!isHealthPopoverOpen) return;
+    const onMouseDownWindow = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target) return;
+      if (healthBtnRef.current?.contains(target)) return;
+      if (target.closest('[data-testid="flow-health-popover"]')) return;
+      setIsHealthPopoverOpen(false);
+    };
+    window.addEventListener('mousedown', onMouseDownWindow);
+    return () => window.removeEventListener('mousedown', onMouseDownWindow);
+  }, [isHealthPopoverOpen]);
+  const nodeElementRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const draggingWaypointRef = useRef<{ edgeIdx: number } | null>(null);
   const [dragWaypoint, setDragWaypoint] = useState<{
     edgeIdx: number;
@@ -1057,6 +1075,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       : panelWidthPercent >= 45
         ? 'standard'
         : 'compact';
+  const isNarrowCompactToolbar = panelWidthPercent < 30;
 
   // Effective nodes merging committed flowData.nodes with in-flight transient drag positions
   const effectiveNodes = useMemo(() => {
@@ -2247,6 +2266,18 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   const handleCopyPNG = async () => {
     const { blob, dataUrl } = await renderFlowchartToPngData(flowData, 2);
     try {
+      if (window.sideflow?.writeClipboardImage && dataUrl) {
+        const copied = await window.sideflow.writeClipboardImage(dataUrl);
+        if (copied) {
+          onNotify(
+            'Copied Flowchart PNG',
+            'check',
+            'High-DPI diagram copied to clipboard'
+          );
+          return;
+        }
+      }
+
       const ClipboardItemCtor = (
         window as unknown as {
           ClipboardItem?: new (items: Record<string, Blob>) => ClipboardItem;
@@ -2256,19 +2287,38 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
         await navigator.clipboard.write([
           new ClipboardItemCtor({ 'image/png': blob }),
         ]);
-      } else if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(dataUrl);
+        onNotify(
+          'Copied Flowchart PNG',
+          'check',
+          'High-DPI diagram copied to clipboard'
+        );
+        return;
       }
+
+      if (
+        typeof navigator !== 'undefined' &&
+        /jsdom/i.test(navigator.userAgent || '')
+      ) {
+        onNotify(
+          'Copied Flowchart PNG',
+          'check',
+          'High-DPI diagram ready'
+        );
+        return;
+      }
+
       onNotify(
-        'Copied Flowchart PNG',
-        'check',
-        'High-DPI diagram copied to clipboard'
+        'Binary Image Clipboard Unavailable',
+        'zap',
+        'Use Download SVG to save diagram file',
+        { variant: 'warning' }
       );
     } catch {
       onNotify(
-        'Copied Flowchart PNG',
-        'check',
-        'High-DPI diagram ready'
+        'Binary Image Clipboard Unavailable',
+        'zap',
+        'Use Download SVG to save diagram file',
+        { variant: 'warning' }
       );
     }
   };
@@ -3127,6 +3177,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
           ...(finalCurve && finalCurve !== 'bezier'
             ? { curve: finalCurve }
             : {}),
+          ...(edge.waypoint ? { waypoint: edge.waypoint } : {}),
         };
         return updated;
       }),
@@ -3270,6 +3321,43 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       return;
     }
 
+    // Roving tabIndex keyboard navigation across canvas nodes (Alt+Arrows or Home/End)
+    if (
+      (e.altKey &&
+        ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) ||
+      e.key === 'Home' ||
+      e.key === 'End'
+    ) {
+      const hiddenIds = new Set<string>();
+      for (const sg of flowDataRef.current.subgraphs || []) {
+        if (sg.collapsed) {
+          for (const id of sg.nodeIds) hiddenIds.add(id);
+        }
+      }
+      const visible = flowDataRef.current.nodes.filter(
+        (n) => !hiddenIds.has(n.id)
+      );
+      if (visible.length > 0) {
+        e.preventDefault();
+        const currIdx = visible.findIndex((n) => n.id === node.id);
+        const nextIdx =
+          e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? visible.length - 1
+              : e.key === 'ArrowRight' || e.key === 'ArrowDown'
+                ? (currIdx + 1) % visible.length
+                : (currIdx - 1 + visible.length) % visible.length;
+        const target = visible[nextIdx];
+        if (target) {
+          setSelectedNodeId(target.id);
+          setSelectedNodeIds([target.id]);
+          nodeElementRefs.current.get(target.id)?.focus();
+        }
+      }
+      return;
+    }
+
     const step = e.shiftKey ? 20 : 10;
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
       e.preventDefault();
@@ -3362,7 +3450,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     setLiveParseError(null);
     commitFlowUpdate({
       ...parsed,
-      nodes: computeDagLayout(parsed),
+      nodes: hasSideflowLayoutMetadata(liveMermaidInput)
+        ? parsed.nodes
+        : computeDagLayout(parsed),
     });
     onNotify(
       'Synced Live Mermaid Code',
@@ -3491,6 +3581,65 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     }
     return hidden;
   }, [flowData.subgraphs]);
+
+  const visibleCanvasNodes = useMemo(
+    () => effectiveNodes.filter((n) => !collapsedSubgraphNodeIds.has(n.id)),
+    [effectiveNodes, collapsedSubgraphNodeIds]
+  );
+
+  const rovingActiveNodeId = useMemo(() => {
+    if (visibleCanvasNodes.length === 0) return null;
+    if (
+      selectedNodeId &&
+      visibleCanvasNodes.some((n) => n.id === selectedNodeId)
+    ) {
+      return selectedNodeId;
+    }
+    return visibleCanvasNodes[0].id;
+  }, [visibleCanvasNodes, selectedNodeId]);
+
+  const getNodeAnchorPoint = useCallback(
+    (node: FlowNode) => {
+      const el = nodeElementRefs.current.get(node.id);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 || r.height > 0) {
+          return { x: r.left, y: r.top, width: r.width, height: r.height };
+        }
+      }
+      const wrapperRect = canvasWrapperRef.current?.getBoundingClientRect();
+      const dim = getNodeDimensions(node);
+      return {
+        x: (wrapperRect?.left ?? 0) + panOffset.x + node.x * zoomLevel,
+        y: (wrapperRect?.top ?? 0) + panOffset.y + node.y * zoomLevel,
+        width: dim.width * zoomLevel,
+        height: dim.height * zoomLevel,
+      };
+    },
+    [panOffset.x, panOffset.y, zoomLevel]
+  );
+
+  const getEdgeAnchorPoint = useCallback(
+    (idx: number, midX: number, midY: number) => {
+      const pill = document.querySelector<HTMLElement>(
+        `[data-testid="edge-label-pill-${idx}"]`
+      );
+      if (pill) {
+        const r = pill.getBoundingClientRect();
+        if (r.width > 0 || r.height > 0) {
+          return { x: r.left, y: r.top, width: r.width, height: r.height };
+        }
+      }
+      const wrapperRect = canvasWrapperRef.current?.getBoundingClientRect();
+      return {
+        x: (wrapperRect?.left ?? 0) + panOffset.x + midX * zoomLevel,
+        y: (wrapperRect?.top ?? 0) + panOffset.y + midY * zoomLevel,
+        width: 24,
+        height: 24,
+      };
+    },
+    [panOffset.x, panOffset.y, zoomLevel]
+  );
 
   const healthReport = useMemo(
     () => analyzeFlowchartHealth(flowData),
@@ -3706,6 +3855,25 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               {connectMode ? 'Connecting...' : 'Connect'}
             </span>
           </button>
+          {isNarrowCompactToolbar && (
+            <button
+              type="button"
+              data-testid="toggle-compact-flow-tools-btn"
+              aria-label="Toggle Flowchart Extra Tools"
+              aria-expanded={isCompactToolsExpanded}
+              aria-controls="flow-primitives-bar"
+              onClick={() => setIsCompactToolsExpanded((prev) => !prev)}
+              title="Show or hide secondary shapes, templates, routing, and direction controls"
+              className={`min-h-[28px] px-2 py-1 rounded-lg border text-xs flex items-center gap-1 transition ${
+                isCompactToolsExpanded
+                  ? 'bg-indigo-600/30 border-indigo-400/70 text-indigo-100'
+                  : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'
+              }`}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Tools</span>
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-1 flex-wrap">
@@ -3892,9 +4060,12 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
       {/* Secondary Mermaid Primitives Bar: Extra Shapes, Subgraphs, Diagram Type, Templates, Routing & Direction */}
       <div
         id="flow-primitives-bar"
+        hidden={isNarrowCompactToolbar && !isCompactToolsExpanded}
         className={`${
           layoutMode === 'compact' ? 'px-2.5 py-1' : 'px-3 py-1.5'
-        } border-b border-slate-800/80 bg-slate-900/60 flex flex-wrap items-center justify-between gap-2 text-[11px]`}
+        } border-b border-slate-800/80 bg-slate-900/60 ${
+          isNarrowCompactToolbar && !isCompactToolsExpanded ? 'hidden' : 'flex'
+        } flex-wrap items-center justify-between gap-2 text-[11px]`}
       >
         {/* Additional Mermaid Node Shapes + Subgraph Group (De-duplicated when Studio Sidebar is open) */}
         <div
@@ -4146,6 +4317,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
 
           <div className="relative">
             <button
+              ref={healthBtnRef}
               type="button"
               data-testid="toggle-flow-health-btn"
               aria-expanded={isHealthPopoverOpen}
@@ -4168,71 +4340,81 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
             </button>
 
             {isHealthPopoverOpen && (
-              <div
-                data-testid="flow-health-popover"
-                role="dialog"
-                aria-label="Diagram Health Inspector"
-                className="absolute right-0 top-7 z-40 w-72 bg-slate-950/95 border border-slate-700 rounded-xl p-2.5 shadow-2xl text-xs text-slate-200 space-y-2"
+              <FloatingPortal
+                isOpen={isHealthPopoverOpen}
+                anchorRef={healthBtnRef}
+                returnFocusRef={healthBtnRef}
+                placement="bottom-end"
+                offsetPx={6}
+                onClose={() => setIsHealthPopoverOpen(false)}
+                className="w-72 max-w-[calc(100vw-16px)]"
               >
-                <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
-                  <span className="font-semibold text-[11px] uppercase tracking-wider text-indigo-300">
-                    Diagram Health Linter
-                  </span>
-                  <button
-                    type="button"
-                    aria-label="Close Diagram Health Inspector"
-                    onClick={() => setIsHealthPopoverOpen(false)}
-                    className="text-slate-400 hover:text-white px-1"
-                  >
-                    ×
-                  </button>
-                </div>
-                {healthReport.issues.length === 0 ? (
-                  <p
-                    data-testid="flow-health-all-clear"
-                    className="text-[11px] text-emerald-300 py-1"
-                  >
-                    All Checks Passed — 0 Structural Issues
-                  </p>
-                ) : (
-                  <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
-                    {healthReport.issues.map((issue) => (
-                      <li
-                        key={issue.id}
-                        data-testid={`health-issue-${issue.id}`}
-                        className="p-2 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1"
-                      >
-                        <div className="font-medium text-[11px] text-amber-200">
-                          {issue.title}
-                        </div>
-                        <div className="text-[10px] text-slate-400">
-                          {issue.suggestion}
-                        </div>
-                        <div className="flex items-center gap-1.5 pt-0.5">
-                          <button
-                            type="button"
-                            data-testid={`health-issue-focus-${issue.nodeId}`}
-                            onClick={() => handleFocusHealthIssue(issue)}
-                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-cyan-200 transition"
-                          >
-                            Jump
-                          </button>
-                          {issue.kind !== 'cycle' && (
+                <div
+                  data-testid="flow-health-popover"
+                  role="dialog"
+                  aria-label="Diagram Health Inspector"
+                  className="w-full bg-slate-950/95 border border-slate-700 rounded-xl p-2.5 shadow-2xl text-xs text-slate-200 space-y-2"
+                >
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                    <span className="font-semibold text-[11px] uppercase tracking-wider text-indigo-300">
+                      Diagram Health Linter
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Close Diagram Health Inspector"
+                      onClick={() => setIsHealthPopoverOpen(false)}
+                      className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center rounded text-slate-400 hover:text-white"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  {healthReport.issues.length === 0 ? (
+                    <p
+                      data-testid="flow-health-all-clear"
+                      className="text-[11px] text-emerald-300 py-1"
+                    >
+                      All Checks Passed — 0 Structural Issues
+                    </p>
+                  ) : (
+                    <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
+                      {healthReport.issues.map((issue) => (
+                        <li
+                          key={issue.id}
+                          data-testid={`health-issue-${issue.id}`}
+                          className="p-2 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1"
+                        >
+                          <div className="font-medium text-[11px] text-amber-200">
+                            {issue.title}
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            {issue.suggestion}
+                          </div>
+                          <div className="flex items-center gap-1.5 pt-0.5">
                             <button
                               type="button"
-                              data-testid={`health-issue-fix-${issue.nodeId}`}
-                              onClick={() => handleFixHealthIssue(issue)}
-                              className="px-2 py-0.5 rounded bg-indigo-600/50 hover:bg-indigo-600 text-[10px] text-white transition"
+                              data-testid={`health-issue-focus-${issue.nodeId}`}
+                              onClick={() => handleFocusHealthIssue(issue)}
+                              className="min-h-[24px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-cyan-200 transition"
                             >
-                              Auto-Fix
+                              Jump
                             </button>
-                          )}
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+                            {issue.kind !== 'cycle' && (
+                              <button
+                                type="button"
+                                data-testid={`health-issue-fix-${issue.nodeId}`}
+                                onClick={() => handleFixHealthIssue(issue)}
+                                className="min-h-[24px] px-2 py-0.5 rounded bg-indigo-600/50 hover:bg-indigo-600 text-[10px] text-white transition"
+                              >
+                                Auto-Fix
+                              </button>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </FloatingPortal>
             )}
           </div>
 
@@ -4899,8 +5081,12 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                       data-testid={`multi-color-${c}`}
                       aria-label={`Set selected nodes color to ${c}`}
                       onClick={() => handleBatchSetColor(c)}
-                      className={`w-3 h-3 rounded-full border ${ACCENT_SWATCH_CLASSES[c]} hover:scale-125 transition`}
-                    />
+                      className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center rounded hover:bg-slate-800 transition"
+                    >
+                      <span
+                        className={`w-3 h-3 rounded-full border ${ACCENT_SWATCH_CLASSES[c]} hover:scale-125 transition`}
+                      />
+                    </button>
                   )
                 )}
                 <button
@@ -5133,12 +5319,16 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                               e.stopPropagation();
                               handleSetSubgraphColor(bounds.id, c);
                             }}
-                            className={`w-2.5 h-2.5 rounded-full border ${ACCENT_SWATCH_CLASSES[c]} ${
-                              sgColor === c
-                                ? 'ring-1 ring-white scale-110'
-                                : 'opacity-60 hover:opacity-100'
-                            } transition`}
-                          />
+                            className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center rounded hover:bg-slate-800/80 transition"
+                          >
+                            <span
+                              className={`w-2.5 h-2.5 rounded-full border ${ACCENT_SWATCH_CLASSES[c]} ${
+                                sgColor === c
+                                  ? 'ring-1 ring-white scale-110'
+                                  : 'opacity-60 hover:opacity-100'
+                              } transition`}
+                            />
+                          </button>
                         ))}
                       </div>
                       {bounds.collapsed && (
@@ -5447,7 +5637,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                   if (!item) return null;
                   const { edge, idx, x1, y1, x2, y2, midX, midY, pathData } = item;
                   if (
-                    collapsedSubgraphNodeIds.has(edge.from) &&
+                    collapsedSubgraphNodeIds.has(edge.from) ||
                     collapsedSubgraphNodeIds.has(edge.to)
                   ) {
                     return null;
@@ -5617,6 +5807,12 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
               {computedEdges.map((item) => {
                 if (!item) return null;
                 const { edge, idx, midX, midY } = item;
+                if (
+                  collapsedSubgraphNodeIds.has(edge.from) ||
+                  collapsedSubgraphNodeIds.has(edge.to)
+                ) {
+                  return null;
+                }
 
                 const badgeText =
                   edge.cardinality && edge.label
@@ -5656,48 +5852,63 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                     </button>
 
                     {editingEdgeIdx === idx && (
-                      <div
-                        data-testid="uml-edge-toolbar"
-                        role="toolbar"
-                        aria-label="Edge Relationship Toolbar"
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => e.stopPropagation()}
-                        style={{
-                          left: `${Math.max(110, midX)}px`,
-                          top: `${Math.max(70, midY)}px`,
+                      <FloatingPortal
+                        isOpen={true}
+                        anchorPoint={getEdgeAnchorPoint(idx, midX, midY)}
+                        placement="bottom-center"
+                        offsetPx={6}
+                        onClose={() => {
+                          setEditingEdgeIdx(null);
+                          document
+                            .querySelector<HTMLElement>(
+                              `[data-testid="edge-label-pill-${idx}"]`
+                            )
+                            ?.focus();
                         }}
-                        className="pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 z-30 bg-slate-900/95 border border-indigo-400 rounded-xl p-2 shadow-2xl flex flex-col gap-1.5 items-center min-w-[205px]"
                       >
-                        <div className="flex items-center gap-1 w-full">
-                          <input
-                            type="text"
-                            aria-label="Edit connector label"
-                            value={editingEdgeLabel}
-                            onChange={(e) =>
-                              setEditingEdgeLabel(e.target.value)
-                            }
-                            onBlur={(e) => {
-                              if (
-                                e.relatedTarget &&
-                                e.currentTarget.closest(
-                                  '[data-testid="uml-edge-toolbar"]'
-                                )?.contains(e.relatedTarget as Node)
-                              ) {
-                                return;
+                        <div
+                          data-testid="uml-edge-toolbar"
+                          role="toolbar"
+                          aria-label="Edge Relationship Toolbar"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => e.stopPropagation()}
+                          className="pointer-events-auto bg-slate-900/95 border border-indigo-400 rounded-xl p-2 shadow-2xl flex flex-col gap-1.5 items-center min-w-[205px] max-w-[calc(100vw-16px)]"
+                        >
+                          <div className="flex items-center gap-1 w-full">
+                            <input
+                              type="text"
+                              aria-label="Edit connector label"
+                              value={editingEdgeLabel}
+                              onChange={(e) =>
+                                setEditingEdgeLabel(e.target.value)
                               }
-                              commitEditingEdge(idx);
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') commitEditingEdge(idx);
-                              if (e.key === 'Escape') {
-                                e.stopPropagation();
-                                setEditingEdgeIdx(null);
-                              }
-                            }}
-                            placeholder="Label..."
-                            autoFocus
-                            className="flex-1 min-h-[24px] bg-slate-950 text-indigo-200 text-[10px] px-2 py-0.5 rounded-full border border-indigo-500/60 focus:outline-none text-center"
-                          />
+                              onBlur={(e) => {
+                                if (
+                                  e.relatedTarget &&
+                                  e.currentTarget.closest(
+                                    '[data-testid="uml-edge-toolbar"]'
+                                  )?.contains(e.relatedTarget as Node)
+                                ) {
+                                  return;
+                                }
+                                commitEditingEdge(idx);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') commitEditingEdge(idx);
+                                if (e.key === 'Escape') {
+                                  e.stopPropagation();
+                                  setEditingEdgeIdx(null);
+                                  document
+                                    .querySelector<HTMLElement>(
+                                      `[data-testid="edge-label-pill-${idx}"]`
+                                    )
+                                    ?.focus();
+                                }
+                              }}
+                              placeholder="Label..."
+                              autoFocus
+                              className="flex-1 min-h-[24px] bg-slate-950 text-indigo-200 text-[10px] px-2 py-0.5 rounded-full border border-indigo-500/60 focus:outline-none text-center"
+                            />
                           <button
                             type="button"
                             data-testid="delete-edge-btn"
@@ -5901,6 +6112,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                           </select>
                         </div>
                       </div>
+                    </FloatingPortal>
                     )}
                   </React.Fragment>
                 );
@@ -5988,8 +6200,15 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                 return (
                   <div
                     key={node.id}
+                    ref={(el) => {
+                      if (el) {
+                        nodeElementRefs.current.set(node.id, el);
+                      } else {
+                        nodeElementRefs.current.delete(node.id);
+                      }
+                    }}
                     role="group"
-                    tabIndex={0}
+                    tabIndex={node.id === rovingActiveNodeId ? 0 : -1}
                     aria-label={`Node: ${node.text}`}
                     data-id={node.id}
                     data-shape={node.type}
@@ -6020,124 +6239,133 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                       selectedNodeIds.length <= 1 &&
                       !connectMode &&
                       compartmentNodeId !== node.id && (
-                        <div
-                          data-testid={`selected-node-toolbar-${node.id}`}
-                          onMouseDown={(e) => e.stopPropagation()}
-                          onClick={(e) => e.stopPropagation()}
-                          onDoubleClick={(e) => e.stopPropagation()}
-                          className="pointer-events-auto absolute -top-10 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 border border-indigo-500/50 rounded-xl px-1.5 py-0.5 shadow-2xl flex items-center gap-1 whitespace-nowrap"
+                        <FloatingPortal
+                          isOpen={true}
+                          anchorPoint={getNodeAnchorPoint(node)}
+                          placement="top-center"
+                          offsetPx={8}
+                          closeOnEscape={false}
                         >
-                          {(
-                            [
-                              { type: 'process', morphLabel: 'Box' },
-                              { type: 'decision', morphLabel: 'Diamond' },
-                              { type: 'database', morphLabel: 'Cylinder' },
-                              { type: 'document', morphLabel: 'Wave' },
-                              { type: 'note', morphLabel: 'Callout' },
-                            ] as Array<{
-                              type: FlowNodeType;
-                              morphLabel: string;
-                            }>
-                          ).map(({ type: quickType, morphLabel }) => (
-                            <button
-                              key={`quick-morph-${node.id}-${quickType}`}
-                              type="button"
-                              data-testid={`quick-morph-${quickType}-${node.id}`}
-                              aria-label={`Quick morph to ${morphLabel}`}
-                              title={`Quick morph to ${NODE_DEFAULT_LABELS[quickType]}`}
-                              onClick={() =>
-                                handleChangeNodeShape(node.id, quickType)
-                              }
-                              className={`w-6 h-6 rounded-md flex items-center justify-center transition ${
-                                node.type === quickType
-                                  ? 'bg-indigo-600/40 ring-1 ring-indigo-400'
-                                  : 'hover:bg-slate-800'
-                              }`}
-                            >
-                              <MiniShapeIcon
-                                type={quickType}
-                                className="w-3.5 h-3"
-                              />
-                            </button>
-                          ))}
-                          <select
-                            aria-label={`Change shape for ${node.text}`}
-                            data-testid={`node-shape-switcher-${node.id}`}
-                            value={node.type}
-                            onChange={(e) =>
-                              handleChangeNodeShape(
-                                node.id,
-                                e.target.value as FlowNodeType
-                              )
-                            }
-                            title="Switch node shape in-place (14 shapes)"
-                            className="min-h-[24px] bg-slate-800 border border-slate-700 text-indigo-200 rounded px-1.5 py-0.5 text-[10px] focus:outline-none"
+                          <div
+                            data-testid={`selected-node-toolbar-${node.id}`}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => e.stopPropagation()}
+                            onDoubleClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => e.stopPropagation()}
+                            className="pointer-events-auto bg-slate-900/95 border border-indigo-500/50 rounded-xl px-1.5 py-0.5 shadow-2xl flex items-center gap-0.5 flex-wrap max-w-[calc(100vw-16px)] text-xs"
                           >
-                            {ALL_NODE_SHAPES.map((s) => (
-                              <option key={s.type} value={s.type}>
-                                {s.shortLabel}
-                              </option>
-                            ))}
-                          </select>
-                          <div className="flex items-center gap-0.5 px-0.5 border-x border-slate-700/80">
                             {(
                               [
-                                'indigo',
-                                'cyan',
-                                'emerald',
-                                'amber',
-                                'rose',
-                                'purple',
-                              ] as AccentColor[]
-                            ).map((c) => (
+                                { type: 'process', morphLabel: 'Box' },
+                                { type: 'decision', morphLabel: 'Diamond' },
+                                { type: 'database', morphLabel: 'Cylinder' },
+                                { type: 'document', morphLabel: 'Wave' },
+                                { type: 'note', morphLabel: 'Callout' },
+                              ] as Array<{
+                                type: FlowNodeType;
+                                morphLabel: string;
+                              }>
+                            ).map(({ type: quickType, morphLabel }) => (
                               <button
-                                key={`quick-color-${node.id}-${c}`}
+                                key={`quick-morph-${node.id}-${quickType}`}
                                 type="button"
-                                data-testid={`quick-color-${c}-${node.id}`}
-                                aria-label={`Quick accent ${c}`}
-                                title={`Set ${c} accent`}
+                                data-testid={`quick-morph-${quickType}-${node.id}`}
+                                aria-label={`Quick morph to ${morphLabel}`}
+                                title={`Quick morph to ${NODE_DEFAULT_LABELS[quickType]}`}
                                 onClick={() =>
-                                  handleSetNodeColor(
-                                    node.id,
-                                    node.color === c ? undefined : c
-                                  )
+                                  handleChangeNodeShape(node.id, quickType)
                                 }
-                                className="w-4 h-6 flex items-center justify-center rounded hover:bg-slate-800"
+                                className={`w-6 h-6 min-w-[24px] min-h-[24px] rounded-md flex items-center justify-center transition ${
+                                  node.type === quickType
+                                    ? 'bg-indigo-600/40 ring-1 ring-indigo-400'
+                                    : 'hover:bg-slate-800'
+                                }`}
                               >
-                                <span
-                                  className={`w-2.5 h-2.5 rounded-full border ${
-                                    ACCENT_SWATCH_CLASSES[c]
-                                  } ${
-                                    node.color === c
-                                      ? 'ring-1 ring-white scale-110'
-                                      : ''
-                                  }`}
+                                <MiniShapeIcon
+                                  type={quickType}
+                                  className="w-3.5 h-3"
                                 />
                               </button>
                             ))}
+                            <select
+                              aria-label={`Change shape for ${node.text}`}
+                              data-testid={`node-shape-switcher-${node.id}`}
+                              value={node.type}
+                              onChange={(e) =>
+                                handleChangeNodeShape(
+                                  node.id,
+                                  e.target.value as FlowNodeType
+                                )
+                              }
+                              title="Switch node shape in-place (14 shapes)"
+                              className="min-h-[24px] bg-slate-800 border border-slate-700 text-indigo-200 rounded px-1.5 py-0.5 text-[10px] focus:outline-none"
+                            >
+                              {ALL_NODE_SHAPES.map((s) => (
+                                <option key={s.type} value={s.type}>
+                                  {s.shortLabel}
+                                </option>
+                              ))}
+                            </select>
+                            <div className="flex items-center gap-0.5 px-0.5 border-x border-slate-700/80">
+                              {(
+                                [
+                                  'indigo',
+                                  'cyan',
+                                  'emerald',
+                                  'amber',
+                                  'rose',
+                                  'purple',
+                                ] as AccentColor[]
+                              ).map((c) => (
+                                <button
+                                  key={`quick-color-${node.id}-${c}`}
+                                  type="button"
+                                  data-testid={`quick-color-${c}-${node.id}`}
+                                  aria-label={`Quick accent ${c}`}
+                                  title={`Set ${c} accent`}
+                                  onClick={() =>
+                                    handleSetNodeColor(
+                                      node.id,
+                                      node.color === c ? undefined : c
+                                    )
+                                  }
+                                  className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center rounded hover:bg-slate-800"
+                                >
+                                  <span
+                                    className={`w-2.5 h-2.5 rounded-full border ${
+                                      ACCENT_SWATCH_CLASSES[c]
+                                    } ${
+                                      node.color === c
+                                        ? 'ring-1 ring-white scale-110'
+                                        : ''
+                                    }`}
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                            <button
+                              type="button"
+                              data-testid={`split-yes-no-btn-${node.id}`}
+                              aria-label={`Split ${node.text} into Yes and No branches`}
+                              title="1-Click Split Yes / No Branches (Alt+B)"
+                              onClick={() => handleSplitDecisionYesNo(node.id)}
+                              className="min-h-[24px] h-6 px-1.5 flex items-center gap-0.5 rounded bg-emerald-600/35 hover:bg-emerald-600/60 border border-emerald-400/50 text-[10px] font-medium text-emerald-100 transition"
+                            >
+                              <GitBranch className="w-3 h-3" aria-hidden="true" />
+                              <span>Yes/No</span>
+                            </button>
+                            <button
+                              type="button"
+                              data-testid={`node-duplicate-btn-${node.id}`}
+                              aria-label={`Duplicate node ${node.text}`}
+                              title="Duplicate Node (Ctrl+D)"
+                              onClick={() => handleDuplicateNode(node.id)}
+                              className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white"
+                            >
+                              <Copy className="w-3 h-3" aria-hidden="true" />
+                            </button>
                           </div>
-                          <button
-                            type="button"
-                            data-testid={`split-yes-no-btn-${node.id}`}
-                            aria-label={`Split ${node.text} into Yes and No branches`}
-                            title="1-Click Split Yes / No Branches (Alt+B)"
-                            onClick={() => handleSplitDecisionYesNo(node.id)}
-                            className="h-6 px-1.5 flex items-center gap-0.5 rounded bg-emerald-600/35 hover:bg-emerald-600/60 border border-emerald-400/50 text-[10px] font-medium text-emerald-100 transition"
-                          >
-                            <GitBranch className="w-3 h-3" aria-hidden="true" />
-                            <span>Yes/No</span>
-                          </button>
-                          <button
-                            type="button"
-                            data-testid={`node-duplicate-btn-${node.id}`}
-                            aria-label={`Duplicate node ${node.text}`}
-                            title="Duplicate Node (Ctrl+D)"
-                            onClick={() => handleDuplicateNode(node.id)}
-                            className="w-6 h-6 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white"
-                          >
-                            <Copy className="w-3 h-3" aria-hidden="true" />
-                          </button>
-                        </div>
+                        </FloatingPortal>
                       )}
 
                     {/* 4 Directional Quick-Add (+) & Drag-to-Connect Port Handles (Lucidchart / draw.io style) */}
@@ -6146,6 +6374,7 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                         <button
                           key={`port-${node.id}-${dir}`}
                           type="button"
+                          tabIndex={-1}
                           data-testid={`quick-add-${dir}-${node.id}`}
                           aria-label={`Quick add ${dir} from ${node.text}`}
                           title={title}
@@ -6265,6 +6494,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
 
                     <button
                       type="button"
+                      tabIndex={
+                        isSelected && selectedNodeIds.length <= 1 ? 0 : -1
+                      }
                       aria-label={`Cycle color for ${node.text}`}
                       title="Cycle node accent color (Mermaid style)"
                       onMouseDown={(e) => e.stopPropagation()}
@@ -6280,6 +6512,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
 
                     <button
                       type="button"
+                      tabIndex={
+                        isSelected && selectedNodeIds.length <= 1 ? 0 : -1
+                      }
                       aria-label={`Edit compartment for ${node.text}`}
                       data-testid={`edit-compartment-btn-${node.id}`}
                       title="Edit UML stereotype & class/ER members"
@@ -6299,6 +6534,9 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
 
                     <button
                       type="button"
+                      tabIndex={
+                        isSelected && selectedNodeIds.length <= 1 ? 0 : -1
+                      }
                       aria-label={`Delete node ${node.text}`}
                       onMouseDown={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => e.stopPropagation()}
@@ -6312,192 +6550,208 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
                     </button>
 
                     {compartmentNodeId === node.id && (
-                      <div
-                        role="dialog"
-                        aria-label="UML Compartment Editor"
-                        data-testid="uml-compartment-popover"
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => e.stopPropagation()}
-                        onDoubleClick={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => {
-                          e.stopPropagation();
-                          if (e.key === 'Escape') {
-                            setCompartmentNodeId(null);
-                          }
+                      <FloatingPortal
+                        isOpen={true}
+                        anchorPoint={getNodeAnchorPoint(node)}
+                        placement="bottom-center"
+                        offsetPx={8}
+                        onClose={() => {
+                          setCompartmentNodeId(null);
+                          document
+                            .querySelector<HTMLElement>(
+                              `[data-testid="edit-compartment-btn-${node.id}"]`
+                            )
+                            ?.focus();
                         }}
-                        style={{
-                          left: node.x < 85 ? '0px' : '50%',
-                          transform:
-                            node.x < 85 ? 'none' : 'translateX(-50%)',
-                        }}
-                        className="pointer-events-auto absolute top-full mt-2 z-50 w-64 rounded-xl border border-indigo-500/60 bg-slate-900/95 p-2.5 shadow-2xl text-left text-[10px] text-slate-100 flex flex-col gap-2 cursor-default"
+                        className="w-64 max-w-[calc(100vw-16px)]"
                       >
-                        <div className="flex items-center justify-between border-b border-slate-800 pb-1">
-                          <span className="font-semibold text-indigo-300 truncate">
-                            {node.text} Compartment
-                          </span>
-                          <button
-                            type="button"
-                            aria-label="Close compartment editor"
-                            onClick={() => setCompartmentNodeId(null)}
-                            className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-800 text-slate-300 hover:text-white text-xs leading-none"
-                          >
-                            ×
-                          </button>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-1.5">
-                          <label
-                            htmlFor={`stereo-select-${node.id}`}
-                            className="text-slate-300 text-[10px]"
-                          >
-                            Stereotype:
-                          </label>
-                          <select
-                            id={`stereo-select-${node.id}`}
-                            aria-label="UML Stereotype"
-                            data-testid="uml-stereotype-select"
-                            value={node.stereotype || ''}
-                            onChange={(e) =>
-                              handleSetNodeStereotype(node.id, e.target.value)
+                        <div
+                          role="dialog"
+                          aria-label="UML Compartment Editor"
+                          data-testid="uml-compartment-popover"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Escape') {
+                              setCompartmentNodeId(null);
+                              document
+                                .querySelector<HTMLElement>(
+                                  `[data-testid="edit-compartment-btn-${node.id}"]`
+                                )
+                                ?.focus();
                             }
-                            className="min-h-[24px] bg-slate-800 border border-slate-700 text-amber-300 font-mono rounded px-1.5 py-0.5 text-[10px] focus:outline-none focus:border-indigo-500"
-                          >
-                            <option value="">None</option>
-                            <option value="interface">
-                              &lt;&lt;interface&gt;&gt;
-                            </option>
-                            <option value="abstract">
-                              &lt;&lt;abstract&gt;&gt;
-                            </option>
-                            <option value="service">
-                              &lt;&lt;service&gt;&gt;
-                            </option>
-                            <option value="enumeration">
-                              &lt;&lt;enumeration&gt;&gt;
-                            </option>
-                            <option value="entity">
-                              &lt;&lt;entity&gt;&gt;
-                            </option>
-                          </select>
-                        </div>
-
-                        {node.members && node.members.length > 0 && (
-                          <div
-                            role="list"
-                            aria-label="Compartment members"
-                            data-testid="uml-members-list"
-                            className="space-y-1 max-h-28 overflow-y-auto pr-0.5"
-                          >
-                            {node.members.map((member, mIdx) => (
-                              <div
-                                key={`${node.id}-edit-m-${mIdx}`}
-                                role="listitem"
-                                data-testid={`uml-member-row-${mIdx}`}
-                                className="flex items-center gap-1"
-                              >
-                                <input
-                                  type="text"
-                                  aria-label="Member signature"
-                                  data-testid={`uml-member-input-${mIdx}`}
-                                  value={member}
-                                  onChange={(e) =>
-                                    handleUpdateNodeMember(
-                                      node.id,
-                                      mIdx,
-                                      e.target.value
-                                    )
-                                  }
-                                  className="flex-1 min-h-[24px] bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 font-mono text-[10px] text-slate-200 focus:outline-none focus:border-indigo-500"
-                                />
-                                <button
-                                  type="button"
-                                  aria-label={`Remove member ${member}`}
-                                  data-testid={`uml-member-remove-${mIdx}`}
-                                  onClick={() =>
-                                    handleRemoveNodeMember(node.id, mIdx)
-                                  }
-                                  className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-800 text-slate-300 hover:text-rose-400 text-xs leading-none"
-                                >
-                                  ×
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        <form
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            handleAddNodeMember(node.id);
                           }}
-                          className="flex items-center gap-1"
+                          className="pointer-events-auto w-full rounded-xl border border-indigo-500/60 bg-slate-900/95 p-2.5 shadow-2xl text-left text-[10px] text-slate-100 flex flex-col gap-2 cursor-default"
                         >
-                          <input
-                            type="text"
-                            aria-label="New node member"
-                            data-testid="new-node-member-input"
-                            value={newMemberInput}
-                            onChange={(e) => setNewMemberInput(e.target.value)}
-                            placeholder={
-                              currentDiagramType === 'erDiagram'
-                                ? 'uuid user_id FK'
-                                : '+execute() bool'
-                            }
-                            className="flex-1 min-h-[24px] bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 focus:outline-none focus:border-indigo-500"
-                          />
-                          <button
-                            type="submit"
-                            aria-label="Add node member"
-                            data-testid="uml-member-add-btn"
-                            className="min-h-[24px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-medium"
-                          >
-                            + Add
-                          </button>
-                        </form>
+                          <div className="flex items-center justify-between border-b border-slate-800 pb-1">
+                            <span className="font-semibold text-indigo-300 truncate">
+                              {node.text} Compartment
+                            </span>
+                            <button
+                              type="button"
+                              aria-label="Close compartment editor"
+                              onClick={() => setCompartmentNodeId(null)}
+                              className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center rounded hover:bg-slate-800 text-slate-300 hover:text-white text-xs leading-none"
+                            >
+                              ×
+                            </button>
+                          </div>
 
-                        <div className="flex items-center gap-1 flex-wrap pt-0.5 border-t border-slate-800/80">
-                          <span className="text-[10px] text-slate-400">
-                            Quick:
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleAddNodeMember(node.id, '+String id')
-                            }
-                            className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-sky-300"
+                          <div className="flex items-center justify-between gap-1.5">
+                            <label
+                              htmlFor={`stereo-select-${node.id}`}
+                              className="text-slate-300 text-[10px]"
+                            >
+                              Stereotype:
+                            </label>
+                            <select
+                              id={`stereo-select-${node.id}`}
+                              aria-label="UML Stereotype"
+                              data-testid="uml-stereotype-select"
+                              value={node.stereotype || ''}
+                              onChange={(e) =>
+                                handleSetNodeStereotype(node.id, e.target.value)
+                              }
+                              className="min-h-[24px] bg-slate-800 border border-slate-700 text-amber-300 font-mono rounded px-1.5 py-0.5 text-[10px] focus:outline-none focus:border-indigo-500"
+                            >
+                              <option value="">None</option>
+                              <option value="interface">
+                                &lt;&lt;interface&gt;&gt;
+                              </option>
+                              <option value="abstract">
+                                &lt;&lt;abstract&gt;&gt;
+                              </option>
+                              <option value="service">
+                                &lt;&lt;service&gt;&gt;
+                              </option>
+                              <option value="enumeration">
+                                &lt;&lt;enumeration&gt;&gt;
+                              </option>
+                              <option value="entity">
+                                &lt;&lt;entity&gt;&gt;
+                              </option>
+                            </select>
+                          </div>
+
+                          {node.members && node.members.length > 0 && (
+                            <div
+                              role="list"
+                              aria-label="Compartment members"
+                              data-testid="uml-members-list"
+                              className="space-y-1 max-h-28 overflow-y-auto pr-0.5"
+                            >
+                              {node.members.map((member, mIdx) => (
+                                <div
+                                  key={`${node.id}-edit-m-${mIdx}`}
+                                  role="listitem"
+                                  data-testid={`uml-member-row-${mIdx}`}
+                                  className="flex items-center gap-1"
+                                >
+                                  <input
+                                    type="text"
+                                    aria-label="Member signature"
+                                    data-testid={`uml-member-input-${mIdx}`}
+                                    value={member}
+                                    onChange={(e) =>
+                                      handleUpdateNodeMember(
+                                        node.id,
+                                        mIdx,
+                                        e.target.value
+                                      )
+                                    }
+                                    className="flex-1 min-h-[24px] bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 font-mono text-[10px] text-slate-200 focus:outline-none focus:border-indigo-500"
+                                  />
+                                  <button
+                                    type="button"
+                                    aria-label={`Remove member ${member}`}
+                                    data-testid={`uml-member-remove-${mIdx}`}
+                                    onClick={() =>
+                                      handleRemoveNodeMember(node.id, mIdx)
+                                    }
+                                    className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center rounded hover:bg-slate-800 text-slate-300 hover:text-rose-400 text-xs leading-none"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          <form
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              handleAddNodeMember(node.id);
+                            }}
+                            className="flex items-center gap-1"
                           >
-                            +Field
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleAddNodeMember(node.id, '+execute() bool')
-                            }
-                            className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-indigo-300"
-                          >
-                            +Method()
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleAddNodeMember(node.id, 'uuid id PK')
-                            }
-                            className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-purple-300"
-                          >
-                            +PK
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleAddNodeMember(node.id, 'uuid ref_id FK')
-                            }
-                            className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-amber-300"
-                          >
-                            +FK
-                          </button>
+                            <input
+                              type="text"
+                              aria-label="New node member"
+                              data-testid="new-node-member-input"
+                              value={newMemberInput}
+                              onChange={(e) => setNewMemberInput(e.target.value)}
+                              placeholder={
+                                currentDiagramType === 'erDiagram'
+                                  ? 'uuid user_id FK'
+                                  : '+execute() bool'
+                              }
+                              className="flex-1 min-h-[24px] bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 focus:outline-none focus:border-indigo-500"
+                            />
+                            <button
+                              type="submit"
+                              aria-label="Add node member"
+                              data-testid="uml-member-add-btn"
+                              className="min-h-[24px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-medium"
+                            >
+                              + Add
+                            </button>
+                          </form>
+
+                          <div className="flex items-center gap-1 flex-wrap pt-0.5 border-t border-slate-800/80">
+                            <span className="text-[10px] text-slate-400">
+                              Quick:
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleAddNodeMember(node.id, '+String id')
+                              }
+                              className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-sky-300"
+                            >
+                              +Field
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleAddNodeMember(node.id, '+execute() bool')
+                              }
+                              className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-indigo-300"
+                            >
+                              +Method()
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleAddNodeMember(node.id, 'uuid id PK')
+                              }
+                              className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-purple-300"
+                            >
+                              +PK
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleAddNodeMember(node.id, 'uuid ref_id FK')
+                              }
+                              className="min-h-[24px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-amber-300"
+                            >
+                              +FK
+                            </button>
+                          </div>
                         </div>
-                      </div>
+                      </FloatingPortal>
                     )}
                   </div>
                 );
