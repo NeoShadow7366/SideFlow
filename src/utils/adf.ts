@@ -171,6 +171,46 @@ export function isSafeAdfUrl(rawUrl?: string | null): boolean {
   return false;
 }
 
+export function isSafeAdfMediaUrl(rawUrl?: string | null): boolean {
+  if (isSafeAdfUrl(rawUrl)) return true;
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
+  const trimmed = rawUrl.trim();
+  if (trimmed.length > 131_072) return false;
+
+  // 1. Binary raster data URLs (PNG/JPEG/GIF/WebP)
+  if (
+    /^data:image\/(?:png|jpeg|jpg|gif|webp)(?:;charset=utf-8)?(?:;base64)?,[A-Za-z0-9+/=%.,_~-]+$/i.test(
+      trimmed
+    )
+  ) {
+    return true;
+  }
+
+  // 2. SVG data URLs: disallow ;base64 (fail closed on malformed percent-encoding & dangerous SVG constructs)
+  const svgMatch =
+    /^data:image\/svg\+xml(?:;(?:charset=)?utf-?8)?,([A-Za-z0-9+/=%.,_~()!*' -]+)$/i.exec(
+      trimmed
+    );
+  if (svgMatch) {
+    let decodedSvg = '';
+    try {
+      decodedSvg = decodeURIComponent(svgMatch[1]);
+    } catch {
+      return false;
+    }
+    if (
+      /<\s*(?:script|foreignobject|iframe|object|embed)\b|javascript:|on[a-z]+\s*=|&#|(?:xlink:)?href\s*=\s*["']?\s*(?!#)/i.test(
+        decodedSvg
+      )
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 export function sanitizeHexColor(rawColor?: string | null): string | null {
   if (!rawColor || typeof rawColor !== 'string') return null;
   const trimmed = rawColor.trim();
@@ -961,10 +1001,13 @@ export function normalizeAdfBlockNode(
     }
     case 'codeBlock': {
       const rawAttrs = (node.attrs as Record<string, unknown>) || {};
-      const language =
-        typeof rawAttrs.language === 'string' && rawAttrs.language.trim()
+      const candidateLang =
+        typeof rawAttrs.language === 'string'
           ? rawAttrs.language.trim().toLowerCase()
-          : undefined;
+          : '';
+      const language = /^[a-z0-9_+#.-]{1,32}$/.test(candidateLang)
+        ? candidateLang
+        : undefined;
       const rawContent = Array.isArray(node.content) ? node.content : [];
       const joined = rawContent
         .map((c) =>
@@ -1090,7 +1133,7 @@ export function normalizeAdfBlockNode(
       const firstMedia = (rawMediaList[0] as Record<string, unknown>) || {};
       const mAttrs = (firstMedia.attrs as Record<string, unknown>) || {};
       const rawUrl = typeof mAttrs.url === 'string' ? mAttrs.url.trim() : '';
-      if (mAttrs.type === 'external' && isSafeAdfUrl(rawUrl)) {
+      if (mAttrs.type === 'external' && isSafeAdfMediaUrl(rawUrl)) {
         return {
           type: 'mediaSingle',
           attrs: {
@@ -1280,14 +1323,42 @@ export function createDefaultAdfLayout(columns: 2 | 3 = 2): AdfLayoutSectionNode
  * - Mention: @[Display Name] or @username
  * - Emoji shortname: :rocket:
  */
+const MAX_SERIALIZE_DEPTH = 32;
+
+function unescapeHtmlEntities(raw: string): string {
+  return raw
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function escapeInlineHtmlBody(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 export function parseInlineMarkdownToAdf(
   text: string,
-  inheritedMarks: AdfMark[] = []
+  inheritedMarks: AdfMark[] = [],
+  depth = 0
 ): AdfInlineNode[] {
   if (!text) return [];
+  if (depth >= MAX_SERIALIZE_DEPTH) {
+    return normalizeInlineNodes([
+      {
+        type: 'text',
+        text: unescapeHtmlEntities(text),
+        marks: normalizeAdfMarks(inheritedMarks),
+      },
+    ]);
+  }
 
   const tokenRegex =
-    /(`[^`\n]+`|\[STATUS:\s*([^\]|]+?)(?:\s*\|\s*(neutral|purple|blue|red|yellow|green))?\s*\]|\[DATE:\s*([^\]]+?)\s*\]|\[([^\]]+)\]\(([^)\s]+)\)|\*\*\*([^*\n]+)\*\*\*|\*\*([^*\n]+)\*\*|__([^_\n]+)__|<u>([\s\S]+?)<\/u>|\+\+([^+\n]+)\+\+|~~([^~\n]+)~~|<sub>([\s\S]+?)<\/sub>|<sup>([\s\S]+?)<\/sup>|<span\s+style="color:\s*(#[0-9a-fA-F]{3,6})"\s*>([\s\S]+?)<\/span>|==([^=\n]+)==|\*([^*\n]+)\*|(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])|@\[([^\]]+)\]|(?<![a-zA-Z0-9])@([a-zA-Z0-9._-]{2,32})|:(check_mark|cross_mark|warning|rocket|fire|bulb|pushpin|eyes|thumbsup|tada|bug|wrench):)/g;
+    /(`+[^`\n]+`+|\[STATUS:\s*([^\]|]+?)(?:\s*\|\s*(neutral|purple|blue|red|yellow|green))?\s*\]|\[DATE:\s*([^\]]+?)\s*\]|\[([^\]]+)\]\(([^)\s]+)\)|\*\*\*([^*\n]+)\*\*\*|\*\*([^*\n]+)\*\*|__([^_\n]+)__|<u>([\s\S]+?)<\/u>|\+\+([^+\n]+)\+\+|~~([^~\n]+)~~|<sub>([\s\S]+?)<\/sub>|<sup>([\s\S]+?)<\/sup>|<span\s+style="color:\s*(#[0-9a-fA-F]{3,6})"\s*>([\s\S]+?)<\/span>|==([^=\n]+)==|\*([^*\n]+)\*|(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])|@\[([^\]]+)\](?:\(([a-zA-Z0-9._:-]+)\))?|(?<![a-zA-Z0-9])@([a-zA-Z0-9._-]{2,32})|:(check_mark|cross_mark|warning|rocket|fire|bulb|pushpin|eyes|thumbsup|tada|bug|wrench):)/g;
 
   const nodes: AdfInlineNode[] = [];
   let lastIndex = 0;
@@ -1305,9 +1376,21 @@ export function parseInlineMarkdownToAdf(
     const full = match[0];
 
     if (full.startsWith('`') && full.endsWith('`')) {
+      const leadingTicks = full.match(/^`+/)?.[0].length || 1;
+      const trailingTicks = full.match(/`+$/)?.[0].length || 1;
+      const tickCount = Math.min(leadingTicks, trailingTicks);
+      let innerCode = full.slice(tickCount, full.length - tickCount);
+      if (
+        tickCount > 1 &&
+        innerCode.startsWith(' ') &&
+        innerCode.endsWith(' ') &&
+        innerCode.length >= 2
+      ) {
+        innerCode = innerCode.slice(1, -1);
+      }
       nodes.push({
         type: 'text',
-        text: full.slice(1, -1),
+        text: innerCode,
         marks: normalizeAdfMarks([...inheritedMarks, { type: 'code' }]),
       });
     } else if (match[2] !== undefined) {
@@ -1338,10 +1421,11 @@ export function parseInlineMarkdownToAdf(
         nodes.push({ type: 'inlineCard', attrs: { url: label.trim() } });
       } else if (isSafeAdfUrl(href)) {
         nodes.push(
-          ...parseInlineMarkdownToAdf(label, [
-            ...inheritedMarks,
-            { type: 'link', attrs: { href } },
-          ])
+          ...parseInlineMarkdownToAdf(
+            label,
+            [...inheritedMarks, { type: 'link', attrs: { href } }],
+            depth + 1
+          )
         );
       } else {
         nodes.push({
@@ -1352,37 +1436,44 @@ export function parseInlineMarkdownToAdf(
       }
     } else if (match[7] !== undefined) {
       nodes.push(
-        ...parseInlineMarkdownToAdf(match[7], [
-          ...inheritedMarks,
-          { type: 'strong' },
-          { type: 'em' },
-        ])
+        ...parseInlineMarkdownToAdf(
+          match[7],
+          [...inheritedMarks, { type: 'strong' }, { type: 'em' }],
+          depth + 1
+        )
       );
     } else if (match[8] !== undefined || match[9] !== undefined) {
       nodes.push(
-        ...parseInlineMarkdownToAdf(match[8] ?? match[9], [
-          ...inheritedMarks,
-          { type: 'strong' },
-        ])
+        ...parseInlineMarkdownToAdf(
+          match[8] ?? match[9],
+          [...inheritedMarks, { type: 'strong' }],
+          depth + 1
+        )
       );
     } else if (match[10] !== undefined || match[11] !== undefined) {
+      const innerU =
+        match[10] !== undefined
+          ? unescapeHtmlEntities(match[10])
+          : match[11];
       nodes.push(
-        ...parseInlineMarkdownToAdf(match[10] ?? match[11], [
-          ...inheritedMarks,
-          { type: 'underline' },
-        ])
+        ...parseInlineMarkdownToAdf(
+          innerU,
+          [...inheritedMarks, { type: 'underline' }],
+          depth + 1
+        )
       );
     } else if (match[12] !== undefined) {
       nodes.push(
-        ...parseInlineMarkdownToAdf(match[12], [
-          ...inheritedMarks,
-          { type: 'strike' },
-        ])
+        ...parseInlineMarkdownToAdf(
+          match[12],
+          [...inheritedMarks, { type: 'strike' }],
+          depth + 1
+        )
       );
     } else if (match[13] !== undefined) {
       nodes.push({
         type: 'text',
-        text: match[13],
+        text: unescapeHtmlEntities(match[13]),
         marks: normalizeAdfMarks([
           ...inheritedMarks,
           { type: 'subsup', attrs: { type: 'sub' } },
@@ -1391,7 +1482,7 @@ export function parseInlineMarkdownToAdf(
     } else if (match[14] !== undefined) {
       nodes.push({
         type: 'text',
-        text: match[14],
+        text: unescapeHtmlEntities(match[14]),
         marks: normalizeAdfMarks([
           ...inheritedMarks,
           { type: 'subsup', attrs: { type: 'sup' } },
@@ -1399,36 +1490,43 @@ export function parseInlineMarkdownToAdf(
       });
     } else if (match[15] !== undefined && match[16] !== undefined) {
       nodes.push(
-        ...parseInlineMarkdownToAdf(match[16], [
-          ...inheritedMarks,
-          { type: 'textColor', attrs: { color: match[15] } },
-        ])
+        ...parseInlineMarkdownToAdf(
+          unescapeHtmlEntities(match[16]),
+          [...inheritedMarks, { type: 'textColor', attrs: { color: match[15] } }],
+          depth + 1
+        )
       );
     } else if (match[17] !== undefined) {
       nodes.push(
-        ...parseInlineMarkdownToAdf(match[17], [
-          ...inheritedMarks,
-          { type: 'backgroundColor', attrs: { color: '#974F0C' } },
-        ])
+        ...parseInlineMarkdownToAdf(
+          match[17],
+          [
+            ...inheritedMarks,
+            { type: 'backgroundColor', attrs: { color: '#974F0C' } },
+          ],
+          depth + 1
+        )
       );
     } else if (match[18] !== undefined || match[19] !== undefined) {
       nodes.push(
-        ...parseInlineMarkdownToAdf(match[18] ?? match[19], [
-          ...inheritedMarks,
-          { type: 'em' },
-        ])
+        ...parseInlineMarkdownToAdf(
+          match[18] ?? match[19],
+          [...inheritedMarks, { type: 'em' }],
+          depth + 1
+        )
       );
-    } else if (match[20] !== undefined || match[21] !== undefined) {
-      const name = (match[20] ?? match[21]).trim();
+    } else if (match[20] !== undefined || match[22] !== undefined) {
+      const name = (match[20] ?? match[22]).trim();
+      const explicitId = match[21]?.trim();
       nodes.push({
         type: 'mention',
         attrs: {
-          id: name.toLowerCase().replace(/\s+/g, '.'),
+          id: explicitId || name.toLowerCase().replace(/\s+/g, '.'),
           text: `@${name}`,
         },
       });
-    } else if (match[22] !== undefined) {
-      const shortName = `:${match[22]}:`;
+    } else if (match[23] !== undefined) {
+      const shortName = `:${match[23]}:`;
       nodes.push({
         type: 'emoji',
         attrs: {
@@ -1485,7 +1583,11 @@ export function markdownToAdf(markdown: string): AdfDocNode {
   };
 }
 
-function parseMarkdownLinesToBlocks(lines: string[]): AdfBlockNode[] {
+function parseMarkdownLinesToBlocks(
+  lines: string[],
+  depth = 0
+): AdfBlockNode[] {
+  if (depth >= MAX_SERIALIZE_DEPTH) return [];
   const blocks: AdfBlockNode[] = [];
   let idx = 0;
 
@@ -1498,13 +1600,17 @@ function parseMarkdownLinesToBlocks(lines: string[]): AdfBlockNode[] {
       continue;
     }
 
-    // 1. Fenced code block ```lang ... ```
-    const codeMatch = line.match(/^\s*```([a-zA-Z0-9_+-]*)\s*$/);
+    // 1. Fenced code block (3 or more backticks: ```lang ... ``` or ````md ... ````)
+    const codeMatch = line.match(/^\s*(`{3,})([a-zA-Z0-9_+-]*)\s*$/);
     if (codeMatch) {
-      const language = codeMatch[1]?.trim().toLowerCase() || undefined;
+      const fenceTicks = codeMatch[1];
+      const closingFenceRegex = new RegExp(
+        `^\\s*\`{${fenceTicks.length},}\\s*$`
+      );
+      const language = codeMatch[2]?.trim().toLowerCase() || undefined;
       const codeLines: string[] = [];
       idx += 1;
-      while (idx < lines.length && !/^\s*```\s*$/.test(lines[idx])) {
+      while (idx < lines.length && !closingFenceRegex.test(lines[idx])) {
         codeLines.push(lines[idx]);
         idx += 1;
       }
@@ -1528,7 +1634,7 @@ function parseMarkdownLinesToBlocks(lines: string[]): AdfBlockNode[] {
           /^\s*<summary>([\s\S]*?)<\/summary>\s*$/i
         );
         if (sumMatch) {
-          title = sumMatch[1].trim();
+          title = unescapeHtmlEntities(sumMatch[1].trim());
           idx += 1;
         }
       }
@@ -1538,7 +1644,7 @@ function parseMarkdownLinesToBlocks(lines: string[]): AdfBlockNode[] {
         idx += 1;
       }
       if (idx < lines.length) idx += 1;
-      const innerBlocks = parseMarkdownLinesToBlocks(innerLines);
+      const innerBlocks = parseMarkdownLinesToBlocks(innerLines, depth + 1);
       blocks.push({
         type: 'expand',
         attrs: { title },
@@ -1572,7 +1678,7 @@ function parseMarkdownLinesToBlocks(lines: string[]): AdfBlockNode[] {
 
     // 5. Standalone Image ![alt](url) -> mediaSingle
     const imgMatch = line.trim().match(/^!\[([^\]]*)\]\(([^)\s]+)\)$/);
-    if (imgMatch && isSafeAdfUrl(imgMatch[2])) {
+    if (imgMatch && isSafeAdfMediaUrl(imgMatch[2])) {
       blocks.push({
         type: 'mediaSingle',
         attrs: { layout: 'center' },
@@ -1664,7 +1770,7 @@ function parseMarkdownLinesToBlocks(lines: string[]): AdfBlockNode[] {
         panelLines.push(lines[idx].replace(/^\s*>\s?/, ''));
         idx += 1;
       }
-      const inner = parseMarkdownLinesToBlocks(panelLines);
+      const inner = parseMarkdownLinesToBlocks(panelLines, depth + 1);
       blocks.push({
         type: 'panel',
         attrs: { panelType },
@@ -1679,7 +1785,7 @@ function parseMarkdownLinesToBlocks(lines: string[]): AdfBlockNode[] {
         quoteLines.push(lines[idx].replace(/^\s*>\s?/, ''));
         idx += 1;
       }
-      const inner = parseMarkdownLinesToBlocks(quoteLines);
+      const inner = parseMarkdownLinesToBlocks(quoteLines, depth + 1);
       blocks.push({
         type: 'blockquote',
         content: inner.length > 0 ? inner : [{ type: 'paragraph', content: [] }],
@@ -1718,19 +1824,19 @@ function parseMarkdownLinesToBlocks(lines: string[]): AdfBlockNode[] {
       continue;
     }
 
-    // 9. Decision List (<> Decision item)
+    // 9. Decision List (<> Decision item or <> [?] Undecided item)
     if (/^\s*(?:[-*]\s+)?<>\s+(.*)$/.test(line)) {
       const decItems: AdfDecisionItemNode[] = [];
       while (idx < lines.length && /^\s*(?:[-*]\s+)?<>\s+(.*)$/.test(lines[idx])) {
-        const m = lines[idx].match(/^\s*(?:[-*]\s+)?<>\s+(.*)$/);
+        const m = lines[idx].match(/^\s*(?:[-*]\s+)?<>\s+(\[\?\]\s+)?(.*)$/);
         if (m) {
           decItems.push({
             type: 'decisionItem',
             attrs: {
               localId: createAdfLocalId('dec'),
-              state: 'DECIDED',
+              state: m[1] ? 'UNDECIDED' : 'DECIDED',
             },
-            content: parseInlineMarkdownToAdf(m[1].trim()),
+            content: parseInlineMarkdownToAdf((m[2] || '').trim()),
           });
         }
         idx += 1;
@@ -1855,16 +1961,35 @@ export function serializeInlineAdfToMarkdown(
     .map((node) => {
       switch (node.type) {
         case 'text': {
-          let out = node.text;
           const marks = node.marks || [];
           if (marks.some((m) => m.type === 'code')) {
-            out = `\`${out}\``;
+            const maxTicks = Math.max(
+              0,
+              ...(node.text.match(/`+/g) || []).map((s) => s.length)
+            );
+            const delim = '`'.repeat(Math.max(1, maxTicks + 1));
+            const needsPad =
+              maxTicks > 0 ||
+              node.text.startsWith('`') ||
+              node.text.endsWith('`');
+            let out = needsPad
+              ? `${delim} ${node.text} ${delim}`
+              : `${delim}${node.text}${delim}`;
             const link = marks.find((m) => m.type === 'link');
             if (link && link.type === 'link') {
               out = `[${out}](${link.attrs.href})`;
             }
             return out;
           }
+          const hasHtmlWrapperMark = marks.some(
+            (m) =>
+              m.type === 'subsup' ||
+              m.type === 'textColor' ||
+              m.type === 'underline'
+          );
+          let out = hasHtmlWrapperMark
+            ? escapeInlineHtmlBody(node.text)
+            : node.text;
           for (const m of marks) {
             if (m.type === 'subsup') {
               out =
@@ -1873,7 +1998,10 @@ export function serializeInlineAdfToMarkdown(
           }
           const colorMark = marks.find((m) => m.type === 'textColor');
           if (colorMark && colorMark.type === 'textColor') {
-            out = `<span style="color:${colorMark.attrs.color}">${out}</span>`;
+            const safeColor = sanitizeHexColor(colorMark.attrs.color);
+            if (safeColor) {
+              out = `<span style="color:${safeColor}">${out}</span>`;
+            }
           }
           if (marks.some((m) => m.type === 'backgroundColor')) {
             out = `==${out}==`;
@@ -1908,6 +2036,16 @@ export function serializeInlineAdfToMarkdown(
             /^@/,
             ''
           );
+          const defaultId = cleanName.toLowerCase().replace(/\s+/g, '.');
+          const explicitId =
+            node.attrs.id &&
+            node.attrs.id !== defaultId &&
+            /^[a-zA-Z0-9._:-]+$/.test(node.attrs.id)
+              ? node.attrs.id
+              : '';
+          if (explicitId) {
+            return `@[${cleanName}](${explicitId})`;
+          }
           return /\s/.test(cleanName) ? `@[${cleanName}]` : `@${cleanName}`;
         }
         case 'emoji':
@@ -1926,8 +2064,10 @@ export function serializeInlineAdfToMarkdown(
 
 function serializeBlocksToMarkdown(
   blocks: AdfBlockNode[],
-  indent = ''
+  indent = '',
+  depth = 0
 ): string {
+  if (depth >= MAX_SERIALIZE_DEPTH) return '';
   const parts: string[] = [];
 
   for (const block of blocks) {
@@ -1954,9 +2094,13 @@ function serializeBlocksToMarkdown(
               child.type === 'bulletList' ||
               child.type === 'orderedList'
             ) {
-              lines.push(serializeBlocksToMarkdown([child], `${indent}  `));
+              lines.push(
+                serializeBlocksToMarkdown([child], `${indent}  `, depth + 1)
+              );
             } else if (child.type === 'codeBlock') {
-              lines.push(serializeBlocksToMarkdown([child], `${indent}  `));
+              lines.push(
+                serializeBlocksToMarkdown([child], `${indent}  `, depth + 1)
+              );
             }
           }
         }
@@ -1979,7 +2123,9 @@ function serializeBlocksToMarkdown(
                 `${indent}   ${serializeInlineAdfToMarkdown(child.content)}`
               );
             } else {
-              lines.push(serializeBlocksToMarkdown([child], `${indent}   `));
+              lines.push(
+                serializeBlocksToMarkdown([child], `${indent}   `, depth + 1)
+              );
             }
           });
         });
@@ -1995,7 +2141,9 @@ function serializeBlocksToMarkdown(
               `${indent}- ${box} ${serializeInlineAdfToMarkdown(item.content)}`
             );
           } else if (item.type === 'taskList') {
-            lines.push(serializeBlocksToMarkdown([item], `${indent}  `));
+            lines.push(
+              serializeBlocksToMarkdown([item], `${indent}  `, depth + 1)
+            );
           }
         }
         parts.push(lines.join('\n'));
@@ -2003,7 +2151,10 @@ function serializeBlocksToMarkdown(
       }
       case 'decisionList': {
         const lines = block.content.map(
-          (item) => `${indent}<> ${serializeInlineAdfToMarkdown(item.content)}`
+          (item) =>
+            `${indent}<> ${
+              item.attrs.state === 'UNDECIDED' ? '[?] ' : ''
+            }${serializeInlineAdfToMarkdown(item.content)}`
         );
         parts.push(lines.join('\n'));
         break;
@@ -2019,7 +2170,7 @@ function serializeBlocksToMarkdown(
             : block.attrs.panelType === 'error'
             ? 'ERROR'
             : 'INFO';
-        const innerMd = serializeBlocksToMarkdown(block.content);
+        const innerMd = serializeBlocksToMarkdown(block.content, '', depth + 1);
         const quotedLines = innerMd
           .split('\n')
           .map((l) => `> ${l}`)
@@ -2028,7 +2179,7 @@ function serializeBlocksToMarkdown(
         break;
       }
       case 'blockquote': {
-        const innerMd = serializeBlocksToMarkdown(block.content);
+        const innerMd = serializeBlocksToMarkdown(block.content, '', depth + 1);
         parts.push(
           innerMd
             .split('\n')
@@ -2038,9 +2189,15 @@ function serializeBlocksToMarkdown(
         break;
       }
       case 'codeBlock': {
-        const lang = block.attrs?.language || '';
+        const rawLang = (block.attrs?.language || '').trim().toLowerCase();
+        const lang = /^[a-z0-9_+#.-]{1,32}$/.test(rawLang) ? rawLang : '';
         const code = (block.content || []).map((t) => t.text).join('');
-        parts.push(`\`\`\`${lang}\n${code}\n\`\`\``);
+        const maxTicks = Math.max(
+          2,
+          ...(code.match(/`+/g) || []).map((s) => s.length)
+        );
+        const fence = '`'.repeat(Math.max(3, maxTicks + 1));
+        parts.push(`${fence}${lang}\n${code}\n${fence}`);
         break;
       }
       case 'rule':
@@ -2049,9 +2206,9 @@ function serializeBlocksToMarkdown(
       case 'expand':
       case 'nestedExpand': {
         const title = block.attrs?.title || 'Details';
-        const innerMd = serializeBlocksToMarkdown(block.content);
+        const innerMd = serializeBlocksToMarkdown(block.content, '', depth + 1);
         parts.push(
-          `<details>\n<summary>${title}</summary>\n\n${innerMd}\n</details>`
+          `<details>\n<summary>${escapeHtml(title)}</summary>\n\n${innerMd}\n</details>`
         );
         break;
       }
@@ -2063,7 +2220,7 @@ function serializeBlocksToMarkdown(
               .map((b) =>
                 b.type === 'paragraph' || b.type === 'heading'
                   ? serializeInlineAdfToMarkdown(b.content)
-                  : serializeBlocksToMarkdown([b])
+                  : serializeBlocksToMarkdown([b], '', depth + 1)
               )
               .join(' ')
               .replace(/\n+/g, ' ')
@@ -2081,15 +2238,18 @@ function serializeBlocksToMarkdown(
       }
       case 'layoutSection': {
         const colParts = block.content.map((col) =>
-          serializeBlocksToMarkdown(col.content)
+          serializeBlocksToMarkdown(col.content, '', depth + 1)
         );
         parts.push(colParts.join('\n\n'));
         break;
       }
       case 'mediaSingle': {
         const m = block.content[0];
-        if (m?.attrs.url) {
-          parts.push(`![${m.attrs.alt || 'Image'}](${m.attrs.url})`);
+        if (m?.attrs.url && isSafeAdfMediaUrl(m.attrs.url)) {
+          const safeAlt = (m.attrs.alt || 'Image')
+            .replace(/[\r\n]+/g, ' ')
+            .replace(/([[\]\\])/g, '\\$1');
+          parts.push(`![${safeAlt}](${m.attrs.url})`);
         }
         break;
       }
@@ -2325,7 +2485,7 @@ function renderBlocksToJiraHtml(blocks: AdfBlockNode[]): string {
             .join('')}</div>`;
         case 'mediaSingle': {
           const m = block.content[0];
-          return m?.attrs.url && isSafeAdfUrl(m.attrs.url)
+          return m?.attrs.url && isSafeAdfMediaUrl(m.attrs.url)
             ? `<p><img src="${escapeHtml(m.attrs.url)}" alt="${escapeHtml(
                 m.attrs.alt || 'Image'
               )}" /></p>`

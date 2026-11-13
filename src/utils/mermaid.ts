@@ -848,8 +848,189 @@ function formatClassRelationOperator(e: FlowEdge): string {
   return '-->';
 }
 
+interface SideflowLayoutMetadata {
+  n?: Record<string, [number, number]>;
+  e?: Record<string, { w?: [number, number]; c?: FlowEdgeCurve }>;
+  s?: Record<string, { col?: boolean; clr?: AccentColor }>;
+  ec?: FlowEdgeCurve;
+}
+
+const VALID_CURVES = new Set<FlowEdgeCurve>(['bezier', 'orthogonal', 'straight']);
+const VALID_ACCENT_COLORS = new Set<AccentColor>([
+  'indigo',
+  'cyan',
+  'emerald',
+  'amber',
+  'rose',
+  'purple',
+]);
+
+function serializeSideflowLayoutComment(flowData: FlowchartState): string {
+  if (flowData.nodes.length === 0) return '';
+  const meta: SideflowLayoutMetadata = {};
+
+  const nodeCoords: Record<string, [number, number]> = {};
+  for (const n of flowData.nodes) {
+    if (Number.isFinite(n.x) && Number.isFinite(n.y)) {
+      nodeCoords[n.id] = [Math.round(n.x), Math.round(n.y)];
+    }
+  }
+  if (Object.keys(nodeCoords).length > 0) {
+    meta.n = nodeCoords;
+  }
+
+  const edgeMeta: Record<string, { w?: [number, number]; c?: FlowEdgeCurve }> =
+    {};
+  flowData.edges.forEach((e, idx) => {
+    const entry: { w?: [number, number]; c?: FlowEdgeCurve } = {};
+    if (
+      e.waypoint &&
+      Number.isFinite(e.waypoint.x) &&
+      Number.isFinite(e.waypoint.y)
+    ) {
+      entry.w = [Math.round(e.waypoint.x), Math.round(e.waypoint.y)];
+    }
+    if (e.curve && VALID_CURVES.has(e.curve)) {
+      entry.c = e.curve;
+    }
+    if (entry.w || entry.c) {
+      edgeMeta[String(idx)] = entry;
+    }
+  });
+  if (Object.keys(edgeMeta).length > 0) {
+    meta.e = edgeMeta;
+  }
+
+  const sgMeta: Record<string, { col?: boolean; clr?: AccentColor }> = {};
+  for (const sg of flowData.subgraphs || []) {
+    const entry: { col?: boolean; clr?: AccentColor } = {};
+    if (sg.collapsed) entry.col = true;
+    if (sg.color && VALID_ACCENT_COLORS.has(sg.color)) entry.clr = sg.color;
+    if (entry.col || entry.clr) {
+      sgMeta[sg.id] = entry;
+    }
+  }
+  if (Object.keys(sgMeta).length > 0) {
+    meta.s = sgMeta;
+  }
+
+  if (flowData.edgeCurve && VALID_CURVES.has(flowData.edgeCurve)) {
+    meta.ec = flowData.edgeCurve;
+  }
+
+  return `%% @sideflow-layout ${JSON.stringify(meta)}\n`;
+}
+
+export function hasSideflowLayoutMetadata(mermaidText: string): boolean {
+  return /^\s*%%\s*@sideflow-layout\s+\{.+\}\s*$/m.test(mermaidText);
+}
+
+function extractSideflowLayoutMetadata(
+  mermaidText: string
+): SideflowLayoutMetadata | null {
+  if (!mermaidText || mermaidText.length > 512_000) return null;
+  const rawLines = mermaidText.split(/\r?\n/);
+  for (let i = rawLines.length - 1; i >= 0; i--) {
+    const m = rawLines[i].trim().match(/^%%\s*@sideflow-layout\s+(\{.+\})$/);
+    if (m) {
+      try {
+        const parsed = JSON.parse(m[1]) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as SideflowLayoutMetadata;
+        }
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+const MAX_LAYOUT_COORD_MAGNITUDE = 50_000;
+
+function clampLayoutCoord(val: number): number {
+  return Math.max(
+    -MAX_LAYOUT_COORD_MAGNITUDE,
+    Math.min(MAX_LAYOUT_COORD_MAGNITUDE, val)
+  );
+}
+
+function applySideflowLayoutMetadata(
+  state: FlowchartState | null,
+  meta: SideflowLayoutMetadata | null
+): FlowchartState | null {
+  if (!state || !meta) return state;
+
+  const nodes = state.nodes.map((node) => {
+    const coords =
+      meta.n && Object.prototype.hasOwnProperty.call(meta.n, node.id)
+        ? meta.n[node.id]
+        : undefined;
+    if (
+      Array.isArray(coords) &&
+      coords.length === 2 &&
+      Number.isFinite(coords[0]) &&
+      Number.isFinite(coords[1])
+    ) {
+      return {
+        ...node,
+        x: clampLayoutCoord(coords[0]),
+        y: clampLayoutCoord(coords[1]),
+      };
+    }
+    return node;
+  });
+
+  const edges = state.edges.map((edge, idx) => {
+    const edgeKey = String(idx);
+    const em =
+      meta.e && Object.prototype.hasOwnProperty.call(meta.e, edgeKey)
+        ? meta.e[edgeKey]
+        : undefined;
+    if (!em || typeof em !== 'object') return edge;
+    const nextEdge: FlowEdge = { ...edge };
+    if (
+      Array.isArray(em.w) &&
+      em.w.length === 2 &&
+      Number.isFinite(em.w[0]) &&
+      Number.isFinite(em.w[1])
+    ) {
+      nextEdge.waypoint = {
+        x: clampLayoutCoord(em.w[0]),
+        y: clampLayoutCoord(em.w[1]),
+      };
+    }
+    if (em.c && VALID_CURVES.has(em.c)) {
+      nextEdge.curve = em.c;
+    }
+    return nextEdge;
+  });
+
+  const subgraphs = state.subgraphs?.map((sg) => {
+    const sm =
+      meta.s && Object.prototype.hasOwnProperty.call(meta.s, sg.id)
+        ? meta.s[sg.id]
+        : undefined;
+    if (!sm || typeof sm !== 'object') return sg;
+    return {
+      ...sg,
+      ...(sm.col ? { collapsed: true } : {}),
+      ...(sm.clr && VALID_ACCENT_COLORS.has(sm.clr) ? { color: sm.clr } : {}),
+    };
+  });
+
+  return {
+    ...state,
+    nodes,
+    edges,
+    ...(subgraphs ? { subgraphs } : {}),
+    ...(meta.ec && VALID_CURVES.has(meta.ec) ? { edgeCurve: meta.ec } : {}),
+  };
+}
+
 export function generateMermaidCode(flowData: FlowchartState): string {
   const diagramType: MermaidDiagramType = flowData.diagramType || 'flowchart';
+  const layoutFooter = serializeSideflowLayoutComment(flowData);
 
   if (diagramType === 'classDiagram') {
     let mermaid = 'classDiagram\n';
@@ -893,7 +1074,7 @@ export function generateMermaidCode(flowData: FlowchartState): string {
       }
     });
 
-    return mermaid;
+    return mermaid + layoutFooter;
   }
 
   if (diagramType === 'erDiagram') {
@@ -925,7 +1106,7 @@ export function generateMermaidCode(flowData: FlowchartState): string {
       mermaid += `    ${e.from} ${op} ${e.to} : ${label}\n`;
     });
 
-    return mermaid;
+    return mermaid + layoutFooter;
   }
 
   if (diagramType === 'sequenceDiagram') {
@@ -945,7 +1126,7 @@ export function generateMermaidCode(flowData: FlowchartState): string {
       const msg = e.label && e.label.trim() ? e.label.trim() : 'Message';
       mermaid += `    ${e.from}${op}${e.to}: ${msg}\n`;
     });
-    return mermaid;
+    return mermaid + layoutFooter;
   }
 
   if (diagramType === 'stateDiagram-v2') {
@@ -993,7 +1174,7 @@ export function generateMermaidCode(flowData: FlowchartState): string {
       }
     });
 
-    return mermaid;
+    return mermaid + layoutFooter;
   }
 
   const direction: FlowDirection = flowData.direction || 'TD';
@@ -1045,7 +1226,7 @@ export function generateMermaidCode(flowData: FlowchartState): string {
     }
   });
 
-  return mermaid;
+  return mermaid + layoutFooter;
 }
 
 interface ParsedNodeToken {
@@ -1227,10 +1408,37 @@ function parseNodeToken(rawToken: string): ParsedNodeToken | null {
   return null;
 }
 
+function maskDoubleQuotedLiterals(input: string): {
+  masked: string;
+  literals: string[];
+} {
+  const literals: string[] = [];
+  const masked = input.replace(/"([^"]*)"/g, (_full, inner: string) => {
+    const idx = literals.length;
+    literals.push(inner);
+    return `"\uE001${idx}\uE002"`;
+  });
+  return { masked, literals };
+}
+
+function unmaskDoubleQuotedLiterals(
+  input: string | undefined,
+  literals: string[]
+): string | undefined {
+  if (input === undefined || literals.length === 0) return input;
+  return input.replace(/\uE001(\d+)\uE002/g, (_m, idxStr: string) => {
+    const idx = Number(idxStr);
+    return Number.isInteger(idx) && idx >= 0 && idx < literals.length
+      ? literals[idx]
+      : '';
+  });
+}
+
 function parseAmpersandNodeGroup(rawSegment: string): ParsedNodeToken[] | null {
-  const parts = rawSegment
+  const { masked, literals } = maskDoubleQuotedLiterals(rawSegment);
+  const parts = masked
     .split(/\s+&\s+/)
-    .map((p) => p.trim())
+    .map((p) => (unmaskDoubleQuotedLiterals(p, literals) || '').trim())
     .filter(Boolean);
   if (parts.length === 0) return null;
 
@@ -1265,20 +1473,30 @@ function classifyArrowSuffix(
   return 'none';
 }
 
-function parseEdgeLine(line: string): ParsedEdgeMatch | null {
+function parseEdgeLine(rawLine: string): ParsedEdgeMatch | null {
+  const { masked: line, literals } = maskDoubleQuotedLiterals(rawLine);
+  const finalize = (match: ParsedEdgeMatch): ParsedEdgeMatch => ({
+    ...match,
+    rawFrom: unmaskDoubleQuotedLiterals(match.rawFrom, literals) || match.rawFrom,
+    rawTo: unmaskDoubleQuotedLiterals(match.rawTo, literals) || match.rawTo,
+    ...(match.label !== undefined
+      ? { label: unmaskDoubleQuotedLiterals(match.label, literals) }
+      : {}),
+  });
+
   // 1. Dotted inline label: A -. label .-> B, A <-. label .-> B, A -. label .- B, A -. label .-o B, A -. label .-x B
   const dottedInlineMatch = line.match(
     /^(.+?)\s*(<)?-\.\s*(.+?)\s*\.+-(>|o|x)?(?:\s+|$)(.+)$/
   );
   if (dottedInlineMatch) {
     const [, rawFrom, bidir, label, endChar, rawTo] = dottedInlineMatch;
-    return {
+    return finalize({
       rawFrom,
       rawTo,
       label,
       style: 'dotted',
       arrow: classifyArrowSuffix(bidir, endChar),
-    };
+    });
   }
 
   // 2. Thick inline label: A == label ==> B, A <== label ==> B, A == label === B, A == label ==o B, A == label ==x B
@@ -1287,13 +1505,13 @@ function parseEdgeLine(line: string): ParsedEdgeMatch | null {
   );
   if (thickInlineMatch) {
     const [, rawFrom, bidir, label, endChar, rawTo] = thickInlineMatch;
-    return {
+    return finalize({
       rawFrom,
       rawTo,
       label,
       style: 'thick',
       arrow: classifyArrowSuffix(bidir, endChar),
-    };
+    });
   }
 
   // 3. Solid inline label: A -- label --> B, A <-- label --> B, A -- label --- B, A -- label --o B, A -- label --x B
@@ -1302,13 +1520,13 @@ function parseEdgeLine(line: string): ParsedEdgeMatch | null {
   );
   if (solidInlineMatch) {
     const [, rawFrom, bidir, label, endChar, rawTo] = solidInlineMatch;
-    return {
+    return finalize({
       rawFrom,
       rawTo,
       label,
       style: 'solid',
       arrow: classifyArrowSuffix(bidir, endChar),
-    };
+    });
   }
 
   // 4. Direct operator (with optional |label| pipe syntax)
@@ -1318,13 +1536,13 @@ function parseEdgeLine(line: string): ParsedEdgeMatch | null {
   );
   if (dottedDirectMatch) {
     const [, rawFrom, bidir, endChar, label, rawTo] = dottedDirectMatch;
-    return {
+    return finalize({
       rawFrom,
       rawTo,
       label,
       style: 'dotted',
       arrow: classifyArrowSuffix(bidir, endChar),
-    };
+    });
   }
 
   // Thick direct: <==>, ==>, ==o, ==x, ===
@@ -1334,13 +1552,13 @@ function parseEdgeLine(line: string): ParsedEdgeMatch | null {
   if (thickDirectMatch) {
     const [, rawFrom, bidir, endChar, label, rawTo] = thickDirectMatch;
     if (endChar || bidir || thickDirectMatch[0].includes('===')) {
-      return {
+      return finalize({
         rawFrom,
         rawTo,
         label,
         style: 'thick',
         arrow: classifyArrowSuffix(bidir, endChar),
-      };
+      });
     }
   }
 
@@ -1351,13 +1569,13 @@ function parseEdgeLine(line: string): ParsedEdgeMatch | null {
   if (solidDirectMatch) {
     const [, rawFrom, bidir, dashes, endChar, label, rawTo] = solidDirectMatch;
     if (endChar || bidir || dashes.length >= 3) {
-      return {
+      return finalize({
         rawFrom,
         rawTo,
         label,
         style: 'solid',
         arrow: classifyArrowSuffix(bidir, endChar),
-      };
+      });
     }
   }
 
@@ -2022,6 +2240,7 @@ export function parseMermaidCode(
   mermaidText: string,
   existingNodes?: FlowNode[]
 ): FlowchartState | null {
+  const layoutMeta = extractSideflowLayoutMetadata(mermaidText);
   const lines = mermaidText
     .split(/\r?\n/)
     .map((l) => l.trim().replace(/;$/, '').trim())
@@ -2035,16 +2254,28 @@ export function parseMermaidCode(
 
   // Delegate State, Sequence, Class, or ER Diagram syntax to specialized parsers
   if (/^stateDiagram(?:-v2)?\b/i.test(lines[0])) {
-    return parseStateDiagramCode(lines, existingById);
+    return applySideflowLayoutMetadata(
+      parseStateDiagramCode(lines, existingById),
+      layoutMeta
+    );
   }
   if (/^sequenceDiagram\b/i.test(lines[0])) {
-    return parseSequenceDiagramCode(lines, existingById);
+    return applySideflowLayoutMetadata(
+      parseSequenceDiagramCode(lines, existingById),
+      layoutMeta
+    );
   }
   if (/^classDiagram\b/i.test(lines[0])) {
-    return parseClassDiagramCode(lines, existingById);
+    return applySideflowLayoutMetadata(
+      parseClassDiagramCode(lines, existingById),
+      layoutMeta
+    );
   }
   if (/^erDiagram\b/i.test(lines[0])) {
-    return parseErDiagramCode(lines, existingById);
+    return applySideflowLayoutMetadata(
+      parseErDiagramCode(lines, existingById),
+      layoutMeta
+    );
   }
 
   const nodesMap = new Map<string, FlowNode>();
@@ -2262,14 +2493,17 @@ export function parseMermaidCode(
     (sg) => sg.nodeIds.length > 0
   );
 
-  return {
-    nodes: Array.from(nodesMap.values()),
-    edges,
-    ...(parsedDirection && parsedDirection !== 'TD'
-      ? { direction: parsedDirection }
-      : {}),
-    ...(nonEmptySubgraphs.length > 0 ? { subgraphs: nonEmptySubgraphs } : {}),
-  };
+  return applySideflowLayoutMetadata(
+    {
+      nodes: Array.from(nodesMap.values()),
+      edges,
+      ...(parsedDirection && parsedDirection !== 'TD'
+        ? { direction: parsedDirection }
+        : {}),
+      ...(nonEmptySubgraphs.length > 0 ? { subgraphs: nonEmptySubgraphs } : {}),
+    },
+    layoutMeta
+  );
 }
 
 export function computeParallelEdgeOffsets(edges: FlowEdge[]): number[] {
@@ -2294,38 +2528,76 @@ export function computeParallelEdgeOffsets(edges: FlowEdge[]): number[] {
 
 export function generateStandaloneSVG(flowData: FlowchartState): string {
   const isSequence = flowData.diagramType === 'sequenceDiagram';
+
+  // Hide member nodes belonging to collapsed subgraphs (matching live FlowCanvas)
+  const collapsedNodeIds = new Set<string>();
+  for (const sg of flowData.subgraphs || []) {
+    if (sg.collapsed) {
+      for (const nodeId of sg.nodeIds) {
+        collapsedNodeIds.add(nodeId);
+      }
+    }
+  }
+  const visibleNodes = flowData.nodes.filter(
+    (n) => !collapsedNodeIds.has(n.id)
+  );
+  const nodesById = new Map<string, FlowNode>(
+    visibleNodes.map((n) => [n.id, n])
+  );
+
   const subgraphBoundsList = (flowData.subgraphs || [])
     .map((sg) => computeSubgraphBounds(sg, flowData.nodes))
     .filter((b): b is SubgraphBounds => b !== null);
 
-  const maxNodeRight = flowData.nodes.reduce(
-    (max, n) => Math.max(max, n.x + 144),
-    0
-  );
-  const maxNodeBottom = flowData.nodes.reduce((max, n) => {
-    const memberCount = n.members?.length || 0;
-    const nodeH =
-      memberCount > 0 || n.stereotype
-        ? Math.max(52, 34 + memberCount * 14 + (n.stereotype ? 14 : 0))
-        : 52;
-    return Math.max(max, n.y + nodeH);
-  }, 0);
-  const maxSgRight = subgraphBoundsList.reduce(
-    (max, b) => Math.max(max, b.x + b.width),
-    0
-  );
-  const maxSgBottom = subgraphBoundsList.reduce(
-    (max, b) => Math.max(max, b.y + b.height),
-    0
-  );
+  let minContentX = Infinity;
+  let minContentY = Infinity;
+  let maxRight = 0;
+  let maxBottom = 0;
+
+  for (const n of visibleNodes) {
+    const dim = getNodeDimensions(n);
+    minContentX = Math.min(minContentX, n.x);
+    minContentY = Math.min(minContentY, n.y);
+    maxRight = Math.max(maxRight, n.x + dim.width);
+    maxBottom = Math.max(maxBottom, n.y + dim.height);
+  }
+
+  for (const b of subgraphBoundsList) {
+    minContentX = Math.min(minContentX, b.x);
+    minContentY = Math.min(minContentY, b.y);
+    maxRight = Math.max(maxRight, b.x + b.width);
+    maxBottom = Math.max(maxBottom, b.y + b.height);
+  }
+
+  for (const edge of flowData.edges) {
+    if (!nodesById.has(edge.from) || !nodesById.has(edge.to)) continue;
+    if (
+      edge.waypoint &&
+      Number.isFinite(edge.waypoint.x) &&
+      Number.isFinite(edge.waypoint.y)
+    ) {
+      minContentX = Math.min(minContentX, edge.waypoint.x - 16);
+      minContentY = Math.min(minContentY, edge.waypoint.y - 16);
+      maxRight = Math.max(maxRight, edge.waypoint.x + 16);
+      maxBottom = Math.max(maxBottom, edge.waypoint.y + 16);
+    }
+  }
 
   const seqMinBottom = isSequence
     ? 125 + Math.max(1, flowData.edges.length) * 48
     : 0;
-  const maxRight = Math.max(maxNodeRight, maxSgRight);
-  const maxBottom = Math.max(maxNodeBottom, maxSgBottom, seqMinBottom);
-  const width = Math.max(600, maxRight + 48);
-  const height = Math.max(460, maxBottom + 48);
+  maxBottom = Math.max(maxBottom, seqMinBottom);
+
+  const vbX =
+    Number.isFinite(minContentX) && minContentX < 0
+      ? Math.floor(minContentX - 36)
+      : 0;
+  const vbY =
+    Number.isFinite(minContentY) && minContentY < 0
+      ? Math.floor(minContentY - 36)
+      : 0;
+  const width = Math.max(600, Math.ceil(maxRight + 48 - vbX));
+  const height = Math.max(460, Math.ceil(maxBottom + 48 - vbY));
 
   const escapeXml = (unsafe: string) =>
     unsafe
@@ -2336,16 +2608,20 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
       .replace(/'/g, '&apos;');
 
   const subgraphsSvg = subgraphBoundsList
-    .map(
-      (b) => `<g id="subgraph-${escapeXml(b.id)}" transform="translate(${b.x}, ${b.y})">
-      <rect width="${b.width}" height="${b.height}" rx="14" fill="#0f172a" fill-opacity="0.65" stroke="#475569" stroke-width="1.5" stroke-dasharray="6,4" />
-      <text x="14" y="20" fill="#94a3b8" font-family="Inter, sans-serif" font-size="11" font-weight="600">${escapeXml(b.title)}</text>
-    </g>`
-    )
+    .map((b) => {
+      const palette = b.color ? ACCENT_HEX_PALETTE[b.color] : undefined;
+      const sgFill = palette ? palette.fill : '#0f172a';
+      const sgStroke = palette ? palette.stroke : '#475569';
+      const titleSuffix = b.collapsed ? ` (${b.memberCount} collapsed)` : '';
+      return `<g id="subgraph-${escapeXml(b.id)}" transform="translate(${b.x}, ${b.y})">
+      <rect width="${b.width}" height="${b.height}" rx="14" fill="${sgFill}" fill-opacity="0.65" stroke="${sgStroke}" stroke-width="1.5" stroke-dasharray="6,4" />
+      <text x="14" y="20" fill="#94a3b8" font-family="Inter, sans-serif" font-size="11" font-weight="600">${escapeXml(b.title + titleSuffix)}</text>
+    </g>`;
+    })
     .join('\n    ');
 
   const lifelinesSvg = isSequence
-    ? flowData.nodes
+    ? visibleNodes
         .map((n) => {
           const cx = n.x + 72;
           const topY = n.y + 52;
@@ -2355,9 +2631,6 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
         .join('\n    ')
     : '';
 
-  const nodesById = new Map<string, FlowNode>(
-    flowData.nodes.map((n) => [n.id, n])
-  );
   const parallelOffsets = computeParallelEdgeOffsets(flowData.edges);
 
   const edgesSvg = flowData.edges
@@ -2389,7 +2662,9 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
           edge.curve || flowData.edgeCurve || 'bezier',
           toDim.width,
           toDim.height,
-          parallelOffsets[idx] || 0
+          parallelOffsets[idx] || 0,
+          edge.waypoint,
+          visibleNodes
         );
         pathData = geom.pathData;
         midX = geom.midX;
@@ -2426,7 +2701,7 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
     })
     .join('\n    ');
 
-  const nodesSvg = flowData.nodes
+  const nodesSvg = visibleNodes
     .map((node) => {
       const w = 144;
       const members = node.members || [];
@@ -2560,7 +2835,7 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
     : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX} ${vbY} ${width} ${height}" width="${width}" height="${height}">
   <defs>
     <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
       <polygon points="0 0, 10 3.5, 0 7" fill="#818cf8" />
@@ -2575,7 +2850,7 @@ export function generateStandaloneSVG(flowData: FlowchartState): string {
       <path d="M 1.5 1.5 L 7.5 7.5 M 7.5 1.5 L 1.5 7.5" stroke="#818cf8" stroke-width="2" stroke-linecap="round" />
     </marker>
   </defs>
-  <rect width="100%" height="100%" fill="#020617" />${subgraphsGroupBlock}${lifelinesGroupBlock}
+  <rect x="${vbX}" y="${vbY}" width="${width}" height="${height}" fill="#020617" />${subgraphsGroupBlock}${lifelinesGroupBlock}
   <g id="edges">
     ${edgesSvg}
   </g>
@@ -2886,21 +3161,27 @@ export async function renderFlowchartToPngData(
       resolve({ blob, dataUrl, svgString });
     };
 
-    // Safety timeout for headless/JSDOM environments where Image.onload does not fire
+    // Safety timeout for non-headless environments where Image.onload stalls
     const timer = setTimeout(() => {
-      const fallbackBlob = new Blob([svgString], { type: 'image/png' });
-      finish(fallbackBlob, svgDataUrl);
-    }, 120);
+      finish(null, '');
+    }, 1500);
 
     try {
+      const safeScale = Math.max(
+        0.1,
+        Math.min(
+          scale,
+          8192 / Math.max(1, width),
+          8192 / Math.max(1, height)
+        )
+      );
       const canvas = document.createElement('canvas');
-      canvas.width = width * scale;
-      canvas.height = height * scale;
+      canvas.width = Math.max(1, Math.round(width * safeScale));
+      canvas.height = Math.max(1, Math.round(height * safeScale));
       const ctx = canvas.getContext('2d');
       if (!ctx) {
         clearTimeout(timer);
-        const fallbackBlob = new Blob([svgString], { type: 'image/png' });
-        finish(fallbackBlob, svgDataUrl);
+        finish(null, '');
         return;
       }
 
@@ -2908,33 +3189,30 @@ export async function renderFlowchartToPngData(
       img.onload = () => {
         clearTimeout(timer);
         try {
-          ctx.scale(scale, scale);
+          ctx.scale(safeScale, safeScale);
           ctx.fillStyle = '#020617';
           ctx.fillRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
           const pngDataUrl = canvas.toDataURL('image/png');
           if (typeof canvas.toBlob === 'function') {
             canvas.toBlob((b) => {
-              finish(
-                b || new Blob([svgString], { type: 'image/png' }),
-                pngDataUrl
-              );
+              finish(b || null, pngDataUrl);
             }, 'image/png');
           } else {
-            finish(new Blob([svgString], { type: 'image/png' }), pngDataUrl);
+            finish(null, pngDataUrl);
           }
         } catch {
-          finish(new Blob([svgString], { type: 'image/png' }), svgDataUrl);
+          finish(null, '');
         }
       };
       img.onerror = () => {
         clearTimeout(timer);
-        finish(new Blob([svgString], { type: 'image/png' }), svgDataUrl);
+        finish(null, '');
       };
       img.src = svgDataUrl;
     } catch {
       clearTimeout(timer);
-      finish(new Blob([svgString], { type: 'image/png' }), svgDataUrl);
+      finish(null, '');
     }
   });
 }
@@ -2947,7 +3225,7 @@ const mermaidPreviewCache = new Map<
 
 /**
  * Memoized helper that parses Mermaid source code, computes the Sugiyama/Kahn
- * DAG layout, and generates the standalone SVG preview string.
+ * DAG layout (unless explicit @sideflow-layout coordinates are embedded), and generates the standalone SVG preview string.
  */
 export function renderCachedMermaidPreview(rawCode: string): {
   laidOut: FlowchartState | null;
@@ -2963,7 +3241,9 @@ export function renderCachedMermaidPreview(rawCode: string): {
   }
   const parsed = parseMermaidCode(rawCode);
   const laidOut: FlowchartState | null = parsed
-    ? { ...parsed, nodes: computeDagLayout(parsed) }
+    ? hasSideflowLayoutMetadata(rawCode)
+      ? parsed
+      : { ...parsed, nodes: computeDagLayout(parsed) }
     : null;
   const svgMarkup = laidOut
     ? generateStandaloneSVG(laidOut).replace(/^<\?xml[^>]*>\s*/i, '')

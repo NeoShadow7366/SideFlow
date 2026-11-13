@@ -252,6 +252,9 @@ export function adfInlineToEditorHtml(
         }
 
         case 'inlineCard': {
+          if (!isSafeAdfUrl(node.attrs.url)) {
+            return escapeHtml(node.attrs.url || '');
+          }
           const label = formatSmartCardLabel(node.attrs.url);
           return `<span contenteditable="false" spellcheck="false" role="button" tabindex="0" aria-label="Smart link: ${escapeHtml(
             label
@@ -286,7 +289,10 @@ export function parseEditorDomToAdfInline(
     return [];
   }
 
-  const walk = (node: ChildNode, marks: AdfMark[]) => {
+  const MAX_DOM_WALK_DEPTH = 32;
+
+  const walk = (node: ChildNode, marks: AdfMark[], depth = 0) => {
+    if (depth >= MAX_DOM_WALK_DEPTH) return;
     if (node.nodeType === Node.TEXT_NODE) {
       const text = (node.textContent || '').replace(/\u200B/g, '');
       if (text.length > 0) {
@@ -414,27 +420,33 @@ export function parseEditorDomToAdfInline(
       }
     }
 
-    const textColor = el.getAttribute('data-adf-text-color');
+    const textColor =
+      el.getAttribute('data-adf-text-color') ||
+      el.getAttribute('data-text-custom-color');
     if (textColor && sanitizeHexColor(textColor)) {
       nextMarks.push({ type: 'textColor', attrs: { color: textColor } });
     }
 
-    const bgColor = el.getAttribute('data-adf-bg-color');
+    const bgColor =
+      el.getAttribute('data-adf-bg-color') ||
+      el.getAttribute('data-background-custom-color');
     if (bgColor && sanitizeHexColor(bgColor)) {
       nextMarks.push({ type: 'backgroundColor', attrs: { color: bgColor } });
     }
 
     for (const child of Array.from(el.childNodes)) {
-      walk(child, nextMarks);
+      walk(child, nextMarks, depth + 1);
     }
   };
 
   for (const child of childNodes) {
-    walk(child, []);
+    walk(child, [], 0);
   }
 
   return normalizeInlineNodes(collected);
 }
+
+const MAX_CLIPBOARD_CHARS = 1_048_576;
 
 /**
  * Safely parses clipboard `text/html` (via an inert detached `DOMParser`) or
@@ -445,10 +457,19 @@ export function parseClipboardToAdfInline(
   htmlData: string,
   plainText: string
 ): AdfInlineNode[] {
-  if (htmlData && htmlData.trim() && typeof DOMParser !== 'undefined') {
+  const safeHtml =
+    htmlData && htmlData.length > MAX_CLIPBOARD_CHARS
+      ? htmlData.slice(0, MAX_CLIPBOARD_CHARS)
+      : htmlData;
+  const safePlain =
+    plainText && plainText.length > MAX_CLIPBOARD_CHARS
+      ? plainText.slice(0, MAX_CLIPBOARD_CHARS)
+      : plainText;
+
+  if (safeHtml && safeHtml.trim() && typeof DOMParser !== 'undefined') {
     try {
       const parser = new DOMParser();
-      const doc = parser.parseFromString(htmlData, 'text/html');
+      const doc = parser.parseFromString(safeHtml, 'text/html');
       if (doc && doc.body) {
         const parsed = parseEditorDomToAdfInline(doc.body);
         if (parsed.length > 0) {
@@ -459,8 +480,8 @@ export function parseClipboardToAdfInline(
       // Fall back to plainText below
     }
   }
-  if (!plainText) return [];
-  const lines = plainText.replace(/\r\n/g, '\n').split('\n');
+  if (!safePlain) return [];
+  const lines = safePlain.replace(/\r\n/g, '\n').split('\n');
   const out: AdfInlineNode[] = [];
   lines.forEach((line, idx) => {
     if (idx > 0) {
