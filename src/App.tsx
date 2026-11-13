@@ -22,6 +22,7 @@ import {
   AdfBlockNode,
   AdfDocNode,
   AppDrawer,
+  AppGlobalHotkeyBinding,
   AppItem,
   AppUpdateState,
   DockHoverEffect,
@@ -220,15 +221,26 @@ export const App: React.FC = () => {
   const [isOnboardingModalOpen, setIsOnboardingModalOpen] =
     useState<boolean>(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(false);
-  const [toast, setToast] = useState<ToastMessage | null>(null);
+  const [isRecordingAppHotkey, setIsRecordingAppHotkey] = useState<boolean>(false);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [clockTime, setClockTime] = useState<string>(() =>
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   );
 
-  const toastTimerRef = useRef<number | null>(null);
+  const toastTimersRef = useRef<Map<string, number>>(new Map());
+  const toastDurationsRef = useRef<Map<string, number>>(new Map());
+  const toastSeqRef = useRef<number>(0);
   const userModifiedDisplayStateRef = useRef<boolean>(false);
   const isPinnedRef = useRef<boolean>(isPinned);
   isPinnedRef.current = isPinned;
+  const isDictatingRef = useRef<boolean>(isDictating);
+  isDictatingRef.current = isDictating;
+  const isRecordingHotkeyRef = useRef<boolean>(
+    isRecordingHotkey || isRecordingAppHotkey
+  );
+  isRecordingHotkeyRef.current = isRecordingHotkey || isRecordingAppHotkey;
+  const isCommandPaletteOpenRef = useRef<boolean>(isCommandPaletteOpen);
+  isCommandPaletteOpenRef.current = isCommandPaletteOpen;
   const effectivePanelWidthPercent = clampPanelWidthPercent(
     dragPanelWidthPercent ?? panelWidthPercent
   );
@@ -295,20 +307,56 @@ export const App: React.FC = () => {
     panelEdge
   );
 
-  const toastDurationRef = useRef<number>(3200);
   const toastHoverOrFocusRef = useRef<boolean>(false);
 
-  const scheduleToastDismiss = useCallback((ms: number) => {
-    if (toastTimerRef.current) {
-      window.clearTimeout(toastTimerRef.current);
-      toastTimerRef.current = null;
-    }
-    if (!toastHoverOrFocusRef.current) {
-      toastTimerRef.current = window.setTimeout(() => {
-        setToast(null);
-      }, ms);
+  const clearToastTimerById = useCallback((id: string) => {
+    const existing = toastTimersRef.current.get(id);
+    if (existing !== undefined) {
+      window.clearTimeout(existing);
+      toastTimersRef.current.delete(id);
     }
   }, []);
+
+  const clearAllToastTimers = useCallback(() => {
+    toastTimersRef.current.forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    toastTimersRef.current.clear();
+  }, []);
+
+  const dismissToastById = useCallback(
+    (id: string) => {
+      clearToastTimerById(id);
+      toastDurationsRef.current.delete(id);
+      setToasts((prev) => prev.filter((item) => item.id !== id));
+    },
+    [clearToastTimerById]
+  );
+
+  const scheduleToastDismissById = useCallback(
+    (id: string, ms: number) => {
+      clearToastTimerById(id);
+      if (!toastHoverOrFocusRef.current) {
+        const timerId = window.setTimeout(() => {
+          dismissToastById(id);
+        }, ms);
+        toastTimersRef.current.set(id, timerId);
+      }
+    },
+    [clearToastTimerById, dismissToastById]
+  );
+
+  const resumeAllToastTimers = useCallback(
+    (items: ToastMessage[]) => {
+      if (toastHoverOrFocusRef.current) return;
+      for (const item of items) {
+        const ms =
+          toastDurationsRef.current.get(item.id) ?? (item.onUndo ? 6000 : 3200);
+        scheduleToastDismissById(item.id, ms);
+      }
+    },
+    [scheduleToastDismissById]
+  );
 
   const notify: NotifyFn = useCallback(
     (
@@ -317,9 +365,6 @@ export const App: React.FC = () => {
       subtitle = 'System Launch',
       options?: NotifyOptions
     ) => {
-      if (toastTimerRef.current) {
-        window.clearTimeout(toastTimerRef.current);
-      }
       const inferredVariant: ToastVariant =
         options?.variant ??
         (/failed|invalid|unable|blocked|error/i.test(title)
@@ -331,22 +376,49 @@ export const App: React.FC = () => {
           : 'info');
       const durationMs =
         options?.durationMs ?? (options?.onUndo ? 6000 : 3200);
-      toastDurationRef.current = durationMs;
-      toastHoverOrFocusRef.current = false;
-      setToast({
-        id: String(Date.now()),
+      const id = `toast-${Date.now()}-${++toastSeqRef.current}`;
+      const nextToast: ToastMessage = {
+        id,
         title,
         subtitle,
         icon,
         variant: inferredVariant,
         undoLabel: options?.undoLabel,
         onUndo: options?.onUndo,
+      };
+      toastDurationsRef.current.set(id, durationMs);
+
+      setToasts((prev) => {
+        let working = [...prev];
+        if (!nextToast.onUndo) {
+          const dupIdx = working.findIndex(
+            (t) =>
+              !t.onUndo &&
+              t.title === nextToast.title &&
+              t.subtitle === nextToast.subtitle
+          );
+          if (dupIdx !== -1) {
+            const [dup] = working.splice(dupIdx, 1);
+            clearToastTimerById(dup.id);
+            toastDurationsRef.current.delete(dup.id);
+          }
+        }
+        while (working.length >= 3) {
+          // Pin active Undo toasts so info/status notifications never evict recovery actions
+          const nonUndoIdx = working.findIndex((t) => !t.onUndo);
+          const evictIdx = nonUndoIdx !== -1 ? nonUndoIdx : 0;
+          const [evicted] = working.splice(evictIdx, 1);
+          if (evicted) {
+            clearToastTimerById(evicted.id);
+            toastDurationsRef.current.delete(evicted.id);
+          }
+        }
+        return [...working, nextToast];
       });
-      toastTimerRef.current = window.setTimeout(() => {
-        setToast(null);
-      }, durationMs);
+
+      scheduleToastDismissById(id, durationMs);
     },
-    []
+    [clearToastTimerById, scheduleToastDismissById]
   );
 
   // Sync initial visibility, edge, and screen presence with Electron and clean up toast timer
@@ -458,9 +530,7 @@ export const App: React.FC = () => {
       .catch(() => {});
     return () => {
       isMounted = false;
-      if (toastTimerRef.current) {
-        window.clearTimeout(toastTimerRef.current);
-      }
+      clearAllToastTimers();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -540,9 +610,19 @@ export const App: React.FC = () => {
       setIsPanelOpen(true);
     });
     const unsubBlur = window.sideflow?.onWindowBlur?.(() => {
-      if (!isPinnedRef.current) {
-        togglePanel(false);
+      if (
+        isPinnedRef.current ||
+        isDictatingRef.current ||
+        isRecordingHotkeyRef.current ||
+        isCommandPaletteOpenRef.current ||
+        document.body.hasAttribute('data-sideflow-modal-open')
+      ) {
+        return;
       }
+      togglePanel(false);
+    });
+    const unsubAppHotkey = window.sideflow?.onAppHotkeyTriggered?.((payload) => {
+      notify(`Launched ${payload.name}`, 'rocket', payload.cmd);
     });
     const unsubUpdate = window.sideflow?.onUpdateStatus?.((state) => {
       setUpdateState(state);
@@ -570,10 +650,38 @@ export const App: React.FC = () => {
       unsubVisibility?.();
       unsubSwitchTab?.();
       unsubBlur?.();
+      unsubAppHotkey?.();
       unsubUpdate?.();
       unsubDisplay?.();
     };
-  }, [togglePanel, setMonitorSettings]);
+  }, [togglePanel, setMonitorSettings, notify]);
+
+  // Keep OS-wide per-app global hotkeys synchronized with Electron (paused while recording a hotkey)
+  useEffect(() => {
+    if (!window.sideflow?.setAppHotkeys) return;
+    if (isRecordingHotkey || isRecordingAppHotkey) {
+      void Promise.resolve(window.sideflow.setAppHotkeys([])).catch(() => {});
+      return;
+    }
+    const bindings: AppGlobalHotkeyBinding[] = [];
+    for (const drawer of drawers) {
+      for (const app of drawer.apps) {
+        const hk = app.hotkey?.trim();
+        if (hk && hk.includes('+')) {
+          bindings.push({
+            id: app.id,
+            name: app.name,
+            cmd: app.cmd,
+            args: app.args,
+            hotkey: hk,
+          });
+        }
+      }
+    }
+    void Promise.resolve(window.sideflow.setAppHotkeys(bindings)).catch(
+      () => {}
+    );
+  }, [drawers, isRecordingHotkey, isRecordingAppHotkey]);
 
   // Keep companion edge-tab windows synced with handle visibility, dictation state, and shortcut label
   useEffect(() => {
@@ -1120,6 +1228,56 @@ export const App: React.FC = () => {
     try {
       const normalized = normalizeWorkspaceBackupPayload(rawJson);
 
+      const prevDrawers = JSON.parse(JSON.stringify(drawers)) as AppDrawer[];
+      const prevFlowData = JSON.parse(JSON.stringify(flowData)) as FlowchartState;
+      const prevSavedDiagrams = readSharedStorage<FlowDiagramItem[] | null>(
+        'sideflow_flow_diagrams_v1',
+        null
+      );
+      const prevActiveDiagramId = readSharedStorage<string | null>(
+        'sideflow_active_diagram_id',
+        null
+      );
+      const prevNotes = JSON.parse(JSON.stringify(notes)) as NoteItem[];
+      const prevActiveNoteId = activeNoteId;
+      const prevNotesViewMode = readSharedStorage<string | null>(
+        'sideflow_notes_view_mode',
+        null
+      );
+      const prevShortcut = { ...shortcut };
+      const prevIsPinned = isPinned;
+      const prevShowEdgeHandle = showEdgeHandle;
+      const prevOpenAtLogin = openAtLogin;
+      const prevStrictOfflineMode = strictOfflineMode;
+      const prevPanelEdge = panelEdge;
+      const prevPanelWidthPercent = panelWidthPercent;
+      const prevMonitorSettings = JSON.parse(
+        JSON.stringify(monitorSettings)
+      ) as MonitorSettings;
+      const prevDockEffect = dockEffect;
+      const prevDockIconSize = dockIconSize;
+      const prevIsDockLocked = isDockLocked;
+      const prevShowDocklets = readSharedStorage<boolean | null>(
+        'sideflow_show_docklets',
+        null
+      );
+      const prevShowMinimap = readSharedStorage<boolean | null>(
+        'sideflow_flow_minimap',
+        null
+      );
+      const prevSpellcheckEnabled = readSharedStorage<boolean | null>(
+        'sideflow_spellcheck_enabled',
+        null
+      );
+      const prevCustomDictionary = readSharedStorage<string[] | null>(
+        'sideflow_custom_dictionary',
+        null
+      );
+      const prevSttSettings = readSharedStorage<unknown>(
+        'sideflow_stt_settings',
+        null
+      );
+
       if (normalized.drawers !== undefined) {
         setDrawers(normalized.drawers);
       }
@@ -1227,7 +1385,88 @@ export const App: React.FC = () => {
       notify(
         'Restored SideFlow Backup',
         'check',
-        'Workspace configuration imported'
+        'Workspace configuration imported',
+        {
+          durationMs: 8000,
+          undoLabel: 'Undo',
+          onUndo: () => {
+            setDrawers(prevDrawers);
+            setFlowData(prevFlowData);
+            if (prevSavedDiagrams !== null) {
+              writeSharedStorage('sideflow_flow_diagrams_v1', prevSavedDiagrams);
+            } else {
+              removeSharedStorage('sideflow_flow_diagrams_v1');
+            }
+            if (prevActiveDiagramId !== null) {
+              writeSharedStorage(
+                'sideflow_active_diagram_id',
+                prevActiveDiagramId
+              );
+            } else {
+              removeSharedStorage('sideflow_active_diagram_id');
+            }
+            setNotes(prevNotes);
+            setActiveNoteId(prevActiveNoteId);
+            if (prevNotesViewMode !== null) {
+              writeSharedStorage('sideflow_notes_view_mode', prevNotesViewMode);
+            } else {
+              removeSharedStorage('sideflow_notes_view_mode');
+            }
+            setShortcut(prevShortcut);
+            void window.sideflow?.updateGlobalShortcut?.(
+              prevShortcut.label.replace(/\s+/g, '')
+            );
+            setIsPinned(prevIsPinned);
+            setShowEdgeHandle(prevShowEdgeHandle);
+            setOpenAtLogin(prevOpenAtLogin);
+            void window.sideflow?.setAutoLaunch?.(prevOpenAtLogin);
+            setStrictOfflineMode(prevStrictOfflineMode);
+            setPanelEdge(prevPanelEdge);
+            window.sideflow?.setPanelEdge?.(prevPanelEdge);
+            const clampedPrevPct = clampPanelWidthPercent(prevPanelWidthPercent);
+            setPanelWidthPercent(clampedPrevPct);
+            panelWidthPercentRef.current = clampedPrevPct;
+            window.sideflow?.setPanelWidthPercent?.(clampedPrevPct);
+            setMonitorSettings(prevMonitorSettings);
+            void window.sideflow?.setMonitorSettings?.(prevMonitorSettings);
+            setDockEffect(prevDockEffect);
+            setDockIconSize(prevDockIconSize);
+            setIsDockLocked(prevIsDockLocked);
+            if (prevShowDocklets !== null) {
+              writeSharedStorage('sideflow_show_docklets', prevShowDocklets);
+            } else {
+              removeSharedStorage('sideflow_show_docklets');
+            }
+            if (prevShowMinimap !== null) {
+              writeSharedStorage('sideflow_flow_minimap', prevShowMinimap);
+            } else {
+              removeSharedStorage('sideflow_flow_minimap');
+            }
+            if (prevSpellcheckEnabled !== null) {
+              writeSharedStorage(
+                'sideflow_spellcheck_enabled',
+                prevSpellcheckEnabled
+              );
+            } else {
+              removeSharedStorage('sideflow_spellcheck_enabled');
+            }
+            if (prevCustomDictionary !== null) {
+              writeSharedStorage(
+                'sideflow_custom_dictionary',
+                prevCustomDictionary
+              );
+            } else {
+              removeSharedStorage('sideflow_custom_dictionary');
+            }
+            if (prevSttSettings !== null) {
+              writeSharedStorage('sideflow_stt_settings', prevSttSettings);
+            } else {
+              removeSharedStorage('sideflow_stt_settings');
+            }
+            setFlowDiagramSyncEpoch((prev) => prev + 1);
+            setWorkspaceResetEpoch((prev) => prev + 1);
+          },
+        }
       );
     } catch {
       notify(
@@ -1718,118 +1957,124 @@ export const App: React.FC = () => {
         {isDictating ? 'Voice dictation active across SideFlow' : ''}
       </div>
 
-      {/* Semantic Toast Feedback with Optional 1-Click Undo & Dismiss */}
+      {/* Semantic 3-Slot Toast Queue (Pins Active Undo Toasts Against Info Eviction) */}
       <div
         id="app-launch-toast"
-        data-variant={toast?.variant || 'info'}
+        data-variant={toasts[toasts.length - 1]?.variant || 'info'}
         role="status"
         aria-live="polite"
-        aria-hidden={!toast}
+        aria-hidden={toasts.length === 0}
         onMouseEnter={() => {
           toastHoverOrFocusRef.current = true;
-          if (toastTimerRef.current) {
-            window.clearTimeout(toastTimerRef.current);
-            toastTimerRef.current = null;
-          }
+          clearAllToastTimers();
         }}
         onMouseLeave={() => {
           toastHoverOrFocusRef.current = false;
-          if (toast) {
-            scheduleToastDismiss(toastDurationRef.current);
+          if (toasts.length > 0) {
+            resumeAllToastTimers(toasts);
           }
         }}
         onFocusCapture={() => {
           toastHoverOrFocusRef.current = true;
-          if (toastTimerRef.current) {
-            window.clearTimeout(toastTimerRef.current);
-            toastTimerRef.current = null;
-          }
+          clearAllToastTimers();
         }}
         onBlurCapture={(e) => {
           if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
             toastHoverOrFocusRef.current = false;
-            if (toast) {
-              scheduleToastDismiss(toastDurationRef.current);
+            if (toasts.length > 0) {
+              resumeAllToastTimers(toasts);
             }
           }
         }}
         className={`fixed ${
           isElectronWindow ? 'bottom-16 right-4' : 'bottom-16 left-6'
-        } bg-slate-900/95 border ${
-          toast?.variant === 'error'
-            ? 'border-rose-500/60'
-            : toast?.variant === 'warning'
-            ? 'border-amber-500/60'
-            : toast?.variant === 'success'
-            ? 'border-emerald-500/50'
-            : 'border-indigo-500/40'
-        } text-white px-4 py-3 rounded-2xl shadow-2xl backdrop-blur-md flex items-center gap-3 transition-all duration-300 motion-reduce:transition-none z-50 max-w-md ${
-          toast
+        } flex flex-col gap-2 transition-all duration-300 motion-reduce:transition-none z-50 max-w-[min(28rem,calc(100vw-2rem))] ${
+          toasts.length > 0
             ? 'opacity-100 translate-y-0'
             : 'opacity-0 pointer-events-none translate-y-4'
         }`}
       >
-        <div
-          className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${
-            toast?.variant === 'error'
-              ? 'bg-rose-500/20 border-rose-500/40 text-rose-400'
-              : toast?.variant === 'warning'
-              ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
-              : toast?.variant === 'success'
-              ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
-              : 'bg-indigo-500/20 border-indigo-500/40 text-indigo-400'
-          }`}
-        >
-          <DynamicIcon
-            name={toast?.icon || 'rocket'}
-            className="w-5 h-5"
-            aria-hidden="true"
-          />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div id="toast-title" className="text-xs font-semibold text-white">
-            {toast?.title || 'Launching Application...'}
+        {toasts.length === 0 ? (
+          <div className="hidden">
+            <div id="toast-title">Launching Application...</div>
+            <div id="toast-cmd" />
           </div>
-          <div
-            id="toast-cmd"
-            className="text-[11px] font-mono text-slate-300 max-w-xs truncate"
-          >
-            {toast?.subtitle || ''}
-          </div>
-        </div>
-        {toast?.onUndo && (
-          <button
-            type="button"
-            data-testid="toast-undo-btn"
-            tabIndex={toast ? 0 : -1}
-            onClick={() => {
-              const undoHandler = toast.onUndo;
-              if (toastTimerRef.current) {
-                window.clearTimeout(toastTimerRef.current);
-              }
-              setToast(null);
-              undoHandler?.();
-            }}
-            className="min-h-[28px] px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white flex items-center gap-1 shrink-0 transition"
-          >
-            <RotateCcw className="w-3 h-3" aria-hidden="true" />
-            <span>{toast.undoLabel || 'Undo'}</span>
-          </button>
+        ) : (
+          toasts.map((item, idx) => {
+            const isPrimary = idx === toasts.length - 1;
+            return (
+              <div
+                key={item.id}
+                data-testid="toast-item"
+                data-variant={item.variant || 'info'}
+                className={`bg-slate-900/95 border ${
+                  item.variant === 'error'
+                    ? 'border-rose-500/60'
+                    : item.variant === 'warning'
+                    ? 'border-amber-500/60'
+                    : item.variant === 'success'
+                    ? 'border-emerald-500/50'
+                    : 'border-indigo-500/40'
+                } text-white px-4 py-3 rounded-2xl shadow-2xl backdrop-blur-md flex items-center gap-3`}
+              >
+                <div
+                  className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${
+                    item.variant === 'error'
+                      ? 'bg-rose-500/20 border-rose-500/40 text-rose-400'
+                      : item.variant === 'warning'
+                      ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                      : item.variant === 'success'
+                      ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                      : 'bg-indigo-500/20 border-indigo-500/40 text-indigo-400'
+                  }`}
+                >
+                  <DynamicIcon
+                    name={item.icon || 'rocket'}
+                    className="w-5 h-5"
+                    aria-hidden="true"
+                  />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div
+                    id={isPrimary ? 'toast-title' : undefined}
+                    className="text-xs font-semibold text-white"
+                  >
+                    {item.title}
+                  </div>
+                  <div
+                    id={isPrimary ? 'toast-cmd' : undefined}
+                    className="text-[11px] font-mono text-slate-300 max-w-xs truncate"
+                  >
+                    {item.subtitle}
+                  </div>
+                </div>
+                {item.onUndo && (
+                  <button
+                    type="button"
+                    data-testid="toast-undo-btn"
+                    onClick={() => {
+                      const undoHandler = item.onUndo;
+                      dismissToastById(item.id);
+                      undoHandler?.();
+                    }}
+                    className="min-h-[28px] px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white flex items-center gap-1 shrink-0 transition"
+                  >
+                    <RotateCcw className="w-3 h-3" aria-hidden="true" />
+                    <span>{item.undoLabel || 'Undo'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  aria-label="Dismiss notification"
+                  onClick={() => dismissToastById(item.id)}
+                  className="w-6 h-6 min-w-[24px] min-h-[24px] flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 shrink-0 transition"
+                >
+                  <X className="w-3.5 h-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            );
+          })
         )}
-        <button
-          type="button"
-          aria-label="Dismiss notification"
-          tabIndex={toast ? 0 : -1}
-          onClick={() => {
-            if (toastTimerRef.current) {
-              window.clearTimeout(toastTimerRef.current);
-            }
-            setToast(null);
-          }}
-          className="w-6 h-6 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 shrink-0 transition"
-        >
-          <X className="w-3.5 h-3.5" aria-hidden="true" />
-        </button>
       </div>
 
       {/* Screen Edge Peek Handle (When Panel is Closed — Offset to 28% top to avoid OS scrollbar thumb collisions) */}
@@ -2041,7 +2286,9 @@ export const App: React.FC = () => {
             role="tabpanel"
             id="tabpanel-drawers"
             aria-labelledby="tab-btn-drawers"
-            className="flex-1 flex flex-col overflow-hidden"
+            className={`flex-1 flex flex-col overflow-hidden ${
+              activeEffectiveEdge === 'left' ? 'pr-2.5' : ''
+            }`}
           >
             <DockView
               drawers={drawers}
@@ -2052,6 +2299,7 @@ export const App: React.FC = () => {
               dockEffect={dockEffect}
               dockIconSize={dockIconSize}
               isPanelOpen={isPanelOpen}
+              onRecordingAppHotkeyChange={setIsRecordingAppHotkey}
             />
           </div>
         )}
@@ -2061,7 +2309,9 @@ export const App: React.FC = () => {
             role="tabpanel"
             id="tabpanel-flowchart"
             aria-labelledby="tab-btn-flowchart"
-            className="flex-1 flex flex-col overflow-hidden"
+            className={`flex-1 flex flex-col overflow-hidden ${
+              activeEffectiveEdge === 'left' ? 'pr-2.5' : ''
+            }`}
           >
             <FlowCanvas
               key={`${workspaceResetEpoch}-${flowDiagramSyncEpoch}`}
@@ -2152,7 +2402,9 @@ export const App: React.FC = () => {
             hidden={activeTab !== 'notes'}
             className={
               activeTab === 'notes'
-                ? 'flex-1 flex flex-col overflow-hidden'
+                ? `flex-1 flex flex-col overflow-hidden ${
+                    activeEffectiveEdge === 'left' ? 'pr-2.5' : ''
+                  }`
                 : 'hidden'
             }
           >
@@ -2261,7 +2513,9 @@ export const App: React.FC = () => {
             role="tabpanel"
             id="tabpanel-settings"
             aria-labelledby="tab-btn-settings"
-            className="flex-1 flex flex-col overflow-hidden"
+            className={`flex-1 flex flex-col overflow-hidden ${
+              activeEffectiveEdge === 'left' ? 'pr-2.5' : ''
+            }`}
           >
             <SettingsView
               shortcut={shortcut}

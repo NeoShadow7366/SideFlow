@@ -33,7 +33,7 @@ import {
 } from '../../types/sideflow';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { DynamicIcon } from '../DynamicIcon';
-import { Modal } from '../Modal';
+import { Modal, acquireModalOpenGuard } from '../Modal';
 import { colorMap } from './AppTile';
 import { DrawerCard } from './DrawerCard';
 import {
@@ -60,6 +60,7 @@ interface DockViewProps {
   dockEffect?: DockHoverEffect;
   dockIconSize?: DockIconSize;
   isPanelOpen?: boolean;
+  onRecordingAppHotkeyChange?: (recording: boolean) => void;
 }
 
 export const DockView: React.FC<DockViewProps> = ({
@@ -71,6 +72,7 @@ export const DockView: React.FC<DockViewProps> = ({
   dockEffect = 'zoom',
   dockIconSize = 'normal',
   isPanelOpen = true,
+  onRecordingAppHotkeyChange,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<string>('all');
@@ -81,6 +83,12 @@ export const DockView: React.FC<DockViewProps> = ({
     true
   );
   const [isRecordingAppHotkey, setIsRecordingAppHotkey] = useState(false);
+  useEffect(() => {
+    onRecordingAppHotkeyChange?.(isRecordingAppHotkey);
+    return () => {
+      onRecordingAppHotkeyChange?.(false);
+    };
+  }, [isRecordingAppHotkey, onRecordingAppHotkeyChange]);
   const [isTrashDragOver, setIsTrashDragOver] = useState(false);
   const [pendingDeleteDrawerId, setPendingDeleteDrawerId] = useState<
     string | null
@@ -396,16 +404,62 @@ export const DockView: React.FC<DockViewProps> = ({
   const handleSyncFolder = async (drawerId: string) => {
     const target = drawers.find((d) => d.id === drawerId);
     if (!target || !target.folderPath) return;
+    const previousApps = target.apps.map((a) => ({ ...a }));
     const folderApps = await buildFolderDrawerApps(target.folderPath);
+
+    const existingByCmd = new Map<string, AppItem>();
+    for (const existing of target.apps) {
+      const normalizedCmd = existing.cmd.trim().toLowerCase();
+      if (normalizedCmd && !existingByCmd.has(normalizedCmd)) {
+        existingByCmd.set(normalizedCmd, existing);
+      }
+    }
+
+    const scannedCmdSet = new Set<string>();
+    const mergedApps: AppItem[] = folderApps.map((scanned) => {
+      const normalizedCmd = scanned.cmd.trim().toLowerCase();
+      scannedCmdSet.add(normalizedCmd);
+      const existing = existingByCmd.get(normalizedCmd);
+      if (!existing) return scanned;
+      return {
+        ...scanned,
+        id: existing.id,
+        name: existing.name || scanned.name,
+        args: existing.args ?? scanned.args,
+        icon: existing.icon || scanned.icon,
+        color: existing.color || scanned.color,
+        customIconUrl: existing.customIconUrl || scanned.customIconUrl,
+        hotkey: existing.hotkey,
+        favorite: existing.favorite,
+      };
+    });
+
+    const prunedCount = previousApps.filter(
+      (a) => !scannedCmdSet.has(a.cmd.trim().toLowerCase())
+    ).length;
+
     onChangeDrawers((prev) =>
       prev.map((d) =>
-        d.id === drawerId ? { ...d, collapsed: false, apps: folderApps } : d
+        d.id === drawerId ? { ...d, collapsed: false, apps: mergedApps } : d
       )
     );
     onNotify(
       `Synced Folder "${target.title}"`,
       'folder-open',
-      `${folderApps.length} items from ${target.folderPath}`
+      `${mergedApps.length} items from ${target.folderPath}`,
+      prunedCount > 0
+        ? {
+            durationMs: 6000,
+            undoLabel: 'Undo',
+            onUndo: () => {
+              onChangeDrawers((prev) =>
+                prev.map((d) =>
+                  d.id === drawerId ? { ...d, apps: previousApps } : d
+                )
+              );
+            },
+          }
+        : undefined
     );
   };
 
@@ -800,7 +854,13 @@ export const DockView: React.FC<DockViewProps> = ({
 
   const handleBrowseFilesForDrawer = async (drawerId: string) => {
     if (window.sideflow?.openFileDialog) {
-      const filePaths = await window.sideflow.openFileDialog();
+      const releaseBlurGuard = acquireModalOpenGuard();
+      let filePaths: string[] | null | undefined;
+      try {
+        filePaths = await window.sideflow.openFileDialog();
+      } finally {
+        releaseBlurGuard();
+      }
       if (!filePaths || filePaths.length === 0) return;
 
       const newApps: AppItem[] = filePaths.map((fp) => {
@@ -1191,7 +1251,7 @@ export const DockView: React.FC<DockViewProps> = ({
     >
       {/* Search & Quick Add Bar */}
       <div className="flex items-center gap-2">
-        <div className="relative flex-1">
+        <div className="relative flex-1 min-w-[110px]">
           <Search
             className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
             aria-hidden="true"
@@ -1212,7 +1272,7 @@ export const DockView: React.FC<DockViewProps> = ({
               onClick={() => setSearchQuery('')}
               aria-label="Clear search query"
               title="Clear search (Esc)"
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-0.5 rounded-full hover:bg-slate-800 transition"
+              className="absolute right-2 top-1/2 -translate-y-1/2 min-w-[24px] min-h-[24px] flex items-center justify-center text-slate-400 hover:text-white rounded-full hover:bg-slate-800 transition"
             >
               <X className="w-3.5 h-3.5" aria-hidden="true" />
             </button>

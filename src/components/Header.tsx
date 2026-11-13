@@ -98,13 +98,13 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="panel-cq-header px-3.5 py-2.5 border-b border-slate-800/80 flex items-center justify-between gap-2 bg-slate-950/50">
-      <div className="flex items-center gap-2 min-w-0">
+    <header className="panel-cq-header px-2.5 sm:px-3.5 py-2.5 border-b border-slate-800/80 flex items-center justify-between gap-1.5 sm:gap-2 bg-slate-950/50 min-w-0">
+      <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
         <div className="cq-brand-logo w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-600 via-blue-500 to-cyan-400 border border-cyan-300/30 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0">
           <SideFlowIcon className="w-5 h-5" aria-hidden="true" />
         </div>
         <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 min-w-0">
             <h2 className="cq-brand-title text-sm font-bold tracking-tight text-white truncate">
               SideFlow
             </h2>
@@ -123,7 +123,7 @@ export const Header: React.FC<HeaderProps> = ({
                   ? 'Panel is Pinned Open (Click to switch to Auto-Hide)'
                   : 'Auto-Hide Enabled (Click to Pin panel open)'
               }
-              className={`min-h-[24px] text-[10px] px-2 py-0.5 rounded-md font-medium border inline-flex items-center gap-1 transition cursor-pointer shrink-0 ${
+              className={`min-h-[24px] min-w-[24px] text-[10px] px-1.5 sm:px-2 py-0.5 rounded-md font-medium border inline-flex items-center justify-center gap-1 transition cursor-pointer shrink-0 ${
                 isPinned
                   ? 'bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-200 border-indigo-400/40'
                   : 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border-amber-400/40'

@@ -182,12 +182,26 @@ export const AppTile: React.FC<AppTileProps> = React.memo(({
           : 'border-slate-800 hover:border-slate-600'
       }`}
     >
-      {/* Primary Un-Nested Launch Button (WCAG 4.1.2) */}
+      {/* Primary Un-Nested Launch Button (WCAG 4.1.2 — Single Tab Stop per Tile, Shift+F10/ContextMenu to Edit, Delete to Remove) */}
       <button
         type="button"
         aria-label={`Launch ${app.name}`}
         title={`${app.name} — ${app.cmd}`}
         onClick={() => onLaunch(app, drawerId)}
+        onKeyDown={(e) => {
+          if (
+            (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) &&
+            onEdit
+          ) {
+            e.preventDefault();
+            e.stopPropagation();
+            onEdit(app, drawerId);
+          } else if (e.key === 'Delete' && !isLocked) {
+            e.preventDefault();
+            e.stopPropagation();
+            onDelete(drawerId, app.id);
+          }
+        }}
         className="w-full flex flex-col items-center p-3 rounded-2xl text-center cursor-pointer focus:outline-none"
       >
         {hotkeyBadge && (
@@ -248,6 +262,7 @@ export const AppTile: React.FC<AppTileProps> = React.memo(({
         {onToggleFavorite && (
           <button
             type="button"
+            tabIndex={-1}
             draggable={false}
             data-testid={`app-favorite-btn-${app.id}`}
             aria-pressed={Boolean(app.favorite)}
@@ -277,6 +292,7 @@ export const AppTile: React.FC<AppTileProps> = React.memo(({
         {onEdit && (
           <button
             type="button"
+            tabIndex={-1}
             draggable={false}
             data-testid={`edit-app-btn-${app.id}`}
             onMouseDown={(e) => e.stopPropagation()}
@@ -287,7 +303,7 @@ export const AppTile: React.FC<AppTileProps> = React.memo(({
               onEdit(app, drawerId);
             }}
             aria-label={`Edit ${app.name}`}
-            title={`Edit ${app.name} (or right-click tile)`}
+            title={`Edit ${app.name} (or right-click / Shift+F10)`}
             className="w-6 h-6 rounded-full bg-slate-950/95 border border-slate-700/80 hover:border-indigo-400 text-slate-300 hover:text-indigo-300 hover:bg-indigo-950/90 flex items-center justify-center shadow-md transition cursor-pointer"
           >
             <Pencil className="w-3 h-3 pointer-events-none" aria-hidden="true" />
@@ -296,6 +312,7 @@ export const AppTile: React.FC<AppTileProps> = React.memo(({
         {!isLocked && (
           <button
             type="button"
+            tabIndex={-1}
             draggable={false}
             data-testid={`remove-app-btn-${app.id}`}
             onMouseDown={(e) => e.stopPropagation()}
@@ -306,7 +323,7 @@ export const AppTile: React.FC<AppTileProps> = React.memo(({
               onDelete(drawerId, app.id);
             }}
             aria-label={`Remove ${app.name}`}
-            title={`Remove ${app.name}`}
+            title={`Remove ${app.name} (or press Delete)`}
             className="w-6 h-6 rounded-full bg-slate-950/95 border border-slate-700/80 hover:border-rose-400 text-slate-300 hover:text-rose-300 hover:bg-rose-950/90 flex items-center justify-center shadow-md transition cursor-pointer"
           >
             <X className="w-3.5 h-3.5 pointer-events-none" aria-hidden="true" />
