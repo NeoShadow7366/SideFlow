@@ -115,6 +115,46 @@ export function resolveDroppedFilePath(
   return `${fallbackBaseDir}\\${file.name}`;
 }
 
+export function isSafeAppIconUrl(url?: string | null): url is string {
+  if (typeof url !== 'string') return false;
+  return url.startsWith('data:image/') || url.startsWith('sideflow-icon://');
+}
+
+export function splitCliArgs(rawArgs?: string): string[] {
+  if (!rawArgs || typeof rawArgs !== 'string') return [];
+  const trimmed = rawArgs.replace(/[\r\n\0]/g, '').trim();
+  if (!trimmed) return [];
+
+  const tokens: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (ch === '"') {
+      if (inQuotes && trimmed[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (!inQuotes && /\s/.test(ch)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
 export async function fetchNativeFileIcon(
   filePath: string
 ): Promise<string | undefined> {
@@ -124,11 +164,7 @@ export async function fetchNativeFileIcon(
   if (window.sideflow?.resolveShortcutItem) {
     try {
       const resolved = await window.sideflow.resolveShortcutItem(filePath);
-      if (
-        resolved?.iconDataUrl &&
-        typeof resolved.iconDataUrl === 'string' &&
-        resolved.iconDataUrl.startsWith('data:image/')
-      ) {
+      if (isSafeAppIconUrl(resolved?.iconDataUrl)) {
         return resolved.iconDataUrl;
       }
     } catch {
@@ -140,7 +176,7 @@ export async function fetchNativeFileIcon(
   }
   try {
     const dataUrl = await window.sideflow.extractFileIcon(filePath);
-    if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+    if (isSafeAppIconUrl(dataUrl)) {
       return dataUrl;
     }
   } catch {
@@ -156,12 +192,14 @@ export async function resolveShortcutMetadata(
 ): Promise<{
   name: string;
   cmd: string;
+  args?: string;
   customIconUrl: string;
 }> {
   const meta = inferAppMetaFromFilename(fallbackName || rawPathOrName);
   const effectiveColor = fallbackColor || meta.color;
   let resolvedName = fallbackName || meta.name;
   let resolvedCmd = rawPathOrName;
+  let resolvedArgs: string | undefined;
 
   if (window.sideflow?.resolveShortcutItem) {
     try {
@@ -170,16 +208,17 @@ export async function resolveShortcutMetadata(
         if (details.cmd) {
           resolvedCmd = details.cmd;
         }
+        if (details.args && details.args.trim()) {
+          resolvedArgs = details.args.trim();
+        }
         if (!fallbackName && details.name) {
           resolvedName = details.name;
         }
-        if (
-          details.iconDataUrl &&
-          details.iconDataUrl.startsWith('data:image/')
-        ) {
+        if (isSafeAppIconUrl(details.iconDataUrl)) {
           return {
             name: resolvedName,
             cmd: resolvedCmd,
+            ...(resolvedArgs ? { args: resolvedArgs } : {}),
             customIconUrl: details.iconDataUrl,
           };
         }
@@ -193,6 +232,7 @@ export async function resolveShortcutMetadata(
   return {
     name: resolvedName,
     cmd: resolvedCmd,
+    ...(resolvedArgs ? { args: resolvedArgs } : {}),
     customIconUrl:
       nativeIcon || generateShortcutIconDataUrl(resolvedName, effectiveColor),
   };
@@ -399,6 +439,20 @@ export async function buildFolderDrawerApps(dirPath: string): Promise<AppItem[]>
   });
 }
 
+const pendingUriLaunchTimers = new Set<ReturnType<typeof setTimeout>>();
+
+export function cleanupPendingUriLaunchFrames(): void {
+  for (const timer of pendingUriLaunchTimers) {
+    clearTimeout(timer);
+  }
+  pendingUriLaunchTimers.clear();
+  if (typeof document !== 'undefined') {
+    document
+      .querySelectorAll('iframe[data-sideflow-uri-launch="true"]')
+      .forEach((el) => el.remove());
+  }
+}
+
 export async function executeAppCommand(
   command: string,
   args?: string[]
@@ -441,9 +495,14 @@ export async function executeAppCommand(
       if (proto !== 'app:' && proto !== 'shell:') {
         const iframe = document.createElement('iframe');
         iframe.style.display = 'none';
+        iframe.setAttribute('data-sideflow-uri-launch', 'true');
         iframe.src = trimmed;
         document.body.appendChild(iframe);
-        setTimeout(() => iframe.remove(), 2000);
+        const timer = setTimeout(() => {
+          pendingUriLaunchTimers.delete(timer);
+          iframe.remove();
+        }, 2000);
+        pendingUriLaunchTimers.add(timer);
       }
       return { success: true };
     } catch {

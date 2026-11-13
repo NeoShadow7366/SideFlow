@@ -43,6 +43,7 @@ export interface AppItem {
   id: string;
   name: string;
   cmd: string;       // Full OS file path (C:\...\app.exe) or URI (vscode://)
+  args?: string;     // Optional CLI arguments (e.g. from .lnk shortcuts or PWA flags)
   icon: string;      // Lucide icon name
   color: AccentColor;
   customIconUrl?: string;
@@ -631,6 +632,7 @@ export interface SideFlowElectronBridge {
   onSwitchTab: (callback: (tab: TabId) => void) => () => void;
   onWindowBlur: (callback: () => void) => () => void;
   storeGetAll: () => Promise<Record<string, unknown>>;
+  getInitialStoreSnapshot?: () => Record<string, unknown> | null;
   storeSet: (key: string, value: unknown) => void;
   listStoreBackups?: () => Promise<{
     backups: StoreBackupSnapshot[];
@@ -690,8 +692,18 @@ export interface SideFlowElectronBridge {
   onUpdateStatus?: (callback: (state: AppUpdateState) => void) => () => void;
   addWordToSpellCheckerDictionary?: (word: string) => Promise<boolean>;
   removeWordFromSpellCheckerDictionary?: (word: string) => Promise<boolean>;
+  clearSpellCheckerDictionary?: () => Promise<boolean>;
   setSpellCheckerLanguages?: (languages: string[]) => Promise<boolean>;
   replaceMisspelling?: (replacement: string) => Promise<boolean>;
+  onnxModelCacheGet?: (url: string) => Promise<{
+    bytes: Uint8Array;
+    headers: Record<string, string>;
+  } | null>;
+  onnxModelCachePut?: (payload: {
+    url: string;
+    bytes: Uint8Array;
+    headers?: Record<string, string>;
+  }) => Promise<boolean>;
   onSpellCheckContextMenu?: (
     callback: (params: {
       x: number;

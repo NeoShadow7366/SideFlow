@@ -11,6 +11,7 @@ import {
   nativeImage,
   session,
   desktopCapturer,
+  protocol,
 } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { execFile, spawn, ChildProcessWithoutNullStreams } from 'child_process';
@@ -18,7 +19,39 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as https from 'https';
+import * as crypto from 'crypto';
 import * as readline from 'readline';
+import {
+  StoreEngine,
+  StoreBackupInfo,
+  FORBIDDEN_STORE_KEYS,
+  renameWithWindowsBackoff,
+} from './storeEngine';
+import {
+  ICON_PROTOCOL_SCHEME,
+  cacheRasterIconDataUrl,
+  getExtMimeType,
+  migrateDrawerIconsInStore,
+  resolveCachedIconFilePath,
+} from './iconCache';
+import {
+  isAllowedShellUri,
+  isUncPath,
+  resolveWinSystem32Binary,
+  verifyReleaseManifest,
+} from './updateVerifier';
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: ICON_PROTOCOL_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+    },
+  },
+]);
 
 const GITHUB_OWNER = 'NeoShadow7366';
 const GITHUB_REPO = 'SideFlow';
@@ -52,9 +85,11 @@ interface MainDisplayStatePayload {
 
 const EDGE_TAB_WIN_WIDTH = 40;
 const EDGE_TAB_WIN_HEIGHT = 96;
+const RETRACT_HIDE_DELAY_MS = 260;
 
 let mainWindow: BrowserWindow | null = null;
 const edgeTabWindows = new Map<number, BrowserWindow>();
+let retractedHideTimer: ReturnType<typeof setTimeout> | null = null;
 let tray: Tray | null = null;
 let isPanelVisible = true;
 let currentAccelerator = 'Alt+Space';
@@ -72,10 +107,6 @@ let isDictatingState = false;
 let shortcutLabelState = 'Alt + Space';
 let suppressBlurUntil = 0;
 const hoveredCompanionDisplayIds = new Set<number>();
-let cachedStore: Record<string, unknown> | null = null;
-let storeWriteChain: Promise<void> = Promise.resolve();
-let storeWriteTimer: NodeJS.Timeout | null = null;
-let storeDirty = false;
 let updateCheckInterval: NodeJS.Timeout | null = null;
 let lastCpuSample: { totalIdle: number; totalTick: number } | null = null;
 
@@ -144,17 +175,17 @@ const ALLOWED_PROTOCOLS = new Set([
   'shell:',
 ]);
 
-const FORBIDDEN_STORE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const MAX_ROLLING_BACKUPS = 7;
-let lastBackupWrittenAt = 0;
-let lastRecoveredFromBackup: string | null = null;
+let sttCommandChain: Promise<unknown> = Promise.resolve();
+let sapiCommandChain: Promise<unknown> = Promise.resolve();
+let sttInstallInFlight: Promise<Record<string, unknown>> | null = null;
+let sttIdleTimer: NodeJS.Timeout | null = null;
+let sapiIdleTimer: NodeJS.Timeout | null = null;
+const STT_WORKER_IDLE_MS = 5 * 60 * 1000; // Reclaim native worker RAM after 5m idle
 
-export interface StoreBackupInfo {
-  fileName: string;
-  filePath: string;
-  createdAt: number;
-  sizeBytes: number;
-}
+export { StoreBackupInfo };
+
+let storeEngineInstance: StoreEngine | null = null;
+let iconMigrationChecked = false;
 
 function getStorePath(): string {
   return path.join(app.getPath('userData'), 'sideflow-config.json');
@@ -164,195 +195,62 @@ function getBackupsDir(): string {
   return path.join(app.getPath('userData'), 'backups');
 }
 
-function listStoreBackupsSync(): StoreBackupInfo[] {
-  try {
-    const dir = getBackupsDir();
-    if (!fs.existsSync(dir)) return [];
-    const entries = fs.readdirSync(dir);
-    const items: StoreBackupInfo[] = [];
-    for (const name of entries) {
-      if (!/^sideflow-backup-[\w.-]+\.json$/i.test(name)) continue;
-      const fullPath = path.join(dir, name);
-      try {
-        const stat = fs.statSync(fullPath);
-        if (stat.isFile() && stat.size > 2) {
-          items.push({
-            fileName: name,
-            filePath: fullPath,
-            createdAt: Math.round(stat.mtimeMs),
-            sizeBytes: stat.size,
-          });
-        }
-      } catch {
-        // ignore unreadable file
-      }
-    }
-    items.sort((a, b) => b.createdAt - a.createdAt);
-    return items;
-  } catch {
-    return [];
+function getIconCacheDir(): string {
+  return path.join(app.getPath('userData'), 'icon-cache');
+}
+
+function getOnnxModelCacheDir(): string {
+  return path.join(app.getPath('userData'), 'models', 'onnx-cache');
+}
+
+function getStoreEngine(): StoreEngine {
+  if (!storeEngineInstance) {
+    storeEngineInstance = new StoreEngine({
+      storePath: getStorePath(),
+      backupsDir: getBackupsDir(),
+      isPackaged: app.isPackaged,
+    });
   }
+  if (!iconMigrationChecked) {
+    iconMigrationChecked = true;
+    try {
+      const store = storeEngineInstance.read();
+      if (migrateDrawerIconsInStore(store, getIconCacheDir())) {
+        storeEngineInstance.write('sideflow_drawers', store.sideflow_drawers);
+      }
+    } catch {
+      // ignore non-critical icon cache migration warning
+    }
+  }
+  return storeEngineInstance;
+}
+
+function listStoreBackupsSync(): StoreBackupInfo[] {
+  return getStoreEngine().listBackupsSync();
 }
 
 function writeBackupSnapshotSync(
   data: Record<string, unknown>,
   forceTimestampName = false
 ): StoreBackupInfo | null {
-  try {
-    if (!data || Object.keys(data).length === 0) return null;
-    const dir = getBackupsDir();
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    const suffix = forceTimestampName
-      ? `${yyyy}-${mm}-${dd}-${String(now.getHours()).padStart(2, '0')}${String(
-          now.getMinutes()
-        ).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`
-      : `${yyyy}-${mm}-${dd}`;
-    const fileName = `sideflow-backup-${suffix}.json`;
-    const targetPath = path.join(dir, fileName);
-    const tmpPath = `${targetPath}.tmp`;
-    const serialized = JSON.stringify(data, null, 2);
-    fs.writeFileSync(tmpPath, serialized, 'utf-8');
-    fs.renameSync(tmpPath, targetPath);
-    lastBackupWrittenAt = Date.now();
-
-    // Prune older snapshots beyond MAX_ROLLING_BACKUPS
-    const allBackups = listStoreBackupsSync();
-    if (allBackups.length > MAX_ROLLING_BACKUPS) {
-      for (const old of allBackups.slice(MAX_ROLLING_BACKUPS)) {
-        try {
-          fs.unlinkSync(old.filePath);
-        } catch {
-          // ignore
-        }
-      }
-    }
-    const stat = fs.statSync(targetPath);
-    return {
-      fileName,
-      filePath: targetPath,
-      createdAt: Math.round(stat.mtimeMs),
-      sizeBytes: stat.size,
-    };
-  } catch (err) {
-    console.warn('[SideFlow] Failed to write rolling backup snapshot:', err);
-    return null;
-  }
+  return getStoreEngine().writeBackupSnapshotSync(
+    data,
+    forceTimestampName ? 'manual' : 'daily'
+  );
 }
 
 function readLocalStore(): Record<string, unknown> {
-  if (cachedStore) return cachedStore;
-  try {
-    const storePath = getStorePath();
-    if (fs.existsSync(storePath)) {
-      const raw = fs.readFileSync(storePath, 'utf-8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        cachedStore = parsed as Record<string, unknown>;
-        return cachedStore;
-      }
-    }
-  } catch (err) {
-    console.error('[SideFlow] Failed to read local store, checking rolling backups:', err);
-    // Corrupt-store auto-recovery: try newest valid rolling snapshot
-    const backups = listStoreBackupsSync();
-    for (const backup of backups) {
-      try {
-        const rawBackup = fs.readFileSync(backup.filePath, 'utf-8');
-        const parsedBackup = JSON.parse(rawBackup);
-        if (
-          parsedBackup &&
-          typeof parsedBackup === 'object' &&
-          !Array.isArray(parsedBackup)
-        ) {
-          cachedStore = parsedBackup as Record<string, unknown>;
-          lastRecoveredFromBackup = backup.fileName;
-          const storePath = getStorePath();
-          fs.writeFileSync(
-            storePath,
-            JSON.stringify(cachedStore, null, 2),
-            'utf-8'
-          );
-          return cachedStore;
-        }
-      } catch {
-        // try next older backup
-      }
-    }
-  }
-  cachedStore = app.isPackaged ? { sideflow_auto_onboarding: true } : {};
-  return cachedStore;
-}
-
-function persistLocalStoreSnapshot(): void {
-  if (!storeDirty) return;
-  storeDirty = false;
-  try {
-    const storePath = getStorePath();
-    const tmpPath = `${storePath}.tmp`;
-    const current = readLocalStore();
-    const serialized = JSON.stringify(current, null, 2);
-    const shouldWriteBackup = Date.now() - lastBackupWrittenAt > 60000;
-    storeWriteChain = storeWriteChain
-      .then(async () => {
-        await fs.promises.writeFile(tmpPath, serialized, 'utf-8');
-        await fs.promises.rename(tmpPath, storePath);
-        if (shouldWriteBackup) {
-          writeBackupSnapshotSync(current, false);
-        }
-      })
-      .catch((err) => {
-        console.error('[SideFlow] Failed to write local store:', err);
-      });
-  } catch (err) {
-    console.error('[SideFlow] Failed to serialize local store:', err);
-  }
+  return getStoreEngine().read();
 }
 
 function flushLocalStoreSync(): void {
-  if (storeWriteTimer) {
-    clearTimeout(storeWriteTimer);
-    storeWriteTimer = null;
-  }
-  if (!storeDirty || !cachedStore) return;
-  storeDirty = false;
-  try {
-    const storePath = getStorePath();
-    const tmpPath = `${storePath}.tmp`;
-    const serialized = JSON.stringify(cachedStore, null, 2);
-    fs.writeFileSync(tmpPath, serialized, 'utf-8');
-    fs.renameSync(tmpPath, storePath);
-    writeBackupSnapshotSync(cachedStore, false);
-  } catch (err) {
-    console.error('[SideFlow] Failed to flush local store synchronously:', err);
+  if (storeEngineInstance) {
+    storeEngineInstance.flushSync();
   }
 }
 
 function writeLocalStore(key: string, value: unknown): void {
-  if (!key || FORBIDDEN_STORE_KEYS.has(key)) return;
-  try {
-    const current = readLocalStore();
-    if (value === null || value === undefined) {
-      delete current[key];
-    } else {
-      current[key] = value;
-    }
-    storeDirty = true;
-    if (storeWriteTimer) {
-      clearTimeout(storeWriteTimer);
-    }
-    storeWriteTimer = setTimeout(() => {
-      storeWriteTimer = null;
-      persistLocalStoreSnapshot();
-    }, 250);
-  } catch (err) {
-    console.error('[SideFlow] Failed to update local store:', err);
-  }
+  getStoreEngine().write(key, value);
 }
 
 function getAutoLaunchState(): { enabled: boolean; isPackaged: boolean } {
@@ -608,11 +506,83 @@ async function performUpdateCheck(): Promise<MainUpdateState> {
   return checkGitHubReleaseFallback();
 }
 
+function fetchHttpsText(url: string, timeoutMs = 10000, maxRedirects = 4): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (!url || !url.startsWith('https://') || maxRedirects < 0) {
+      resolve(null);
+      return;
+    }
+    const req = https.get(
+      url,
+      {
+        headers: {
+          'User-Agent': `SideFlow/${app.getVersion()}`,
+          Accept: '*/*',
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const status = res.statusCode || 0;
+        if (
+          (status === 301 || status === 302 || status === 303 || status === 307 || status === 308) &&
+          res.headers.location
+        ) {
+          res.resume();
+          const redirectUrl = new URL(res.headers.location, url).toString();
+          resolve(fetchHttpsText(redirectUrl, timeoutMs, maxRedirects - 1));
+          return;
+        }
+        if (status < 200 || status >= 300) {
+          res.resume();
+          resolve(null);
+          return;
+        }
+        let body = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk: string) => {
+          if (body.length < 512 * 1024) {
+            body += chunk;
+          }
+        });
+        res.on('end', () => resolve(body));
+      }
+    );
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+async function verifyLatestReleaseManifestOnline(
+  latestVersion?: string
+): Promise<{ valid: boolean; error?: string }> {
+  const tag = latestVersion ? `v${latestVersion.replace(/^v/i, '')}` : 'latest';
+  const baseDownloadUrl =
+    tag === 'latest'
+      ? `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest/download`
+      : `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${tag}`;
+
+  const ymlText = await fetchHttpsText(`${baseDownloadUrl}/latest.yml`);
+  if (!ymlText) {
+    return {
+      valid: false,
+      error: 'Could not retrieve latest.yml release manifest over HTTPS',
+    };
+  }
+  const sigText = await fetchHttpsText(`${baseDownloadUrl}/latest.yml.sig`);
+  const result = verifyReleaseManifest({
+    ymlText,
+    signatureBase64: sigText,
+  });
+  return { valid: result.valid, error: result.error };
+}
+
 function setupAutoUpdater(): void {
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  // Allow SHA-512 verified in-app updates via latest.yml without failing on unsigned builds
-  // (preventing fallback to browser downloads that attach Zone.Identifier Mark-of-the-Web)
+  // Opt-in updates: never download or execute unsigned binaries silently without explicit user consent
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
   (
     autoUpdater as unknown as { verifyUpdateCodeSignature?: boolean }
   ).verifyUpdateCodeSignature = false;
@@ -626,11 +596,11 @@ function setupAutoUpdater(): void {
 
   autoUpdater.on('update-available', (info) => {
     broadcastUpdateState({
-      status: 'downloading',
+      status: 'available',
       latestVersion: info.version,
       releaseNotes:
         typeof info.releaseNotes === 'string' ? info.releaseNotes : undefined,
-      downloadPercent: 0,
+      downloadPercent: undefined,
       lastCheckedAt: Date.now(),
       canQuitAndInstall: false,
       error: undefined,
@@ -818,18 +788,14 @@ function updateTrayMenu(): void {
       label: updateLabel,
       click: () => {
         if (updateState.status === 'downloaded' && updateState.canQuitAndInstall) {
+          flushLocalStoreSync();
           setImmediate(() => autoUpdater.quitAndInstall(false, true));
           return;
         }
-        if (updateState.status === 'available' && updateState.releaseUrl) {
-          const safeUrl = isTrustedReleaseUrl(updateState.releaseUrl)
-            ? updateState.releaseUrl
-            : GITHUB_RELEASES_URL;
-          void shell.openExternal(safeUrl);
-          return;
-        }
         navigateToTabFromMain('settings');
-        void performUpdateCheck();
+        if (updateState.status !== 'available') {
+          void performUpdateCheck();
+        }
       },
     },
     { type: 'separator' },
@@ -843,12 +809,31 @@ function updateTrayMenu(): void {
   tray.setContextMenu(contextMenu);
 }
 
+function clearRetractedHideTimer(): void {
+  if (retractedHideTimer !== null) {
+    clearTimeout(retractedHideTimer);
+    retractedHideTimer = null;
+  }
+}
+
 function syncClosedMainWindowMouseForwarding(): void {
   if (!mainWindow || mainWindow.isDestroyed() || isPanelVisible) return;
-  if (showEdgeHandleState || isDictatingState) {
-    mainWindow.setIgnoreMouseEvents(true, { forward: true });
-  } else {
-    mainWindow.setIgnoreMouseEvents(true);
+  clearRetractedHideTimer();
+  // Companion 40x96 edgeTabWindow handles edge hover/click while retracted, avoiding 60-120Hz Win32 cursor polling on mainWindow
+  mainWindow.setIgnoreMouseEvents(true);
+  if (!isDictatingState) {
+    retractedHideTimer = setTimeout(() => {
+      retractedHideTimer = null;
+      if (
+        !isPanelVisible &&
+        !isDictatingState &&
+        mainWindow &&
+        !mainWindow.isDestroyed() &&
+        mainWindow.isVisible()
+      ) {
+        mainWindow.hide();
+      }
+    }, RETRACT_HIDE_DELAY_MS);
   }
 }
 
@@ -857,6 +842,7 @@ function openPanelOnDisplay(
   switchToTab?: 'drawers' | 'flowchart' | 'notes' | 'settings'
 ): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  clearRetractedHideTimer();
   hoveredCompanionDisplayIds.clear();
   suppressBlurUntil = Date.now() + 500;
 
@@ -1041,6 +1027,14 @@ function launchNativeCommand(
       ? args.filter((a): a is string => typeof a === 'string' && a.trim().length > 0)
       : [];
 
+    if (isUncPath(trimmed) || safeArgs.some((a) => isUncPath(a))) {
+      resolve({
+        success: false,
+        error: 'Blocked unsafe UNC network path',
+      });
+      return;
+    }
+
     // Check if URL or custom URI protocol (e.g. vscode://, spotify://, mailto:, ms-calculator:)
     // Excludes single-letter Windows drive paths like C:\...
     const isUriOrUrl = /^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(trimmed);
@@ -1065,7 +1059,7 @@ function launchNativeCommand(
       }
 
       if (trimmed.toLowerCase().startsWith('shell:')) {
-        if (!/^shell:appsfolder\\/i.test(trimmed)) {
+        if (!isAllowedShellUri(trimmed)) {
           resolve({
             success: false,
             error: 'Blocked unrestricted shell: URI',
@@ -1074,7 +1068,12 @@ function launchNativeCommand(
         }
         if (process.platform === 'win32') {
           try {
-            const child = execFile('explorer.exe', [trimmed]);
+            const explorerBin = resolveWinSystem32Binary('explorer.exe');
+            const child = spawn(explorerBin, [trimmed], {
+              detached: true,
+              stdio: 'ignore',
+              shell: false,
+            });
             child.on('spawn', () => {
               child.unref();
               resolve({ success: true });
@@ -1114,18 +1113,15 @@ function launchNativeCommand(
         }
       };
       try {
-        const child = execFile(
-          resolvedPath,
-          safeArgs,
-          { shell: false, windowsVerbatimArguments: false },
-          (execErr) => {
-            if (execErr) {
-              done({ success: false, error: execErr.message });
-            } else {
-              done({ success: true });
-            }
-          }
-        );
+        const child = spawn(resolvedPath, safeArgs, {
+          shell: false,
+          windowsVerbatimArguments: false,
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.on('error', (execErr: Error) => {
+          done({ success: false, error: execErr.message });
+        });
         child.on('spawn', () => {
           child.unref();
           done({ success: true });
@@ -1388,49 +1384,77 @@ function ensureSttWorker(): Promise<boolean> {
   return sttWorkerInitPromise;
 }
 
+function resetSttWorkerIdleTimer(): void {
+  if (sttIdleTimer) {
+    clearTimeout(sttIdleTimer);
+  }
+  sttIdleTimer = setTimeout(() => {
+    sttIdleTimer = null;
+    if (sttPendingRequests.size === 0 && sttWorkerProcess) {
+      const proc = sttWorkerProcess;
+      sttWorkerReady = false;
+      sttWorkerProcess = null;
+      try {
+        proc.stdin.end();
+        proc.kill();
+      } catch {
+        // ignore
+      }
+    }
+  }, STT_WORKER_IDLE_MS);
+  sttIdleTimer.unref?.();
+}
+
 function sendSttWorkerCommand(
   payload: Record<string, unknown>,
   timeoutMs = 30000
 ): Promise<Record<string, unknown>> {
-  return new Promise(async (resolve) => {
-    const ok = await ensureSttWorker();
-    const proc = sttWorkerProcess;
-    if (!ok || !proc) {
-      resolve({ success: false, error: 'Python faster-whisper worker unavailable' });
-      return;
-    }
-
-    const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const timer = setTimeout(() => {
-      sttPendingRequests.delete(reqId);
-      if (sttWorkerProcess === proc) {
-        sttWorkerReady = false;
-        sttWorkerProcess = null;
-        try {
-          proc.kill();
-        } catch {
-          // ignore
-        }
+  const runTask = (): Promise<Record<string, unknown>> =>
+    new Promise(async (resolve) => {
+      const ok = await ensureSttWorker();
+      const proc = sttWorkerProcess;
+      if (!ok || !proc) {
+        resolve({ success: false, error: 'Python faster-whisper worker unavailable' });
+        return;
       }
-      resolve({ success: false, error: 'STT worker timed out' });
-    }, timeoutMs);
 
-    sttPendingRequests.set(reqId, (resp) => {
-      clearTimeout(timer);
-      resolve(resp);
+      resetSttWorkerIdleTimer();
+      const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const timer = setTimeout(() => {
+        sttPendingRequests.delete(reqId);
+        if (sttWorkerProcess === proc) {
+          sttWorkerReady = false;
+          sttWorkerProcess = null;
+          try {
+            proc.kill();
+          } catch {
+            // ignore
+          }
+        }
+        resolve({ success: false, error: 'STT worker timed out' });
+      }, timeoutMs);
+
+      sttPendingRequests.set(reqId, (resp) => {
+        clearTimeout(timer);
+        resetSttWorkerIdleTimer();
+        resolve(resp);
+      });
+
+      try {
+        proc.stdin.write(JSON.stringify({ ...payload, id: reqId }) + '\n');
+      } catch (err) {
+        clearTimeout(timer);
+        sttPendingRequests.delete(reqId);
+        resolve({
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed to write to STT worker',
+        });
+      }
     });
 
-    try {
-      proc.stdin.write(JSON.stringify({ ...payload, id: reqId }) + '\n');
-    } catch (err) {
-      clearTimeout(timer);
-      sttPendingRequests.delete(reqId);
-      resolve({
-        success: false,
-        error: err instanceof Error ? err.message : 'Failed to write to STT worker',
-      });
-    }
-  });
+  const queued = sttCommandChain.then(runTask, runTask);
+  sttCommandChain = queued.catch(() => ({}));
+  return queued;
 }
 
 const SAPI_DAEMON_PS_SCRIPT = `
@@ -1538,8 +1562,11 @@ function ensureSapiWorker(): Promise<boolean> {
 
     try {
       const encodedCmd = Buffer.from(SAPI_DAEMON_PS_SCRIPT, 'utf16le').toString('base64');
+      const psBin = resolveWinSystem32Binary(
+        'WindowsPowerShell\\v1.0\\powershell.exe'
+      );
       const proc = spawn(
-        'powershell.exe',
+        psBin,
         [
           '-NoLogo',
           '-NoProfile',
@@ -1633,49 +1660,77 @@ function ensureSapiWorker(): Promise<boolean> {
   return sapiWorkerInitPromise;
 }
 
+function resetSapiWorkerIdleTimer(): void {
+  if (sapiIdleTimer) {
+    clearTimeout(sapiIdleTimer);
+  }
+  sapiIdleTimer = setTimeout(() => {
+    sapiIdleTimer = null;
+    if (sapiPendingRequests.size === 0 && sapiWorkerProcess) {
+      const proc = sapiWorkerProcess;
+      sapiWorkerReady = false;
+      sapiWorkerProcess = null;
+      try {
+        proc.stdin.end();
+        proc.kill();
+      } catch {
+        // ignore
+      }
+    }
+  }, STT_WORKER_IDLE_MS);
+  sapiIdleTimer.unref?.();
+}
+
 function sendSapiWorkerCommand(
   payload: Record<string, unknown>,
   timeoutMs = 15000
 ): Promise<Record<string, unknown>> {
-  return new Promise(async (resolve) => {
-    const ok = await ensureSapiWorker();
-    const proc = sapiWorkerProcess;
-    if (!ok || !proc) {
-      resolve({ success: false, error: 'Persistent Windows SAPI worker unavailable' });
-      return;
-    }
-
-    const reqId = `sapi-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const timer = setTimeout(() => {
-      sapiPendingRequests.delete(reqId);
-      if (sapiWorkerProcess === proc) {
-        sapiWorkerReady = false;
-        sapiWorkerProcess = null;
-        try {
-          proc.kill();
-        } catch {
-          // ignore
-        }
+  const runTask = (): Promise<Record<string, unknown>> =>
+    new Promise(async (resolve) => {
+      const ok = await ensureSapiWorker();
+      const proc = sapiWorkerProcess;
+      if (!ok || !proc) {
+        resolve({ success: false, error: 'Persistent Windows SAPI worker unavailable' });
+        return;
       }
-      resolve({ success: false, error: 'Windows SAPI worker timed out' });
-    }, timeoutMs);
 
-    sapiPendingRequests.set(reqId, (resp) => {
-      clearTimeout(timer);
-      resolve(resp);
+      resetSapiWorkerIdleTimer();
+      const reqId = `sapi-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const timer = setTimeout(() => {
+        sapiPendingRequests.delete(reqId);
+        if (sapiWorkerProcess === proc) {
+          sapiWorkerReady = false;
+          sapiWorkerProcess = null;
+          try {
+            proc.kill();
+          } catch {
+            // ignore
+          }
+        }
+        resolve({ success: false, error: 'Windows SAPI worker timed out' });
+      }, timeoutMs);
+
+      sapiPendingRequests.set(reqId, (resp) => {
+        clearTimeout(timer);
+        resetSapiWorkerIdleTimer();
+        resolve(resp);
+      });
+
+      try {
+        proc.stdin.write(JSON.stringify({ ...payload, id: reqId }) + '\n');
+      } catch (err) {
+        clearTimeout(timer);
+        sapiPendingRequests.delete(reqId);
+        resolve({
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed to write to SAPI worker',
+        });
+      }
     });
 
-    try {
-      proc.stdin.write(JSON.stringify({ ...payload, id: reqId }) + '\n');
-    } catch (err) {
-      clearTimeout(timer);
-      sapiPendingRequests.delete(reqId);
-      resolve({
-        success: false,
-        error: err instanceof Error ? err.message : 'Failed to write to SAPI worker',
-      });
-    }
-  });
+  const queued = sapiCommandChain.then(runTask, runTask);
+  sapiCommandChain = queued.catch(() => ({}));
+  return queued;
 }
 
 async function transcribeWithWindowsSapi(
@@ -2014,7 +2069,11 @@ function computeEdgeTabBounds(
 ): { x: number; y: number; width: number; height: number } {
   const { x: workX, y: workY, width: workW, height: workH } = display.workArea;
   const x = edge === 'left' ? workX : workX + workW - EDGE_TAB_WIN_WIDTH;
-  const y = Math.round(workY + (workH - EDGE_TAB_WIN_HEIGHT) / 2);
+  const rawY = Math.round(workY + workH * 0.28 - EDGE_TAB_WIN_HEIGHT / 2);
+  const y = Math.max(
+    workY,
+    Math.min(workY + Math.max(0, workH - EDGE_TAB_WIN_HEIGHT), rawY)
+  );
   return {
     x,
     y,
@@ -2121,8 +2180,7 @@ function syncEdgeTabWindows(): void {
   const enabledDisplays = getEnabledMonitorDisplays(allDisplays);
   const shouldShowTabs = showEdgeHandleState || isDictatingState;
 
-  // If in single-display routing where no companion windows are needed, release idle companion renderers
-  if (enabledDisplays.length <= 1) {
+  if (enabledDisplays.length === 0) {
     hoveredCompanionDisplayIds.clear();
     destroyAllEdgeTabWindows();
     return;
@@ -2141,15 +2199,16 @@ function syncEdgeTabWindows(): void {
     }
   }
 
+  // Show lightweight 40x96 companion tab on activeDisplay too whenever mainWindow is retracted
   const companionTargetIds = new Set(
     shouldShowTabs
       ? enabledDisplays
-          .filter((d) => d.id !== activeDisplay.id)
+          .filter((d) => !isPanelVisible || d.id !== activeDisplay.id)
           .map((d) => d.id)
       : []
   );
 
-  // Hide companion windows that should not currently be visible (e.g. activeDisplayId)
+  // Hide companion windows that should not currently be visible (e.g. activeDisplayId while panel is open)
   for (const [id, win] of edgeTabWindows) {
     if (!companionTargetIds.has(id) && !win.isDestroyed()) {
       if (win.isVisible()) {
@@ -2159,7 +2218,7 @@ function syncEdgeTabWindows(): void {
     }
   }
 
-  // Show and position companion windows for all other enabled monitors
+  // Show and position companion windows for target monitors
   for (const display of enabledDisplays) {
     if (!companionTargetIds.has(display.id)) continue;
     const edge = getEffectiveEdgeForDisplay(display.id);
@@ -2176,7 +2235,7 @@ function syncEdgeTabWindows(): void {
           isDictating: isDictatingState,
           shortcutLabel: shortcutLabelState,
           displayName: `Monitor ${display.index}`,
-          isOpenElsewhere: isPanelVisible,
+          isOpenElsewhere: isPanelVisible && display.id !== activeDisplay.id,
         });
         if (!existing.isVisible()) {
           existing.setIgnoreMouseEvents(true, { forward: true });
@@ -2433,16 +2492,37 @@ function createWindow(): void {
       );
   });
 
+  // Enable SharedArrayBuffer / multi-threaded ONNX WASM SIMD inside trusted app frames via COOP + credentialless COEP
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    if (isTrustedAppUrl(details.url)) {
+      const responseHeaders = {
+        ...(details.responseHeaders || {}),
+        'Cross-Origin-Opener-Policy': ['same-origin'],
+        'Cross-Origin-Embedder-Policy': ['credentialless'],
+      };
+      callback({ responseHeaders });
+      return;
+    }
+    callback({ responseHeaders: details.responseHeaders });
+  });
+
   if (devServerUrl) {
     mainWindow.loadURL(devServerUrl);
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
-  // Prevent untrusted navigation inside the Electron shell
+  // Prevent untrusted navigation inside the Electron shell and subframes
   mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
     if (trustedDevOrigin && isTrustedAppUrl(navigationUrl)) return;
     event.preventDefault();
+  });
+
+  mainWindow.webContents.on('will-frame-navigate', (event) => {
+    if (trustedDevOrigin && isTrustedAppUrl(event.url)) return;
+    if (!event.isMainFrame || !isTrustedAppUrl(event.url)) {
+      event.preventDefault();
+    }
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -2464,11 +2544,24 @@ function createWindow(): void {
     }
   });
 
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      closePanelFromMain();
+    }
+  });
+
   mainWindow.on('closed', () => {
+    clearRetractedHideTimer();
     mainWindow = null;
     destroyAllEdgeTabWindows();
   });
 }
+
+let isQuitting = false;
+app.on('before-quit', () => {
+  isQuitting = true;
+});
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
@@ -2481,6 +2574,27 @@ if (!hasSingleInstanceLock) {
 
 app.whenReady().then(() => {
   if (!hasSingleInstanceLock) return;
+
+  // Serve content-addressed native icons from userData/icon-cache/<sha1>.<ext>
+  protocol.handle(ICON_PROTOCOL_SCHEME, async (request) => {
+    const filePath = resolveCachedIconFilePath(getIconCacheDir(), request.url);
+    if (!filePath) {
+      return new Response('Not Found', { status: 404 });
+    }
+    try {
+      const bytes = await fs.promises.readFile(filePath);
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          'Content-Type': getExtMimeType(path.extname(filePath)),
+          'Cache-Control': 'public, max-age=31536000, immutable',
+          'Cross-Origin-Resource-Policy': 'cross-origin',
+        },
+      });
+    } catch {
+      return new Response('Not Found', { status: 404 });
+    }
+  });
 
   createWindow();
   syncEdgeTabWindows();
@@ -2533,7 +2647,9 @@ app.whenReady().then(() => {
     Boolean(
       mainWindow &&
         !mainWindow.isDestroyed() &&
-        event.sender === mainWindow.webContents
+        event.sender === mainWindow.webContents &&
+        (!event.senderFrame ||
+          event.senderFrame === mainWindow.webContents.mainFrame)
     );
 
   const isCompanionSender = (
@@ -2573,6 +2689,7 @@ app.whenReady().then(() => {
     isPanelVisible = Boolean(visible);
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (isPanelVisible) {
+      clearRetractedHideTimer();
       mainWindow.setIgnoreMouseEvents(false);
       mainWindow.show();
       mainWindow.focus();
@@ -2601,6 +2718,10 @@ app.whenReady().then(() => {
   ipcMain.on('set-ignore-mouse-events', (event, ignore: boolean) => {
     if (!isMainSender(event)) return;
     if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!isPanelVisible) {
+      mainWindow.setIgnoreMouseEvents(true);
+      return;
+    }
     if (ignore) {
       mainWindow.setIgnoreMouseEvents(true, { forward: true });
     } else {
@@ -2730,9 +2851,10 @@ app.whenReady().then(() => {
 
   ipcMain.handle('read-directory-items', async (event, dirPath: string) => {
     if (!isMainSender(event)) return [];
-    if (!dirPath || typeof dirPath !== 'string') return [];
+    if (!dirPath || typeof dirPath !== 'string' || isUncPath(dirPath)) return [];
     try {
       const resolvedDir = path.resolve(dirPath.trim());
+      if (isUncPath(resolvedDir)) return [];
       const entries = await fs.promises.readdir(resolvedDir, {
         withFileTypes: true,
       });
@@ -2877,6 +2999,9 @@ app.whenReady().then(() => {
     iconDataUrl: string | null;
   }> => {
     const trimmed = (rawInput || '').trim().replace(/^["']|["']$/g, '');
+    if (isUncPath(trimmed)) {
+      return { name: 'Blocked UNC Path', cmd: '', iconDataUrl: null };
+    }
     let candidatePath = trimmed;
     if (trimmed.toLowerCase().startsWith('file://')) {
       try {
@@ -2912,13 +3037,13 @@ app.whenReady().then(() => {
     if (lowerPath.endsWith('.lnk') && fs.existsSync(resolvedPath)) {
       try {
         const link = shell.readShortcutLink(resolvedPath);
-        if (link.target) {
+        if (link.target && !isUncPath(link.target)) {
           targetPath = link.target;
         }
-        if (link.args) {
+        if (link.args && !isUncPath(link.args)) {
           shortcutArgs = link.args;
         }
-        if (link.icon) {
+        if (link.icon && !isUncPath(link.icon)) {
           customIconFilePath = link.icon;
         }
       } catch {
@@ -2931,10 +3056,10 @@ app.whenReady().then(() => {
           const content = await fs.promises.readFile(resolvedPath, 'utf-8');
           const urlMatch = content.match(/^URL=(.+)$/im);
           const iconMatch = content.match(/^IconFile=(.+)$/im);
-          if (urlMatch && urlMatch[1]) {
+          if (urlMatch && urlMatch[1] && !isUncPath(urlMatch[1].trim())) {
             targetPath = urlMatch[1].trim();
           }
-          if (iconMatch && iconMatch[1]) {
+          if (iconMatch && iconMatch[1] && !isUncPath(iconMatch[1].trim())) {
             customIconFilePath = iconMatch[1].trim();
           }
         }
@@ -2948,7 +3073,9 @@ app.whenReady().then(() => {
       customIconFilePath,
       targetPath,
       resolvedPath,
-    ].filter((p): p is string => Boolean(p && typeof p === 'string'));
+    ].filter(
+      (p): p is string => Boolean(p && typeof p === 'string' && !isUncPath(p))
+    );
 
     for (const candidate of iconCandidatePaths) {
       if (iconDataUrl) break;
@@ -2981,6 +3108,11 @@ app.whenReady().then(() => {
       }
     }
 
+    const cachedIconUrl = cacheRasterIconDataUrl(
+      getIconCacheDir(),
+      iconDataUrl
+    );
+
     const baseDisplay = path
       .basename(resolvedPath)
       .replace(/\.(lnk|appref-ms|url|exe|app)$/i, '');
@@ -2989,7 +3121,7 @@ app.whenReady().then(() => {
       name: baseDisplay || path.basename(targetPath) || 'Shortcut',
       cmd: targetPath || resolvedPath,
       ...(shortcutArgs ? { args: shortcutArgs } : {}),
-      iconDataUrl,
+      iconDataUrl: cachedIconUrl,
     };
   };
 
@@ -3070,8 +3202,9 @@ app.whenReady().then(() => {
     if (!isMainSender(event)) return [];
     return new Promise<string[]>((resolve) => {
       if (process.platform === 'win32') {
+        const tasklistBin = resolveWinSystem32Binary('tasklist.exe');
         execFile(
-          'tasklist',
+          tasklistBin,
           ['/FO', 'CSV', '/NH'],
           { timeout: 4000, windowsHide: true },
           (err, stdout) => {
@@ -3111,6 +3244,14 @@ app.whenReady().then(() => {
     });
   });
 
+  ipcMain.on('store-get-all-sync', (event) => {
+    if (!isMainSender(event)) {
+      event.returnValue = null;
+      return;
+    }
+    event.returnValue = readLocalStore();
+  });
+
   ipcMain.handle('store-get-all', async (event) => {
     if (!isMainSender(event)) return {};
     return readLocalStore();
@@ -3146,37 +3287,59 @@ app.whenReady().then(() => {
       if (!isMainSender(event)) {
         return { success: false, error: 'Unauthorized IPC sender' };
       }
+      const res = getStoreEngine().restoreBackupSync(fileName);
+      if (!res.success || !res.store) {
+        return res;
+      }
+
+      // Synchronize main-process runtime globals immediately after snapshot restore
+      const restored = res.store;
+      if (typeof restored.sideflow_edge_handle === 'boolean') {
+        showEdgeHandleState = restored.sideflow_edge_handle;
+      }
       if (
-        typeof fileName !== 'string' ||
-        path.basename(fileName) !== fileName ||
-        !/^sideflow-backup-[\w.-]+\.json$/i.test(fileName)
+        restored.sideflow_panel_edge === 'left' ||
+        restored.sideflow_panel_edge === 'right'
       ) {
-        return { success: false, error: 'Invalid backup snapshot filename' };
+        currentPanelEdge = restored.sideflow_panel_edge;
       }
-      try {
-        const targetPath = path.join(getBackupsDir(), fileName);
-        if (!fs.existsSync(targetPath)) {
-          return { success: false, error: 'Backup snapshot file not found' };
-        }
-        const raw = fs.readFileSync(targetPath, 'utf-8');
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          return { success: false, error: 'Corrupt backup snapshot JSON' };
-        }
-        cachedStore = parsed as Record<string, unknown>;
-        storeDirty = true;
-        flushLocalStoreSync();
-        return {
-          success: true,
-          store: cachedStore,
-        };
-      } catch (err) {
-        return {
-          success: false,
-          error:
-            err instanceof Error ? err.message : 'Failed to restore snapshot',
-        };
+      if (
+        typeof restored.sideflow_panel_width_percent === 'number' &&
+        Number.isFinite(restored.sideflow_panel_width_percent)
+      ) {
+        currentPanelWidthPercent = Math.max(
+          20,
+          Math.min(85, Math.round(restored.sideflow_panel_width_percent))
+        );
       }
+      if (
+        restored.sideflow_shortcut &&
+        typeof restored.sideflow_shortcut === 'object' &&
+        typeof (restored.sideflow_shortcut as { label?: unknown }).label ===
+          'string'
+      ) {
+        const label = String(
+          (restored.sideflow_shortcut as { label: string }).label
+        )
+          .trim()
+          .slice(0, 64);
+        if (label) {
+          shortcutLabelState = label;
+          registerGlobalHotkey(label.replace(/\s+/g, ''));
+        }
+      }
+      if (restored.sideflow_monitor_settings) {
+        applyMonitorSettingsFromMain(
+          sanitizeMainMonitorSettings(restored.sideflow_monitor_settings)
+        );
+      } else {
+        applyMainWindowBounds();
+      }
+      syncClosedMainWindowMouseForwarding();
+      syncEdgeTabWindows();
+      updateTrayMenu();
+
+      return res;
     }
   );
 
@@ -3219,8 +3382,11 @@ app.whenReady().then(() => {
       if (fs.existsSync(storePath)) {
         storeSizeBytes = fs.statSync(storePath).size;
       } else {
-        fs.writeFileSync(storePath, JSON.stringify(store, null, 2), 'utf-8');
-        storeSizeBytes = fs.statSync(storePath).size;
+        getStoreEngine().write('__diag_touch', null);
+        getStoreEngine().flushSync();
+        if (fs.existsSync(storePath)) {
+          storeSizeBytes = fs.statSync(storePath).size;
+        }
       }
     } catch {
       storeHealthy = false;
@@ -3232,6 +3398,7 @@ app.whenReady().then(() => {
     } catch {
       shortcutRegistered = false;
     }
+    const recoveredName = getStoreEngine().getLastRecoveredFromBackup();
     return {
       shortcutRegistered,
       currentAccelerator,
@@ -3240,7 +3407,7 @@ app.whenReady().then(() => {
       storePath,
       backupCount: backups.length,
       latestBackupFile: backups[0]?.fileName,
-      recoveredFromBackup: lastRecoveredFromBackup || undefined,
+      recoveredFromBackup: recoveredName || undefined,
       strictOffline: store.sideflow_strict_offline === true,
       sttReady:
         process.platform === 'win32' ||
@@ -3278,6 +3445,26 @@ app.whenReady().then(() => {
     }
   });
 
+  // Non-spawning status check on cold boot so opening SideFlow never spawns Python until dictation is actually requested
+  const probeManagedVenvFasterWhisper = (): boolean => {
+    try {
+      const venvDir = path.join(app.getPath('userData'), 'python-stt-venv');
+      const winSitePkg = path.join(venvDir, 'Lib', 'site-packages', 'faster_whisper');
+      if (fs.existsSync(winSitePkg)) return true;
+      const libDir = path.join(venvDir, 'lib');
+      if (fs.existsSync(libDir)) {
+        for (const sub of fs.readdirSync(libDir)) {
+          if (fs.existsSync(path.join(libDir, sub, 'site-packages', 'faster_whisper'))) {
+            return true;
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return false;
+  };
+
   ipcMain.handle('get-local-stt-status', async (event) => {
     if (!isMainSender(event)) {
       return {
@@ -3288,15 +3475,15 @@ app.whenReady().then(() => {
       };
     }
     if (sttStatusCache) return sttStatusCache;
-    await ensureSttWorker();
-    if (sttStatusCache) {
-      return sttStatusCache;
-    }
+    const hasManagedFasterWhisper = probeManagedVenvFasterWhisper();
+    const cpuCount = os.cpus()?.length || 8;
     return {
-      available: process.platform === 'win32',
-      fasterWhisperAvailable: false,
+      available: hasManagedFasterWhisper || process.platform === 'win32',
+      fasterWhisperAvailable: hasManagedFasterWhisper,
       cudaAvailable: false,
+      cpuThreads: Math.max(2, Math.min(6, Math.floor(cpuCount / 2))),
       windowsSapiAvailable: process.platform === 'win32',
+      ...(hasManagedFasterWhisper ? { activeModel: 'base.en' } : {}),
     };
   });
 
@@ -3304,6 +3491,19 @@ app.whenReady().then(() => {
     if (!isMainSender(event)) {
       return { success: false, error: 'Unauthorized IPC sender' };
     }
+    if (readLocalStore().sideflow_strict_offline === true) {
+      return {
+        success: false,
+        error:
+          'Strict Offline Mode is active. Disable Strict Offline Mode before downloading Python packages from PyPI.',
+      };
+    }
+    if (sttInstallInFlight) {
+      return sttInstallInFlight;
+    }
+
+    sttInstallInFlight = (async () => {
+      try {
     const runCmd = (
       bin: string,
       args: string[],
@@ -3400,10 +3600,10 @@ app.whenReady().then(() => {
       }
     }
 
-    // 3. Install faster-whisper into the managed venv
+    // 3. Install pinned faster-whisper & numpy into the managed venv
     const pipRes = await runCmd(
       venvPy,
-      ['-m', 'pip', 'install', '--upgrade', 'pip', 'faster-whisper'],
+      ['-m', 'pip', 'install', '--upgrade', 'pip', 'numpy>=1.24,<3', 'faster-whisper>=1.0.3,<2'],
       240000
     );
     if (!pipRes.ok) {
@@ -3442,6 +3642,12 @@ app.whenReady().then(() => {
         : 'Installed faster-whisper; restart SideFlow to activate.',
       status: finalStatus,
     };
+      } finally {
+        sttInstallInFlight = null;
+      }
+    })();
+
+    return sttInstallInFlight;
   });
 
   ipcMain.handle(
@@ -3485,12 +3691,14 @@ app.whenReady().then(() => {
 
       const workerOk = await ensureSttWorker();
       if (workerOk && sttStatusCache?.fasterWhisperAvailable) {
+        const strictOffline = readLocalStore().sideflow_strict_offline === true;
         const resp = await sendSttWorkerCommand(
           {
             cmd: 'warmup',
             lang,
             modelSize,
             preferEngine,
+            strictOffline,
           },
           45000
         );
@@ -3571,6 +3779,7 @@ app.whenReady().then(() => {
 
       const workerOk = await ensureSttWorker();
       if (workerOk && sttStatusCache?.fasterWhisperAvailable) {
+        const strictOffline = readLocalStore().sideflow_strict_offline === true;
         const workerResp = await sendSttWorkerCommand({
           cmd: 'transcribe',
           pcm16Base64: payload.pcm16Base64,
@@ -3583,6 +3792,7 @@ app.whenReady().then(() => {
           isPartial: Boolean(payload.isPartial),
           preTrimmed: Boolean(payload.preTrimmed),
           preNormalized: Boolean(payload.preNormalized),
+          strictOffline,
         });
 
         if (workerResp.success) {
@@ -3644,13 +3854,53 @@ app.whenReady().then(() => {
     if (!isMainSender(event)) {
       return { success: false, error: 'Unauthorized IPC sender' };
     }
+    if (readLocalStore().sideflow_strict_offline === true) {
+      return {
+        success: false,
+        error: 'Strict Offline Mode is active. Disable it to download updates.',
+      };
+    }
     try {
       if (updateState.status === 'downloaded' && updateState.canQuitAndInstall) {
+        flushLocalStoreSync();
         setImmediate(() => {
           autoUpdater.quitAndInstall(false, true);
         });
         return { success: true };
       }
+
+      // Opt-in in-app verified download for packaged NSIS builds
+      if (
+        updateState.status === 'available' &&
+        app.isPackaged &&
+        !process.env.PORTABLE_EXECUTABLE_DIR
+      ) {
+        const manifestCheck = await verifyLatestReleaseManifestOnline(
+          updateState.latestVersion
+        );
+        if (!manifestCheck.valid) {
+          broadcastUpdateState({
+            status: 'error',
+            error:
+              manifestCheck.error ||
+              'Release manifest verification failed. Refusing update download.',
+          });
+          return {
+            success: false,
+            error: manifestCheck.error || 'Release manifest verification failed',
+          };
+        }
+
+        broadcastUpdateState({
+          status: 'downloading',
+          downloadPercent: 0,
+          canQuitAndInstall: false,
+          error: undefined,
+        });
+        await autoUpdater.downloadUpdate();
+        return { success: true };
+      }
+
       if (updateState.releaseUrl && isTrustedReleaseUrl(updateState.releaseUrl)) {
         await shell.openExternal(updateState.releaseUrl);
         return { success: true };
@@ -3658,9 +3908,15 @@ app.whenReady().then(() => {
       await shell.openExternal(GITHUB_RELEASES_URL);
       return { success: true };
     } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Failed to launch update installer';
+      broadcastUpdateState({
+        status: 'error',
+        error: msg,
+      });
       return {
         success: false,
-        error: err instanceof Error ? err.message : 'Failed to launch update installer',
+        error: msg,
       };
     }
   });
@@ -3719,9 +3975,107 @@ app.whenReady().then(() => {
       return false;
     }
   });
+
+  ipcMain.handle('spellcheck-clear-dictionary', async (event) => {
+    if (!isMainSender(event)) return false;
+    try {
+      const words = await session.defaultSession.listWordsInSpellCheckerDictionary();
+      for (const word of words) {
+        session.defaultSession.removeWordFromSpellCheckerDictionary(word);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  // Persistent disk cache for HuggingFace ONNX Whisper/Moonshine weights when running on packaged `file://` origin
+  ipcMain.handle('onnx-model-cache-get', async (event, cacheKeyUrl: string) => {
+    if (!isMainSender(event) || typeof cacheKeyUrl !== 'string' || !cacheKeyUrl) {
+      return null;
+    }
+    try {
+      const digest = crypto.createHash('sha256').update(cacheKeyUrl).digest('hex');
+      const cacheDir = getOnnxModelCacheDir();
+      const binPath = path.join(cacheDir, `${digest}.bin`);
+      const metaPath = path.join(cacheDir, `${digest}.meta.json`);
+      if (!fs.existsSync(binPath)) return null;
+      const bytes = await fs.promises.readFile(binPath);
+      let headers: Record<string, string> = {
+        'content-type': 'application/octet-stream',
+      };
+      if (fs.existsSync(metaPath)) {
+        try {
+          const metaRaw = await fs.promises.readFile(metaPath, 'utf-8');
+          const parsed = JSON.parse(metaRaw);
+          if (parsed && typeof parsed.headers === 'object') {
+            headers = parsed.headers as Record<string, string>;
+          }
+        } catch {
+          // ignore corrupt metadata sidecar
+        }
+      }
+      return {
+        bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+        headers,
+      };
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle(
+    'onnx-model-cache-put',
+    async (
+      event,
+      payload: {
+        url: string;
+        bytes: Uint8Array;
+        headers?: Record<string, string>;
+      }
+    ) => {
+      if (
+        !isMainSender(event) ||
+        !payload ||
+        typeof payload.url !== 'string' ||
+        !(payload.bytes instanceof Uint8Array) ||
+        payload.bytes.byteLength === 0 ||
+        payload.bytes.byteLength > 300 * 1024 * 1024
+      ) {
+        return false;
+      }
+      let tmpBinPath = '';
+      try {
+        const digest = crypto.createHash('sha256').update(payload.url).digest('hex');
+        const cacheDir = getOnnxModelCacheDir();
+        await fs.promises.mkdir(cacheDir, { recursive: true });
+        const binPath = path.join(cacheDir, `${digest}.bin`);
+        tmpBinPath = `${binPath}.${process.pid}.${Date.now()}.tmp`;
+        const metaPath = path.join(cacheDir, `${digest}.meta.json`);
+        await fs.promises.writeFile(tmpBinPath, Buffer.from(payload.bytes));
+        await renameWithWindowsBackoff(tmpBinPath, binPath);
+        await fs.promises.writeFile(
+          metaPath,
+          JSON.stringify({ url: payload.url, headers: payload.headers || {} }),
+          'utf-8'
+        );
+        return true;
+      } catch {
+        if (tmpBinPath) {
+          try {
+            if (fs.existsSync(tmpBinPath)) await fs.promises.unlink(tmpBinPath);
+          } catch {
+            // ignore temp cleanup failure
+          }
+        }
+        return false;
+      }
+    }
+  );
 });
 
 app.on('will-quit', () => {
+  clearRetractedHideTimer();
   flushLocalStoreSync();
   globalShortcut.unregisterAll();
   destroyAllEdgeTabWindows();

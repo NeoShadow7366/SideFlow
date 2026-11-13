@@ -90,6 +90,7 @@ export interface SideFlowElectronAPI {
   onSwitchTab: (callback: (tab: 'drawers' | 'flowchart' | 'notes' | 'settings') => void) => () => void;
   onWindowBlur: (callback: () => void) => () => void;
   storeGetAll: () => Promise<Record<string, unknown>>;
+  getInitialStoreSnapshot?: () => Record<string, unknown> | null;
   storeSet: (key: string, value: unknown) => void;
   listStoreBackups?: () => Promise<{
     backups: Array<{
@@ -231,8 +232,18 @@ export interface SideFlowElectronAPI {
   ) => () => void;
   addWordToSpellCheckerDictionary?: (word: string) => Promise<boolean>;
   removeWordFromSpellCheckerDictionary?: (word: string) => Promise<boolean>;
+  clearSpellCheckerDictionary?: () => Promise<boolean>;
   setSpellCheckerLanguages?: (languages: string[]) => Promise<boolean>;
   replaceMisspelling?: (replacement: string) => Promise<boolean>;
+  onnxModelCacheGet?: (url: string) => Promise<{
+    bytes: Uint8Array;
+    headers: Record<string, string>;
+  } | null>;
+  onnxModelCachePut?: (payload: {
+    url: string;
+    bytes: Uint8Array;
+    headers?: Record<string, string>;
+  }) => Promise<boolean>;
   onSpellCheckContextMenu?: (
     callback: (params: {
       x: number;
@@ -244,6 +255,9 @@ export interface SideFlowElectronAPI {
     }) => void
   ) => () => void;
 }
+
+let cachedInitialStoreSnapshot: Record<string, unknown> | null | undefined =
+  undefined;
 
 const sideflowAPI: SideFlowElectronAPI = {
   isElectron: true,
@@ -319,6 +333,21 @@ const sideflowAPI: SideFlowElectronAPI = {
     return () => ipcRenderer.removeListener('window-blur', listener);
   },
   storeGetAll: () => ipcRenderer.invoke('store-get-all'),
+  getInitialStoreSnapshot: () => {
+    if (cachedInitialStoreSnapshot !== undefined) {
+      return cachedInitialStoreSnapshot;
+    }
+    try {
+      const res = ipcRenderer.sendSync('store-get-all-sync');
+      cachedInitialStoreSnapshot =
+        res && typeof res === 'object' && !Array.isArray(res)
+          ? (res as Record<string, unknown>)
+          : null;
+    } catch {
+      cachedInitialStoreSnapshot = null;
+    }
+    return cachedInitialStoreSnapshot;
+  },
   storeSet: (key: string, value: unknown) => ipcRenderer.send('store-set', { key, value }),
   listStoreBackups: () => ipcRenderer.invoke('list-store-backups'),
   createStoreBackupNow: () => ipcRenderer.invoke('create-store-backup-now'),
@@ -345,10 +374,16 @@ const sideflowAPI: SideFlowElectronAPI = {
     ipcRenderer.invoke('spellcheck-add-word', word),
   removeWordFromSpellCheckerDictionary: (word: string) =>
     ipcRenderer.invoke('spellcheck-remove-word', word),
+  clearSpellCheckerDictionary: () =>
+    ipcRenderer.invoke('spellcheck-clear-dictionary'),
   setSpellCheckerLanguages: (languages: string[]) =>
     ipcRenderer.invoke('spellcheck-set-languages', languages),
   replaceMisspelling: (replacement: string) =>
     ipcRenderer.invoke('spellcheck-replace-misspelling', replacement),
+  onnxModelCacheGet: (url: string) =>
+    ipcRenderer.invoke('onnx-model-cache-get', url),
+  onnxModelCachePut: (payload) =>
+    ipcRenderer.invoke('onnx-model-cache-put', payload),
   onSpellCheckContextMenu: (callback) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
