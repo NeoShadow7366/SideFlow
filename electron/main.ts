@@ -9,6 +9,7 @@ import {
   screen,
   dialog,
   nativeImage,
+  clipboard,
   session,
   desktopCapturer,
   protocol,
@@ -38,6 +39,7 @@ import {
   isAllowedShellUri,
   isUncPath,
   resolveWinSystem32Binary,
+  splitCliArgs,
   verifyReleaseManifest,
 } from './updateVerifier';
 
@@ -106,7 +108,17 @@ let showEdgeHandleState = true;
 let isDictatingState = false;
 let shortcutLabelState = 'Alt + Space';
 let suppressBlurUntil = 0;
+let nativeDialogDepth = 0;
 const hoveredCompanionDisplayIds = new Set<number>();
+const registeredAppAccelerators = new Set<string>();
+interface AppHotkeyBindingEntry {
+  id: string;
+  name: string;
+  cmd: string;
+  args?: string;
+  hotkey: string;
+}
+let cachedAppHotkeyBindings: AppHotkeyBindingEntry[] = [];
 let updateCheckInterval: NodeJS.Timeout | null = null;
 let lastCpuSample: { totalIdle: number; totalTick: number } | null = null;
 
@@ -969,25 +981,82 @@ function navigateToTabFromMain(tab: 'drawers' | 'flowchart' | 'notes' | 'setting
   openPanelOnDisplay(preferred.id, tab);
 }
 
+const VALID_ACCELERATOR_RE =
+  /^(?:(?:CommandOrControl|Ctrl|Alt|Shift|Super)\+)+(?:[A-Za-z0-9]|Space|Tab|Enter|Backspace|Delete|Up|Down|Left|Right|F[1-9]|F1[0-2]|Plus|Minus)$/i;
+
+function applyRegisteredAppHotkeys(
+  bindings: AppHotkeyBindingEntry[]
+): number {
+  for (const acc of registeredAppAccelerators) {
+    try {
+      globalShortcut.unregister(acc);
+    } catch {
+      // ignore
+    }
+  }
+  registeredAppAccelerators.clear();
+  cachedAppHotkeyBindings = bindings;
+
+  const panelAccLower = currentAccelerator.replace(/\s+/g, '').toLowerCase();
+  const seenLower = new Set<string>();
+
+  for (const binding of bindings) {
+    if (!binding || typeof binding.hotkey !== 'string' || !binding.cmd) continue;
+    const normalized = binding.hotkey.replace(/\s+/g, '');
+    if (!VALID_ACCELERATOR_RE.test(normalized)) continue;
+    const lower = normalized.toLowerCase();
+    if (lower === panelAccLower || seenLower.has(lower)) continue;
+
+    try {
+      const ok = globalShortcut.register(normalized, () => {
+        const parsedArgs = binding.args ? splitCliArgs(binding.args) : [];
+        void launchNativeCommand(binding.cmd, parsedArgs).then((res) => {
+          if (res.success && mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('app-hotkey-triggered', {
+              id: binding.id,
+              name: binding.name || 'Application',
+              cmd: binding.cmd,
+            });
+          }
+        });
+      });
+      if (ok) {
+        registeredAppAccelerators.add(normalized);
+        seenLower.add(lower);
+      }
+    } catch {
+      // ignore unavailable OS shortcut
+    }
+  }
+
+  return registeredAppAccelerators.size;
+}
+
 function registerGlobalHotkey(accelerator: string): boolean {
   if (typeof accelerator !== 'string') return false;
   const normalized = accelerator.replace(/\s+/g, '');
-  if (
-    !/^(?:(?:CommandOrControl|Ctrl|Alt|Shift|Super)\+)+(?:[A-Za-z0-9]|Space|Tab|Enter|Backspace|Delete|Up|Down|Left|Right|F[1-9]|F1[0-2]|Plus|Minus)$/i.test(
-      normalized
-    )
-  ) {
+  if (!VALID_ACCELERATOR_RE.test(normalized)) {
     return false;
   }
 
   const previousAccelerator = currentAccelerator;
+  const normalizedLower = normalized.toLowerCase();
   try {
-    globalShortcut.unregisterAll();
+    if (previousAccelerator) {
+      globalShortcut.unregister(previousAccelerator);
+    }
+    for (const acc of Array.from(registeredAppAccelerators)) {
+      if (acc.toLowerCase() === normalizedLower) {
+        globalShortcut.unregister(acc);
+        registeredAppAccelerators.delete(acc);
+      }
+    }
     const registered = globalShortcut.register(normalized, () => {
       togglePanelFromMain();
     });
     if (registered) {
       currentAccelerator = normalized;
+      applyRegisteredAppHotkeys(cachedAppHotkeyBindings);
       updateTrayMenu();
       return true;
     }
@@ -997,6 +1066,7 @@ function registerGlobalHotkey(accelerator: string): boolean {
         togglePanelFromMain();
       });
     }
+    applyRegisteredAppHotkeys(cachedAppHotkeyBindings);
   } catch (err) {
     console.error('[SideFlow] Failed to register global shortcut:', accelerator, err);
     if (previousAccelerator) {
@@ -1008,6 +1078,7 @@ function registerGlobalHotkey(accelerator: string): boolean {
         // ignore
       }
     }
+    applyRegisteredAppHotkeys(cachedAppHotkeyBindings);
   }
   return false;
 }
@@ -2020,6 +2091,7 @@ function setEdgeTabBoundsSafe(
   try {
     // Keep resizable: false on tiny 40px companion windows to avoid Win32 WS_THICKFRAME (SM_CXMINTRACK ~136px) width clamping
     win.setMinimumSize(bounds.width, bounds.height);
+    win.setMaximumSize(bounds.width, bounds.height);
     win.setBounds(bounds);
     win.setBounds(bounds);
   } catch {
@@ -2538,7 +2610,33 @@ function createWindow(): void {
   });
 
   mainWindow.on('blur', () => {
-    if (hoveredCompanionDisplayIds.size > 0 || Date.now() < suppressBlurUntil) return;
+    if (nativeDialogDepth > 0 || Date.now() < suppressBlurUntil) return;
+    if (hoveredCompanionDisplayIds.size > 0) {
+      // Prune stale companion hover entries in case OS dropped a rapid mouseleave event
+      try {
+        const pt = screen.getCursorScreenPoint();
+        for (const dispId of Array.from(hoveredCompanionDisplayIds)) {
+          const tabWin = edgeTabWindows.get(dispId);
+          if (!tabWin || tabWin.isDestroyed() || !tabWin.isVisible()) {
+            hoveredCompanionDisplayIds.delete(dispId);
+            continue;
+          }
+          const b = tabWin.getBounds();
+          const inside =
+            pt.x >= b.x - 4 &&
+            pt.x <= b.x + b.width + 4 &&
+            pt.y >= b.y - 4 &&
+            pt.y <= b.y + b.height + 4;
+          if (!inside) {
+            hoveredCompanionDisplayIds.delete(dispId);
+            tabWin.setIgnoreMouseEvents(true, { forward: true });
+          }
+        }
+      } catch {
+        hoveredCompanionDisplayIds.clear();
+      }
+      if (hoveredCompanionDisplayIds.size > 0) return;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('window-blur');
     }
@@ -2807,6 +2905,7 @@ app.whenReady().then(() => {
       Number.isFinite(displayId) &&
       isCompanionSender(event, displayId)
     ) {
+      hoveredCompanionDisplayIds.clear();
       openPanelOnDisplay(displayId);
     }
   });
@@ -2831,22 +2930,34 @@ app.whenReady().then(() => {
 
   ipcMain.handle('open-file-dialog', async (event) => {
     if (!isMainSender(event) || !mainWindow) return [];
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Select Application, Shortcut, Script, or File',
-      properties: ['openFile', 'multiSelections'],
-    });
-    if (result.canceled) return [];
-    return result.filePaths;
+    nativeDialogDepth += 1;
+    try {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: 'Select Application, Shortcut, Script, or File',
+        properties: ['openFile', 'multiSelections'],
+      });
+      if (result.canceled) return [];
+      return result.filePaths;
+    } finally {
+      nativeDialogDepth = Math.max(0, nativeDialogDepth - 1);
+      suppressBlurUntil = Date.now() + 350;
+    }
   });
 
   ipcMain.handle('open-directory-dialog', async (event) => {
     if (!isMainSender(event) || !mainWindow) return null;
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Select Folder for Live ObjectDock Drawer',
-      properties: ['openDirectory'],
-    });
-    if (result.canceled || !result.filePaths.length) return null;
-    return result.filePaths[0];
+    nativeDialogDepth += 1;
+    try {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: 'Select Folder for Live ObjectDock Drawer',
+        properties: ['openDirectory'],
+      });
+      if (result.canceled || !result.filePaths.length) return null;
+      return result.filePaths[0];
+    } finally {
+      nativeDialogDepth = Math.max(0, nativeDialogDepth - 1);
+      suppressBlurUntil = Date.now() + 350;
+    }
   });
 
   ipcMain.handle('read-directory-items', async (event, dirPath: string) => {
@@ -3765,7 +3876,7 @@ app.whenReady().then(() => {
           : 'base.en';
       const safePromptContext =
         typeof payload.promptContext === 'string'
-          ? payload.promptContext.slice(-300)
+          ? payload.promptContext.slice(-600)
           : '';
 
       // Explicit Windows Offline Speech (SAPI) via persistent MemoryStream daemon
@@ -3987,6 +4098,60 @@ app.whenReady().then(() => {
     } catch {
       return false;
     }
+  });
+
+  ipcMain.handle(
+    'clipboard-write-png-data-url',
+    async (event, dataUrl: unknown) => {
+      if (
+        !isMainSender(event) ||
+        typeof dataUrl !== 'string' ||
+        !dataUrl.startsWith('data:image/png;base64,') ||
+        dataUrl.length > 40 * 1024 * 1024
+      ) {
+        return false;
+      }
+      try {
+        const img = nativeImage.createFromDataURL(dataUrl);
+        if (img.isEmpty()) return false;
+        clipboard.writeImage(img);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  );
+
+  ipcMain.handle('set-app-hotkeys', async (event, rawBindings: unknown) => {
+    if (!isMainSender(event) || !Array.isArray(rawBindings)) {
+      return { registeredCount: 0 };
+    }
+    const sanitized: AppHotkeyBindingEntry[] = [];
+    for (const item of rawBindings.slice(0, 64)) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      if (
+        typeof rec.id === 'string' &&
+        typeof rec.cmd === 'string' &&
+        typeof rec.hotkey === 'string' &&
+        rec.cmd.trim() &&
+        rec.hotkey.trim() &&
+        !isUncPath(rec.cmd)
+      ) {
+        sanitized.push({
+          id: rec.id.slice(0, 128),
+          name: typeof rec.name === 'string' ? rec.name.slice(0, 128) : 'App',
+          cmd: rec.cmd.trim().slice(0, 1024),
+          args:
+            typeof rec.args === 'string' && rec.args.trim()
+              ? rec.args.trim().slice(0, 1024)
+              : undefined,
+          hotkey: rec.hotkey.trim().slice(0, 64),
+        });
+      }
+    }
+    const registeredCount = applyRegisteredAppHotkeys(sanitized);
+    return { registeredCount };
   });
 
   // Persistent disk cache for HuggingFace ONNX Whisper/Moonshine weights when running on packaged `file://` origin

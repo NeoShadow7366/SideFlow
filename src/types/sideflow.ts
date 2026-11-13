@@ -583,6 +583,14 @@ export interface AutoLaunchState {
   isPackaged: boolean;
 }
 
+export interface AppGlobalHotkeyBinding {
+  id: string;
+  name: string;
+  cmd: string;
+  args?: string;
+  hotkey: string;
+}
+
 export interface SideFlowElectronBridge {
   isElectron: boolean;
   launchNativeApp: (command: string, args?: string[]) => Promise<{ success: boolean; error?: string }>;
@@ -695,6 +703,13 @@ export interface SideFlowElectronBridge {
   clearSpellCheckerDictionary?: () => Promise<boolean>;
   setSpellCheckerLanguages?: (languages: string[]) => Promise<boolean>;
   replaceMisspelling?: (replacement: string) => Promise<boolean>;
+  writeClipboardImage?: (dataUrl: string) => Promise<boolean>;
+  setAppHotkeys?: (
+    bindings: AppGlobalHotkeyBinding[]
+  ) => Promise<{ registeredCount: number }>;
+  onAppHotkeyTriggered?: (
+    callback: (payload: { id: string; name: string; cmd: string }) => void
+  ) => () => void;
   onnxModelCacheGet?: (url: string) => Promise<{
     bytes: Uint8Array;
     headers: Record<string, string>;

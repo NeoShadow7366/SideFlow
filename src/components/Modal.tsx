@@ -26,6 +26,26 @@ const FOCUSABLE_SELECTOR = [
 
 let openModalCount = 0;
 
+/**
+ * Reference-counted guard that marks `document.body[data-sideflow-modal-open="true"]`
+ * while a `<Modal>` or native OS file/directory picker dialog is active so unpinned
+ * auto-hide blur listeners never retract the panel mid-dialog.
+ */
+export function acquireModalOpenGuard(): () => void {
+  if (typeof document === 'undefined') return () => {};
+  openModalCount += 1;
+  document.body.setAttribute('data-sideflow-modal-open', 'true');
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    openModalCount = Math.max(0, openModalCount - 1);
+    if (openModalCount === 0 && typeof document !== 'undefined') {
+      document.body.removeAttribute('data-sideflow-modal-open');
+    }
+  };
+}
+
 function getVisibleFocusables(panel: HTMLElement): HTMLElement[] {
   return Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
     (el) => {
@@ -34,6 +54,10 @@ function getVisibleFocusables(panel: HTMLElement): HTMLElement[] {
         return false;
       }
       if (el.classList.contains('hidden')) return false;
+      const hiddenAncestor = el.closest('[hidden], [aria-hidden="true"], .hidden');
+      if (hiddenAncestor && panel.contains(hiddenAncestor)) {
+        return false;
+      }
       const parentDetails = el.closest('details');
       if (parentDetails && !parentDetails.open && el.tagName !== 'SUMMARY') {
         return false;
@@ -69,8 +93,7 @@ export const Modal: React.FC<ModalProps> = ({
     if (!isOpen) return;
 
     previousFocusRef.current = document.activeElement as HTMLElement | null;
-    openModalCount += 1;
-    document.body.setAttribute('data-sideflow-modal-open', 'true');
+    const releaseModalGuard = acquireModalOpenGuard();
 
     // Ensure initial focus lands on initialFocusRef (if provided) or inside the modal
     const rafId = window.requestAnimationFrame(() => {
@@ -137,10 +160,7 @@ export const Modal: React.FC<ModalProps> = ({
     return () => {
       window.cancelAnimationFrame(rafId);
       window.removeEventListener('keydown', handleKeyDownCapture, true);
-      openModalCount = Math.max(0, openModalCount - 1);
-      if (openModalCount === 0) {
-        document.body.removeAttribute('data-sideflow-modal-open');
-      }
+      releaseModalGuard();
       const prevEl = previousFocusRef.current;
       if (prevEl && document.body.contains(prevEl)) {
         try {

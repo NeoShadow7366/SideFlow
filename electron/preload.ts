@@ -235,6 +235,19 @@ export interface SideFlowElectronAPI {
   clearSpellCheckerDictionary?: () => Promise<boolean>;
   setSpellCheckerLanguages?: (languages: string[]) => Promise<boolean>;
   replaceMisspelling?: (replacement: string) => Promise<boolean>;
+  writeClipboardImage?: (dataUrl: string) => Promise<boolean>;
+  setAppHotkeys?: (
+    bindings: Array<{
+      id: string;
+      name: string;
+      cmd: string;
+      args?: string;
+      hotkey: string;
+    }>
+  ) => Promise<{ registeredCount: number }>;
+  onAppHotkeyTriggered?: (
+    callback: (payload: { id: string; name: string; cmd: string }) => void
+  ) => () => void;
   onnxModelCacheGet?: (url: string) => Promise<{
     bytes: Uint8Array;
     headers: Record<string, string>;
@@ -380,6 +393,17 @@ const sideflowAPI: SideFlowElectronAPI = {
     ipcRenderer.invoke('spellcheck-set-languages', languages),
   replaceMisspelling: (replacement: string) =>
     ipcRenderer.invoke('spellcheck-replace-misspelling', replacement),
+  writeClipboardImage: (dataUrl: string) =>
+    ipcRenderer.invoke('clipboard-write-png-data-url', dataUrl),
+  setAppHotkeys: (bindings) => ipcRenderer.invoke('set-app-hotkeys', bindings),
+  onAppHotkeyTriggered: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: Parameters<typeof callback>[0]
+    ) => callback(payload);
+    ipcRenderer.on('app-hotkey-triggered', listener);
+    return () => ipcRenderer.removeListener('app-hotkey-triggered', listener);
+  },
   onnxModelCacheGet: (url: string) =>
     ipcRenderer.invoke('onnx-model-cache-get', url),
   onnxModelCachePut: (payload) =>
